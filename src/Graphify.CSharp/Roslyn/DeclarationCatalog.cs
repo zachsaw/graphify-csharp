@@ -14,7 +14,20 @@ public sealed class DeclarationCatalog
     {
         ArgumentNullException.ThrowIfNull(declarations);
 
-        var ordered = declarations
+        var supplied = declarations.ToArray();
+        var collision = supplied
+            .GroupBy(declaration => declaration.Identity.CanonicalKey, StringComparer.Ordinal)
+            .FirstOrDefault(group => group.Count() > 1);
+        if (collision is not null)
+        {
+            var details = string.Join(
+                " | ",
+                collision.Select(declaration =>
+                    $"{declaration.Symbol.ToDisplayString()} [{string.Join(", ", declaration.Symbol.Locations.Where(location => location.IsInSource).Select(location => location.SourceTree?.FilePath ?? "<unknown>"))}]"));
+            throw new InvalidOperationException($"Canonical symbol identity collision for '{collision.Key}': {details}");
+        }
+
+        var ordered = supplied
             .OrderBy(declaration => declaration.Identity.CanonicalKey, StringComparer.Ordinal)
             .ToImmutableArray();
         Declarations = ordered;

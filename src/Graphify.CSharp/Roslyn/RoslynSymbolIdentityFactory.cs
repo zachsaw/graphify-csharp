@@ -40,21 +40,26 @@ public sealed class RoslynSymbolIdentityFactory
         var kind = method.MethodKind is MethodKind.Constructor or MethodKind.StaticConstructor
             ? DomainSymbolKind.Constructor
             : DomainSymbolKind.Method;
-        var name = kind == DomainSymbolKind.Constructor ? ".ctor" : method.Name;
+        var name = method.MethodKind == MethodKind.StaticConstructor
+            ? ".cctor"
+            : kind == DomainSymbolKind.Constructor ? ".ctor" : method.Name;
 
         return new SymbolIdentity(
             project,
-            method.ContainingNamespace?.ToDisplayString(),
+            NamespaceOf(method),
             ContainingTypes(method.ContainingType),
             kind,
             name,
             method.Arity,
-            method.Parameters.Select(parameter => new ParameterIdentity(TypeName(parameter.Type), Modifier(parameter))));
+            method.Parameters.Select(parameter => new ParameterIdentity(TypeName(parameter.Type), Modifier(parameter))),
+            returnTypeName: method.MethodKind is MethodKind.Constructor or MethodKind.StaticConstructor
+                ? null
+                : TypeName(method.ReturnType));
     }
 
     private static SymbolIdentity CreateProperty(IPropertySymbol property, ProjectIdentity project) => new(
         project,
-        property.ContainingNamespace?.ToDisplayString(),
+        NamespaceOf(property),
         ContainingTypes(property.ContainingType),
         DomainSymbolKind.Property,
         property.Name,
@@ -62,7 +67,7 @@ public sealed class RoslynSymbolIdentityFactory
 
     private static SymbolIdentity CreateSimple(ISymbol symbol, ProjectIdentity project, DomainSymbolKind kind) => new(
         project,
-        symbol.ContainingNamespace?.ToDisplayString(),
+        NamespaceOf(symbol),
         ContainingTypes(symbol.ContainingType),
         kind,
         symbol.Name);
@@ -88,6 +93,11 @@ public sealed class RoslynSymbolIdentityFactory
     }
 
     private static string TypeName(ITypeSymbol type) => type.ToDisplayString(TypeDisplayFormat);
+
+    private static string? NamespaceOf(ISymbol symbol) =>
+        symbol.ContainingNamespace is null || symbol.ContainingNamespace.IsGlobalNamespace
+            ? null
+            : symbol.ContainingNamespace.ToDisplayString();
 
     private static ParameterModifier Modifier(IParameterSymbol parameter)
     {

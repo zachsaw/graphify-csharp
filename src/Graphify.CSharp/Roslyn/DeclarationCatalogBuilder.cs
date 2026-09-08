@@ -21,7 +21,14 @@ public sealed class DeclarationCatalogBuilder
         {
             cancellationToken.ThrowIfCancellationRequested();
             var locations = new SourceLocationFactory(solution.RepositoryRoot);
-            VisitNamespace(project.Compilation.GlobalNamespace, project.Identity, locations, declarations, cancellationToken);
+            var sourcePaths = project.Project.Documents
+                .Select(document => document.FilePath)
+                .OfType<string>()
+                .Select(Path.GetFullPath)
+                .ToHashSet(StringComparer.Ordinal);
+            var entryPoint = project.Compilation.GetEntryPoint(cancellationToken);
+            var entryPointIdentity = entryPoint is null ? null : _identityFactory.Create(entryPoint, project.Identity);
+            VisitNamespace(project.Compilation.GlobalNamespace, project.Identity, locations, sourcePaths, entryPointIdentity, declarations, cancellationToken);
         }
 
         return Task.FromResult(new DeclarationCatalog(declarations));
@@ -31,6 +38,8 @@ public sealed class DeclarationCatalogBuilder
         INamespaceSymbol @namespace,
         ProjectIdentity project,
         SourceLocationFactory locations,
+        IReadOnlySet<string> sourcePaths,
+        SymbolIdentity? entryPoint,
         ICollection<SymbolDeclaration> declarations,
         CancellationToken cancellationToken)
     {
@@ -40,10 +49,10 @@ public sealed class DeclarationCatalogBuilder
             switch (member)
             {
                 case INamespaceSymbol childNamespace:
-                    VisitNamespace(childNamespace, project, locations, declarations, cancellationToken);
+                    VisitNamespace(childNamespace, project, locations, sourcePaths, entryPoint, declarations, cancellationToken);
                     break;
                 case INamedTypeSymbol type:
-                    VisitType(type, project, locations, declarations, cancellationToken);
+                    VisitType(type, project, locations, sourcePaths, entryPoint, declarations, cancellationToken);
                     break;
             }
         }
@@ -53,25 +62,27 @@ public sealed class DeclarationCatalogBuilder
         INamedTypeSymbol type,
         ProjectIdentity project,
         SourceLocationFactory locations,
+        IReadOnlySet<string> sourcePaths,
+        SymbolIdentity? entryPoint,
         ICollection<SymbolDeclaration> declarations,
         CancellationToken cancellationToken)
     {
-        if (!IsSourceDeclaration(type))
+        if (!IsSourceDeclaration(type, sourcePaths))
         {
             return;
         }
 
-        Add(type, project, locations, declarations);
+        Add(type, project, locations, entryPoint, declarations);
         foreach (var member in type.GetMembers().OrderBy(member => member.ToDisplayString(), StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (member is INamedTypeSymbol nestedType)
             {
-                VisitType(nestedType, project, locations, declarations, cancellationToken);
+                VisitType(nestedType, project, locations, sourcePaths, entryPoint, declarations, cancellationToken);
             }
-            else if (IsSourceDeclaration(member) && IsSupportedMember(member))
+            else if (IsSourceDeclaration(member, sourcePaths) && IsSupportedMember(member))
             {
-                Add(member, project, locations, declarations);
+                Add(member, project, locations, entryPoint, declarations);
             }
         }
     }
@@ -80,14 +91,24 @@ public sealed class DeclarationCatalogBuilder
         ISymbol symbol,
         ProjectIdentity project,
         SourceLocationFactory locations,
+        SymbolIdentity? entryPoint,
         ICollection<SymbolDeclaration> declarations)
     {
         var identity = _identityFactory.Create(symbol, project);
-        var node = GraphNode.ForSymbol(identity, locations.CreateMany(symbol.Locations));
+        IEnumerable<KeyValuePair<string, string>>? properties = entryPoint is not null
+            && identity.Equals(entryPoint)
+            ? new[] { new KeyValuePair<string, string>("is_entry_point", "true") }
+            : null;
+        var node = GraphNode.ForSymbol(identity, locations.CreateMany(symbol.Locations), properties);
         declarations.Add(new SymbolDeclaration(symbol, identity, node));
     }
 
     private static bool IsSupportedMember(ISymbol symbol) => symbol is IMethodSymbol or IPropertySymbol or IFieldSymbol or IEventSymbol;
 
-    private static bool IsSourceDeclaration(ISymbol symbol) => !symbol.IsImplicitlyDeclared && symbol.Locations.Any(location => location.IsInSource);
+    private static bool IsSourceDeclaration(ISymbol symbol, IReadOnlySet<string> sourcePaths) =>
+        !symbol.IsImplicitlyDeclared
+        && symbol.Locations.Any(location =>
+            location.IsInSource
+            && location.SourceTree?.FilePath is string filePath
+            && sourcePaths.Contains(Path.GetFullPath(filePath)));
 }

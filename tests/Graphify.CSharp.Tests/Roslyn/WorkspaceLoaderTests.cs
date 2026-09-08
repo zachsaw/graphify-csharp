@@ -49,6 +49,11 @@ public sealed class WorkspaceLoaderTests
         var runInt = Assert.Single(methods, method => method.Identity.Parameters.Single().TypeName == "int");
         Assert.True(catalog.TryGet(runInt.Symbol, out var bySymbol));
         Assert.Equal(runInt.Identity.CanonicalKey, bySymbol.Identity.CanonicalKey);
+        Assert.Contains(catalog.Declarations, declaration => declaration.Identity.Name == ".cctor");
+        Assert.Contains(
+            catalog.Declarations,
+            declaration => declaration.Node.Properties.TryGetValue("is_entry_point", out var value)
+                && value == "true");
     }
 
     [Fact]

@@ -76,7 +76,8 @@ public sealed class SymbolIdentity : IEquatable<SymbolIdentity>
         SymbolKind kind,
         string name,
         int genericArity = 0,
-        IEnumerable<ParameterIdentity>? parameters = null)
+        IEnumerable<ParameterIdentity>? parameters = null,
+        string? returnTypeName = null)
     {
         Project = project ?? throw new ArgumentNullException(nameof(project));
         Namespace = CanonicalText.NormalizeNamespace(namespaceName);
@@ -88,6 +89,7 @@ public sealed class SymbolIdentity : IEquatable<SymbolIdentity>
         Name = name.Trim();
         GenericArity = genericArity;
         Parameters = (parameters ?? Array.Empty<ParameterIdentity>()).ToImmutableArray();
+        ReturnTypeName = string.IsNullOrWhiteSpace(returnTypeName) ? null : CanonicalText.NormalizeType(returnTypeName);
         CanonicalKey = BuildCanonicalKey();
     }
 
@@ -104,6 +106,8 @@ public sealed class SymbolIdentity : IEquatable<SymbolIdentity>
     public int GenericArity { get; }
 
     public ImmutableArray<ParameterIdentity> Parameters { get; }
+
+    public string? ReturnTypeName { get; }
 
     public string CanonicalKey { get; }
 
@@ -148,6 +152,7 @@ public sealed class SymbolIdentity : IEquatable<SymbolIdentity>
             $"type={CanonicalText.Escape(containingTypes)}",
             $"name={CanonicalText.Escape(Name)}",
             $"arity={GenericArity}",
-            $"params={CanonicalText.Escape(parameters)}");
+            $"params={CanonicalText.Escape(parameters)}",
+            $"return={CanonicalText.Escape(ReturnTypeName ?? string.Empty)}");
     }
 }

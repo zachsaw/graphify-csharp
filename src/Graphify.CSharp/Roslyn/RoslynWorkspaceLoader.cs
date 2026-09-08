@@ -32,6 +32,7 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
         {
             var projects = await OpenProjectsAsync(workspace, request, cancellationToken).ConfigureAwait(false);
             var analyzedProjects = new List<AnalyzedProject>(projects.Count);
+            var seenProjectKeys = new HashSet<string>(StringComparer.Ordinal);
             foreach (var project in projects.OrderBy(project => project.FilePath ?? project.Name, StringComparer.Ordinal))
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -49,6 +50,11 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
 
                 var projectPath = project.FilePath ?? throw new InvalidOperationException($"Project '{project.Name}' has no file path.");
                 var identity = Domain.ProjectIdentity.FromPath(projectPath, request.RepositoryRoot, request.TargetFramework);
+                if (!seenProjectKeys.Add(identity.Key))
+                {
+                    continue;
+                }
+
                 analyzedProjects.Add(new AnalyzedProject(project, identity, compilation));
             }
 

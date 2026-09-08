@@ -52,6 +52,30 @@ public sealed class SymbolIdentityTests
     }
 
     [Fact]
+    public void Canonical_key_distinguishes_conversion_operators_by_return_type()
+    {
+        var first = new SymbolIdentity(
+            Project,
+            "Company.Product",
+            [new ContainingTypeIdentity("Numeric")],
+            SymbolKind.Method,
+            "op_CheckedExplicit",
+            parameters: [new ParameterIdentity("Company.Product.Numeric")],
+            returnTypeName: "int");
+        var second = new SymbolIdentity(
+            Project,
+            "Company.Product",
+            [new ContainingTypeIdentity("Numeric")],
+            SymbolKind.Method,
+            "op_CheckedExplicit",
+            parameters: [new ParameterIdentity("Company.Product.Numeric")],
+            returnTypeName: "long");
+
+        Assert.NotEqual(first.CanonicalKey, second.CanonicalKey);
+        Assert.NotEqual(NodeId.ForSymbol(first), NodeId.ForSymbol(second));
+    }
+
+    [Fact]
     public void Project_identity_is_repository_relative_and_uses_forward_slashes()
     {
         var identity = ProjectIdentity.FromPath("/repo/src\\App\\App.csproj", "/repo", "net10.0");
