@@ -113,14 +113,14 @@ jobs:
         run: ./scripts/check-deterministic-extraction.sh --input tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj --root . --configuration Release
 
       - name: Get NuGet Trusted Publishing credential
-        id: nuget-login
+        id: login
         uses: NuGet/login@v1
         with:
-          user: ${{ secrets.NUGET_USER }}
+          user: ${{ secrets.NUGET_USER || vars.NUGET_USER || github.repository_owner }}
 
       - name: Publish to NuGet.org
         env:
-          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+          NUGET_API_KEY: ${{ steps.login.outputs.NUGET_API_KEY }}
           PACKAGE_PATH: ${{ steps.package.outputs.path }}
         shell: bash
         run: |
