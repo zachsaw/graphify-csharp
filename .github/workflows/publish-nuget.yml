@@ -1,0 +1,126 @@
+name: Publish NuGet package
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nuget-publish-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Validate and publish
+    runs-on: ubuntu-latest
+    environment:
+      name: nuget
+      url: https://www.nuget.org/packages/Graphify.CSharp
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Derive release version
+        id: version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          if [[ "$RELEASE_TAG" == "$version" || ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag '$RELEASE_TAG' is not a supported NuGet semantic version tag (expected vX.Y.Z)." >&2
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+          echo "Release version: $version"
+
+      - name: Restore
+        run: dotnet restore Graphify.CSharp.sln
+
+      - name: Build
+        run: dotnet build Graphify.CSharp.sln --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test Graphify.CSharp.sln --configuration Release --no-build --no-restore
+
+      - name: Vulnerability check
+        run: dotnet list src/Graphify.CSharp/Graphify.CSharp.csproj package --vulnerable --include-transitive
+
+      - name: Pack tagged version
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.value }}
+        run: >-
+          dotnet pack src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj
+          --configuration Release
+          --no-build
+          --no-restore
+          --output artifacts
+          -p:Version="$PACKAGE_VERSION"
+          -p:PackageVersion="$PACKAGE_VERSION"
+
+      - name: Verify package artifact
+        id: package
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.value }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_path="artifacts/Graphify.CSharp.${PACKAGE_VERSION}.nupkg"
+          test -f "$package_path"
+          echo "path=$package_path" >> "$GITHUB_OUTPUT"
+          unzip -l "$package_path"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Graphify.CSharp-${{ steps.version.outputs.value }}
+          path: ${{ steps.package.outputs.path }}
+          if-no-files-found: error
+
+      - name: Install packed tool
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.value }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_dir="${RUNNER_TEMP}/graphify-csharp-tool"
+          dotnet tool install \
+            --tool-path "$tool_dir" \
+            --add-source artifacts \
+            --ignore-failed-sources \
+            Graphify.CSharp \
+            --version "$PACKAGE_VERSION"
+          "$tool_dir/graphify-csharp" \
+            --input tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj \
+            --root . \
+            --configuration Release \
+            --output "$tool_dir/output.json"
+
+      - name: Verify deterministic fixture extraction
+        run: ./scripts/check-deterministic-extraction.sh --input tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj --root . --configuration Release
+
+      - name: Publish to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          PACKAGE_PATH: ${{ steps.package.outputs.path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$NUGET_API_KEY" || {
+            echo 'NUGET_API_KEY is not configured on the nuget environment or repository.' >&2
+            exit 1
+          }
+          dotnet nuget push "$PACKAGE_PATH" \
+            --api-key "$NUGET_API_KEY" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate
