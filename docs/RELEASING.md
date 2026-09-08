@@ -9,19 +9,22 @@ package-smoke, and determinism gates used by CI.
 
 1. Create or sign in to the NuGet.org account that should own
    `Graphify.CSharp`.
-2. In NuGet.org, create an API key with the `Push` scope, restricted to the
-   `Graphify.CSharp` package, and give it an expiry date. Do not commit or paste
-   the key into workflow files.
+2. In NuGet.org, add a Trusted Publishing policy for the GitHub repository.
+   Enter the repository owner and name, the workflow filename
+   `publish-nuget.yml` (without `.github/workflows/`), and the GitHub Actions
+   environment `nuget`. The policy must match the workflow that performs the
+   publish.
 3. In the repository settings, create a GitHub Actions environment named
-   `nuget` and add an environment secret named `NUGET_API_KEY`. If environment
-   secrets are unavailable on the repository’s GitHub plan, add the same secret
-   as a repository Actions secret instead. A protected environment with a
-   required reviewer is recommended before the first public release.
+   `nuget` and add an environment secret named `NUGET_USER` containing the
+   NuGet.org profile name, not the account email. A protected environment with
+   a required reviewer is recommended before the first public release.
 4. Confirm that `origin` points at the repository that contains this workflow.
 
-The workflow only grants the job read access to repository contents. The NuGet
-secret is made available only to the publish job, after any environment
-approval.
+The workflow requests the `id-token: write` permission and uses
+`NuGet/login@v1` immediately before publishing. NuGet exchanges the GitHub OIDC
+token for a short-lived credential; no long-lived NuGet API key is stored in
+GitHub. The temporary credential is still passed to `dotnet nuget push`, as
+required by NuGet’s publishing protocol, and expires after the workflow.
 
 ## Release a version
 
@@ -41,9 +44,9 @@ Create a release with:
 Publishing the release starts `Publish NuGet package`. It checks out the
 release tag, validates the version, runs the build/test/vulnerability gates,
 packs with that exact version, installs the local package into a temporary tool
-path, runs the fixture smoke test, checks repeatability, and then pushes the
-package to NuGet.org. The package artifact is retained on the workflow run for
-inspection.
+path, runs the fixture smoke test, checks repeatability, obtains a short-lived
+Trusted Publishing credential, and then pushes the package to NuGet.org. The
+package artifact is retained on the workflow run for inspection.
 
 NuGet package versions are immutable. If a publish needs to be retried, rerun
 the same workflow only when the package contents are unchanged; otherwise use

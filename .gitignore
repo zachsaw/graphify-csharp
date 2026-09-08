@@ -3,7 +3,7 @@
 .idea/
 .vs/
 TestResults/
+graphify-out/
 *.user
 *.suo
 .DS_Store
-
