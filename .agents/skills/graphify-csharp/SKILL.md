@@ -119,7 +119,7 @@ Static absence is not proof of runtime absence. Distinguish at least:
 - symbols outside the analyzed source boundary.
 
 Do not pretend that a full call graph can resolve arbitrary reflection, DI,
-function pointers, P/Invoke, or host/Wasm callbacks. Make those limits visible
+function pointers, P/Invoke, or host callbacks. Make those limits visible
 in diagnostics and documentation; leave policy-specific roots to the consumer.
 
 ## Verification
