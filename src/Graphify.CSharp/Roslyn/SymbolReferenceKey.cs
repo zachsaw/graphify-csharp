@@ -8,17 +8,6 @@ internal static class SymbolReferenceKey
     private static readonly RoslynSymbolIdentityFactory IdentityFactory = new();
     private static readonly ProjectIdentity ReferenceProject = new("__reference__.csproj", "__reference__");
 
-    public static string Create(ISymbol symbol)
-    {
-        ArgumentNullException.ThrowIfNull(symbol);
-        if (!TryCreate(symbol, out var referenceKey))
-        {
-            throw new ArgumentException($"Unsupported reference symbol '{symbol.Kind}'.", nameof(symbol));
-        }
-
-        return referenceKey;
-    }
-
     public static bool TryCreate(ISymbol symbol, out string referenceKey)
     {
         ArgumentNullException.ThrowIfNull(symbol);
