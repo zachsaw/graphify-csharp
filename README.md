@@ -21,6 +21,63 @@ graphify-csharp \
   --output ./graphify-out/csharp.json
 ```
 
+## Integrate with Graphify
+
+Run the enricher from the root of the repository being analyzed, before every
+Graphify rebuild. The output is already Graphify extraction JSON, so Graphify
+can build its directed graph from the file:
+
+```text
+dotnet tool install --global Graphify.CSharp
+
+graphify-csharp \
+  --input ./src/MyProduct.sln \
+  --root . \
+  --configuration Release \
+  --output ./graphify-out/csharp.json
+
+graphify query "Which methods call the service?" \
+  --graph ./graphify-out/csharp.json
+```
+
+For a normal C# repository, make those commands the repository’s Graphify
+entry point so the semantic enricher runs every time. For example, save this
+as `scripts/graphify-csharp.sh` and use it instead of calling `graphify`
+directly:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+input="${GRAPHIFY_CSHARP_INPUT:-$root/src/MyProduct.sln}"
+output="$root/graphify-out/csharp.json"
+
+graphify-csharp \
+  --input "$input" \
+  --root "$root" \
+  --configuration "${GRAPHIFY_CSHARP_CONFIGURATION:-Release}" \
+  --output "$output"
+
+exec graphify query "$@" --graph "$output"
+```
+
+Make it executable with `chmod +x scripts/graphify-csharp.sh`, then run
+`scripts/graphify-csharp.sh "Which methods call the service?"`. The wrapper
+regenerates the semantic layer before every query. If your Graphify workflow
+uses `extract`, `path`, `explain`, or an export command instead, keep the same
+first `graphify-csharp` step and pass `--graph ./graphify-out/csharp.json` to
+that command.
+
+The raw `csharp.json` file is the authoritative C# evidence and preserves
+parallel relationships such as `calls` and `overrides`. Graphify’s clustered
+NetworkX view may normalize multiple relationships between the same endpoints
+into one edge, so retain the raw file when an audit depends on relation-level
+detail. If the repository also contains non-C# material, keep its normal
+Graphify extraction as a separate graph and merge the two Graphify JSON
+documents with Graphify’s `merge-graphs` command. Do not merge this output
+with a name-only C# extraction without an explicit ID-join policy.
+
 The package is currently built from this repository as version `0.1.0` while
 the API and Graphify integration settle. For local development, replace the
 install command with:
@@ -84,4 +141,5 @@ The implementation slices and acceptance gates are in [PLAN.md](PLAN.md). The
 repository’s reusable development contract is in
 [.agents/skills/graphify-csharp/SKILL.md](.agents/skills/graphify-csharp/SKILL.md).
 See [docs/USAGE.md](docs/USAGE.md) for output details and
-[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the supported v0.1 path.
+[docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the supported v0.1 path, and
+[docs/RELEASING.md](docs/RELEASING.md) for NuGet publishing setup.

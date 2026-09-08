@@ -22,6 +22,8 @@ public sealed class GraphifyJsonSerializerTests
         var json = new GraphifyJsonSerializer().Serialize(graph);
         using var document = JsonDocument.Parse(json);
 
+        Assert.True(document.RootElement.GetProperty("directed").GetBoolean());
+        Assert.True(document.RootElement.GetProperty("multigraph").GetBoolean());
         Assert.Equal(JsonValueKind.Array, document.RootElement.GetProperty("nodes").ValueKind);
         Assert.Equal(JsonValueKind.Array, document.RootElement.GetProperty("edges").ValueKind);
         Assert.Equal(JsonValueKind.Array, document.RootElement.GetProperty("hyperedges").ValueKind);

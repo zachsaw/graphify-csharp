@@ -4,6 +4,12 @@ namespace Graphify.CSharp.Graphify;
 
 public sealed class GraphifyExtractionDocument
 {
+    [JsonPropertyName("directed")]
+    public bool Directed { get; init; } = true;
+
+    [JsonPropertyName("multigraph")]
+    public bool Multigraph { get; init; } = true;
+
     [JsonPropertyName("nodes")]
     public required IReadOnlyList<GraphifyNodeDto> Nodes { get; init; }
 

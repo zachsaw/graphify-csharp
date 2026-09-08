@@ -67,11 +67,27 @@ or whether code is safe to delete.
 
 The file is valid Graphify extraction JSON: it has the base `nodes`, `edges`, and
 `hyperedges` arrays, required `file_type`/`source_file` node fields, and the
-required edge confidence fields. Use Graphify’s directed mode for caller/callee
-questions. The semantic node IDs are stable hashes of full C# symbol keys, so
-this output is intended to be the authoritative C# semantic extraction for the
-selected scope; merging it with a name-only C# extraction requires an explicit
-ID-join layer.
+required edge confidence fields. It also marks itself as directed and
+multigraph so Graphify’s raw JSON loader preserves edge direction and parallel
+relationships. Generate the file before each Graphify query or export:
+
+```text
+graphify-csharp \
+  --input ./src/Product/Product.sln \
+  --root . \
+  --configuration Release \
+  --output ./graphify-out/csharp.json
+
+graphify query "Which methods call the service?" \
+  --graph ./graphify-out/csharp.json
+```
+
+The semantic node IDs are stable hashes of full C# symbol keys, so this output
+is intended to be the authoritative C# semantic extraction for the selected
+scope; merging it with a name-only C# extraction requires an explicit ID-join
+layer. Graphify’s clustered NetworkX view can normalize multiple relationships
+between the same endpoints; retain `csharp.json` when relation-level evidence
+matters.
 
 ## Known limitations
 
