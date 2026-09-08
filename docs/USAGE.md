@@ -34,6 +34,15 @@ reports. The TFM selector is optional for single-target projects. For a
 multi-target project, specify one TFM; the tool refuses to silently merge
 different compilations.
 
+To check repeatability, run the local CLI twice and compare the complete output:
+
+```text
+./scripts/check-deterministic-extraction.sh \
+  --input ./src/Product/Product.sln \
+  --root . \
+  --configuration Release
+```
+
 ## Read the graph
 
 Nodes contain stable C# properties:
@@ -68,6 +77,6 @@ ID-join layer.
 
 The extractor follows Roslyn-resolved source symbols. It does not claim to
 resolve arbitrary reflection strings, DI registrations, function pointers,
-P/Invoke, generated code excluded by the project, or host/Wasm callbacks. Add
+P/Invoke, generated code excluded by the project, or host callbacks. Add
 consumer-specific roots and policies in downstream analysis, and review static
 limitations before acting on zero-inbound-reference results.

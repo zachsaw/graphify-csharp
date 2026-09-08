@@ -37,6 +37,23 @@ not require 100% code coverage; it does require focused coverage of identity,
 edge direction, serialization, determinism, TFM selection, and representative
 Roslyn language constructs.
 
+### Pragmatic fast go-to-market
+
+Treat test depth as a risk decision, not a coverage contest. For a documentation
+or help-text change, use a diff check and the smallest relevant smoke check. For
+isolated parsing or serialization, add focused unit tests and at least one
+failure case. For semantic identity, Roslyn resolution, project/TFM loading,
+edge direction, or schema changes, require focused regression tests plus an
+end-to-end fixture and a determinism check. These are the areas where a small
+bug can invalidate the whole graph.
+
+Run the narrow tests while iterating so feedback stays fast. Run the full suite,
+Release build, package/install smoke test, and representative real-solution
+determinism check at slice or release boundaries, or earlier when the change has
+high blast radius. Do not allow more than one logical slice of unverified
+behavior to accumulate. Record deliberately deferred coverage or known dynamic
+limitations in the plan/docs instead of silently weakening the contract.
+
 ## Design rules
 
 ### Keep actors small
@@ -123,9 +140,10 @@ optional TFM selector that becomes mandatory when target selection is
 ambiguous. Do not rely on Rider for correctness or CI; Rider/InspectCode may be
 used as an optional independent comparison during investigation.
 
-Before each slice commit, run the narrow tests first, then the full test suite,
-`dotnet build`, and `git diff --check`. Record known limitations instead of
-weakening the semantic contract to make a test pass.
+Before a slice commit, run its narrow tests, a build when code compilation is
+affected, and `git diff --check`. Before a release or merge milestone, run the
+full suite and the release gates described above. Record known limitations
+instead of weakening the semantic contract to make a test pass.
 
 ## Graphify integration
 

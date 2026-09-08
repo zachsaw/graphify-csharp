@@ -44,9 +44,9 @@ and target framework. `graphify_csharp` contains only the versioned extractor
 metadata and loader diagnostics.
 
 The enricher does not classify callers or decide whether a declaration is safe
-to remove. Reflection, dependency injection, generated code, native/Wasm
-callbacks, and other runtime mechanisms are outside static extraction and must
-be handled by the consuming analysis.
+to remove. Reflection, dependency injection, generated code, native callbacks,
+and other runtime mechanisms are outside static extraction and must be handled
+by the consuming analysis.
 
 ## Scope of v0.1
 
@@ -69,6 +69,15 @@ bounded in v0.1 and will be added only with explicit provenance and fixtures.
 dotnet test Graphify.CSharp.sln --configuration Release
 dotnet build Graphify.CSharp.sln --configuration Release
 dotnet pack src/Graphify.CSharp.Cli --configuration Release
+```
+
+To verify byte-for-byte repeatability against a fixture or another solution:
+
+```text
+./scripts/check-deterministic-extraction.sh \
+  --input ./src/MyProduct/MyProduct.sln \
+  --root . \
+  --configuration Release
 ```
 
 The implementation slices and acceptance gates are in [PLAN.md](PLAN.md). The

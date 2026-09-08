@@ -34,3 +34,6 @@ jobs:
 
       - name: Pack
         run: dotnet pack src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj --configuration Release --no-build --no-restore --output artifacts
+
+      - name: Verify deterministic fixture extraction
+        run: ./scripts/check-deterministic-extraction.sh --input tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj --root . --configuration Release

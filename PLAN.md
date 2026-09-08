@@ -17,8 +17,8 @@ directed graph and node metadata. This repository does not classify callers or
 apply repository-specific test/production policies.
 
 The first release is intentionally narrower than a whole-program runtime
-reachability proof. Reflection, dependency injection, native/Wasm calls, and
-other dynamic mechanisms remain visible as limitations of static extraction;
+reachability proof. Reflection, dependency injection, native calls, and other
+dynamic mechanisms remain visible as limitations of static extraction;
 they are not guessed into the graph.
 
 ## Delivery principles
@@ -80,7 +80,7 @@ stable ordering without Roslyn or MSBuild.
 
 Commit: `feat: add deterministic graph domain model`
 
-### 3. Roslyn project loading and declaration catalog — in progress
+### 3. Roslyn project loading and declaration catalog — complete
 
 Deliver a headless loader for an explicit `.sln`, `.slnx`, or `.csproj` and a
 catalog of source declarations. Record project and target-framework context;
@@ -109,7 +109,7 @@ deterministic across repeated runs.
 
 Commit: `feat: extract deterministic CSharp semantic references`
 
-### 5. Graphify serialization and command-line interface — in progress
+### 5. Graphify serialization and command-line interface — complete
 
 Deliver Graphify-compatible JSON, a versioned metadata envelope where needed,
 stable ordering, diagnostics, and a headless command that accepts the solution,
@@ -122,18 +122,17 @@ actionable diagnostics and a non-zero exit code.
 
 Commit: `refactor: keep analysis downstream of enricher`
 
-### 6. Real-solution determinism and OSS release hardening — next
+### 6. Real-solution determinism and OSS release hardening — complete
 
-Deliver a real-solution smoke test, repeated-run byte determinism check,
-packaging, usage documentation, CI for supported SDKs, and a small
-compatibility matrix. Keep optional dispatch expansion and advanced reflection
-heuristics out of the critical release path unless the direct graph reveals a
-concrete need.
+Deliver a reusable repeated-run byte determinism check, packaging, usage
+documentation, CI for the supported SDK, and a small compatibility matrix. Keep
+optional dispatch expansion and advanced reflection heuristics out of the
+critical release path unless the direct graph reveals a concrete need.
 
 Gate: clean checkout build/test, package install/run smoke test, and documented
 known limitations.
 
-Commit: `docs: prepare Graphify CSharp enricher release`
+Commit: `chore: add deterministic extraction release gates`
 
 ## Explicit non-goals for v1
 
