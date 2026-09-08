@@ -163,21 +163,21 @@ To verify byte-for-byte repeatability against a fixture or another solution:
   --configuration Release
 ```
 
-The pinned real-world semantic end-to-end gate clones a third-party C# project
-into the ignored `.e2e/` directory, restores its selected TFM, checks multiple
-declaration kinds and relationships, and runs extraction twice:
+The pinned real-world semantic end-to-end gate restores, builds, and tests this
+solution, packs the CLI, installs that package into an isolated temporary tool
+directory, then clones a third-party C# project into the ignored `.e2e/`
+directory, checks multiple declaration kinds and relationships, and runs
+extraction twice:
 
 ```text
 ./scripts/run-real-world-e2e.sh
 ```
 
-By default it runs the current checkout. To validate a packed or globally
-installed tool, provide its executable explicitly:
-
-```text
-GRAPHIFY_CSHARP_TOOL="$HOME/.dotnet/tools/graphify-csharp" \
-  ./scripts/run-real-world-e2e.sh
-```
+The temporary feed and tool directory are removed on exit; the pinned source
+checkout and Graphify output remain under `.e2e/` for inspection. Override the
+fixture URL, commit, TFM, configuration, or local package version with the
+`GRAPHIFY_CSHARP_E2E_*` environment variables when testing another pinned
+fixture.
 
 The implementation slices and acceptance gates are in [PLAN.md](PLAN.md). The
 repository’s reusable development contract is in
