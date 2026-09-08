@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-pack:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Restore
+        run: dotnet restore Graphify.CSharp.sln
+
+      - name: Build
+        run: dotnet build Graphify.CSharp.sln --configuration Release --no-restore
+
+      - name: Test
+        run: dotnet test Graphify.CSharp.sln --configuration Release --no-build --no-restore
+
+      - name: Vulnerability check
+        run: dotnet list src/Graphify.CSharp/Graphify.CSharp.csproj package --vulnerable --include-transitive
+
+      - name: Pack
+        run: dotnet pack src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj --configuration Release --no-build --no-restore --output artifacts

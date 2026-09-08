@@ -8,9 +8,22 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <RootNamespace>Graphify.CSharp.Cli</RootNamespace>
     <AssemblyName>graphify-csharp</AssemblyName>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>graphify-csharp</ToolCommandName>
+    <PackageId>Graphify.CSharp</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Zach Saw</Authors>
+    <Description>Roslyn-backed semantic C# caller and reference enricher for Graphify.</Description>
+    <PackageTags>graphify;csharp;roslyn;static-analysis;call-graph</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/zachsaw/graphify-csharp</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/zachsaw/graphify-csharp</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../Graphify.CSharp/Graphify.CSharp.csproj" />
+    <None Include="../../README.md" Pack="true" PackagePath="README.md" />
   </ItemGroup>
 </Project>

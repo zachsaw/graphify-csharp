@@ -98,7 +98,7 @@ invalid input produces actionable diagnostics and a non-zero exit code.
 
 Commit: `feat: emit Graphify CSharp enrichment output`
 
-### 7. OSS release hardening — next
+### 7. OSS release hardening — complete
 
 Deliver packaging, usage documentation, sample output, CI for supported SDKs,
 and a small compatibility matrix. Keep optional dispatch expansion and advanced

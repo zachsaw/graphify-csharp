@@ -7,6 +7,8 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <RootNamespace>Graphify.CSharp</RootNamespace>
     <AssemblyName>Graphify.CSharp</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <PackageId>Graphify.CSharp.Core</PackageId>
   </PropertyGroup>
 
   <ItemGroup>
