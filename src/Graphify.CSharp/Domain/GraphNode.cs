@@ -12,6 +12,12 @@ public enum GraphNodeKind
     Property,
     Field,
     Event,
+    Parameter,
+    Local,
+    RangeVariable,
+    TypeParameter,
+    Label,
+    Alias,
     ExternalRoot,
 }
 
@@ -65,6 +71,12 @@ public sealed class GraphNode
             SymbolKind.Property => GraphNodeKind.Property,
             SymbolKind.Field => GraphNodeKind.Field,
             SymbolKind.Event => GraphNodeKind.Event,
+            SymbolKind.Parameter => GraphNodeKind.Parameter,
+            SymbolKind.Local => GraphNodeKind.Local,
+            SymbolKind.RangeVariable => GraphNodeKind.RangeVariable,
+            SymbolKind.TypeParameter => GraphNodeKind.TypeParameter,
+            SymbolKind.Label => GraphNodeKind.Label,
+            SymbolKind.Alias => GraphNodeKind.Alias,
             _ => throw new ArgumentOutOfRangeException(nameof(symbol), symbol.Kind, "Unknown symbol kind."),
         };
 

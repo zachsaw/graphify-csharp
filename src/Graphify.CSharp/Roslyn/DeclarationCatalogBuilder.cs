@@ -1,6 +1,5 @@
 using Graphify.CSharp.Domain;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.CSharp.Syntax;
 
 namespace Graphify.CSharp.Roslyn;
 
@@ -29,11 +28,27 @@ public sealed class DeclarationCatalogBuilder
                 .Select(Path.GetFullPath)
                 .ToHashSet(StringComparer.Ordinal);
             var entryPoint = project.Compilation.GetEntryPoint(cancellationToken);
-            var entryPointIdentity = entryPoint is null ? null : _identityFactory.Create(entryPoint, project.Identity);
+            var entryPointIdentity = entryPoint is null
+                ? null
+                : _identityFactory.Create(entryPoint, project.Identity, solution.RepositoryRoot);
+
+            if (entryPoint is { IsImplicitlyDeclared: true }
+                && IsSourceDeclaration(entryPoint, sourcePaths, allowImplicit: true))
+            {
+                Add(
+                    entryPoint,
+                    project.Identity,
+                    solution.RepositoryRoot,
+                    locations,
+                    entryPointIdentity,
+                    declarations,
+                    seenSymbols);
+            }
 
             VisitNamespace(
                 project.Compilation.GlobalNamespace,
                 project.Identity,
+                solution.RepositoryRoot,
                 locations,
                 sourcePaths,
                 entryPointIdentity,
@@ -41,10 +56,12 @@ public sealed class DeclarationCatalogBuilder
                 seenSymbols,
                 cancellationToken);
 
-            await AddLocalFunctionsAsync(
+            await AddSyntaxDeclarationsAsync(
                 project,
+                solution.RepositoryRoot,
                 locations,
                 sourcePaths,
+                entryPoint,
                 entryPointIdentity,
                 declarations,
                 seenSymbols,
@@ -57,6 +74,7 @@ public sealed class DeclarationCatalogBuilder
     private void VisitNamespace(
         INamespaceSymbol @namespace,
         ProjectIdentity project,
+        string repositoryRoot,
         SourceLocationFactory locations,
         IReadOnlySet<string> sourcePaths,
         SymbolIdentity? entryPoint,
@@ -66,7 +84,7 @@ public sealed class DeclarationCatalogBuilder
     {
         if (!@namespace.IsGlobalNamespace && IsSourceDeclaration(@namespace, sourcePaths))
         {
-            Add(@namespace, project, locations, entryPoint, declarations, seenSymbols);
+            Add(@namespace, project, repositoryRoot, locations, entryPoint, declarations, seenSymbols);
         }
 
         foreach (var member in @namespace.GetMembers())
@@ -75,10 +93,10 @@ public sealed class DeclarationCatalogBuilder
             switch (member)
             {
                 case INamespaceSymbol childNamespace:
-                    VisitNamespace(childNamespace, project, locations, sourcePaths, entryPoint, declarations, seenSymbols, cancellationToken);
+                    VisitNamespace(childNamespace, project, repositoryRoot, locations, sourcePaths, entryPoint, declarations, seenSymbols, cancellationToken);
                     break;
                 case INamedTypeSymbol type:
-                    VisitType(type, project, locations, sourcePaths, entryPoint, declarations, seenSymbols, cancellationToken);
+                    VisitType(type, project, repositoryRoot, locations, sourcePaths, entryPoint, declarations, seenSymbols, cancellationToken);
                     break;
             }
         }
@@ -87,6 +105,7 @@ public sealed class DeclarationCatalogBuilder
     private void VisitType(
         INamedTypeSymbol type,
         ProjectIdentity project,
+        string repositoryRoot,
         SourceLocationFactory locations,
         IReadOnlySet<string> sourcePaths,
         SymbolIdentity? entryPoint,
@@ -99,48 +118,45 @@ public sealed class DeclarationCatalogBuilder
             return;
         }
 
-        Add(type, project, locations, entryPoint, declarations, seenSymbols);
+        Add(type, project, repositoryRoot, locations, entryPoint, declarations, seenSymbols);
         foreach (var member in type.GetMembers())
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (member is INamedTypeSymbol nestedType)
             {
-                VisitType(nestedType, project, locations, sourcePaths, entryPoint, declarations, seenSymbols, cancellationToken);
+                VisitType(nestedType, project, repositoryRoot, locations, sourcePaths, entryPoint, declarations, seenSymbols, cancellationToken);
             }
             else if (IsSourceDeclaration(member, sourcePaths) && IsSupportedMember(member))
             {
-                Add(member, project, locations, entryPoint, declarations, seenSymbols);
+                Add(member, project, repositoryRoot, locations, entryPoint, declarations, seenSymbols);
             }
         }
     }
 
-    private async Task AddLocalFunctionsAsync(
+    private async Task AddSyntaxDeclarationsAsync(
         AnalyzedProject project,
+        string repositoryRoot,
         SourceLocationFactory locations,
         IReadOnlySet<string> sourcePaths,
+        IMethodSymbol? entryPointSymbol,
         SymbolIdentity? entryPoint,
         ICollection<SymbolDeclaration> declarations,
         ISet<ISymbol> seenSymbols,
         CancellationToken cancellationToken)
     {
-        foreach (var document in project.Project.Documents.OrderBy(document => document.FilePath ?? document.Name, StringComparer.Ordinal))
+        var syntaxDeclarations = await new SourceDeclarationCollector()
+            .CollectAsync(project, cancellationToken)
+            .ConfigureAwait(false);
+        foreach (var symbol in syntaxDeclarations)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var root = await document.GetSyntaxRootAsync(cancellationToken).ConfigureAwait(false);
-            if (root is null)
+            var isEntryPoint = entryPoint is not null
+                && entryPointSymbol is not null
+                && SymbolEqualityComparer.Default.Equals(symbol, entryPointSymbol)
+                && IsSourceDeclaration(symbol, sourcePaths, allowImplicit: true);
+            if (isEntryPoint || IsSourceDeclaration(symbol, sourcePaths))
             {
-                continue;
-            }
-
-            var semanticModel = project.Compilation.GetSemanticModel(root.SyntaxTree);
-            foreach (var localFunction in root.DescendantNodes().OfType<LocalFunctionStatementSyntax>())
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var symbol = semanticModel.GetDeclaredSymbol(localFunction, cancellationToken);
-                if (symbol is not null && IsSourceDeclaration(symbol, sourcePaths))
-                {
-                    Add(symbol, project.Identity, locations, entryPoint, declarations, seenSymbols);
-                }
+                Add(symbol, project.Identity, repositoryRoot, locations, entryPoint, declarations, seenSymbols);
             }
         }
     }
@@ -150,6 +166,7 @@ public sealed class DeclarationCatalogBuilder
     private void Add(
         ISymbol symbol,
         ProjectIdentity project,
+        string repositoryRoot,
         SourceLocationFactory locations,
         SymbolIdentity? entryPoint,
         ICollection<SymbolDeclaration> declarations,
@@ -160,7 +177,17 @@ public sealed class DeclarationCatalogBuilder
             return;
         }
 
-        var identity = _identityFactory.Create(symbol, project);
+        SymbolIdentity identity;
+        try
+        {
+            identity = _identityFactory.Create(symbol, project, repositoryRoot);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new InvalidOperationException(
+                $"Could not create a stable identity for source symbol '{symbol.ToDisplayString()}' ({symbol.Kind}).",
+                exception);
+        }
         var properties = new List<KeyValuePair<string, string>>
         {
             new("declaration_kind", DeclarationKind(symbol)),
@@ -171,25 +198,50 @@ public sealed class DeclarationCatalogBuilder
         }
 
         var node = GraphNode.ForSymbol(identity, locations.CreateMany(symbol.Locations), properties);
-        declarations.Add(new SymbolDeclaration(symbol, identity, node, SymbolReferenceKey.Create(symbol)));
+        var referenceKey = SymbolReferenceKey.TryCreate(symbol, out var projectIndependentKey)
+            ? projectIndependentKey
+            : null;
+        declarations.Add(new SymbolDeclaration(symbol, identity, node, referenceKey));
     }
 
     private static string DeclarationKind(ISymbol symbol) => symbol switch
     {
         INamespaceSymbol => "namespace",
-        INamedTypeSymbol type => type.TypeKind.ToString().ToLowerInvariant(),
+        INamedTypeSymbol type => type.IsRecord
+            ? type.IsValueType ? "record_struct" : "record"
+            : type.TypeKind.ToString().ToLowerInvariant(),
         IMethodSymbol method => method.MethodKind.ToString().ToLowerInvariant(),
         IPropertySymbol property => property.IsIndexer ? "indexer" : "property",
         IFieldSymbol field when field.ContainingType?.TypeKind == TypeKind.Enum => "enum_member",
         IFieldSymbol => "field",
         IEventSymbol => "event",
+        IParameterSymbol => "parameter",
+        ILocalSymbol local when local.IsConst => "local_constant",
+        ILocalSymbol => "local",
+        IRangeVariableSymbol => "range_variable",
+        ITypeParameterSymbol => "type_parameter",
+        ILabelSymbol => "label",
+        IAliasSymbol => "alias",
         _ => symbol.Kind.ToString().ToLowerInvariant(),
     };
 
-    private static bool IsSourceDeclaration(ISymbol symbol, IReadOnlySet<string> sourcePaths) =>
-        !symbol.IsImplicitlyDeclared
+    private static bool IsSourceDeclaration(
+        ISymbol symbol,
+        IReadOnlySet<string> sourcePaths,
+        bool allowImplicit = false) =>
+        !string.IsNullOrWhiteSpace(symbol.Name)
+        && !IsCompilerGeneratedImplementationSymbol(symbol)
+        && (allowImplicit || !symbol.IsImplicitlyDeclared)
         && symbol.Locations.Any(location =>
             location.IsInSource
             && location.SourceTree?.FilePath is string filePath
             && sourcePaths.Contains(Path.GetFullPath(filePath)));
+
+    private static bool IsCompilerGeneratedImplementationSymbol(ISymbol symbol) => symbol switch
+    {
+        INamedTypeSymbol type when type.IsTupleType || type.IsAnonymousType => true,
+        IFieldSymbol field when field.ContainingType?.IsTupleType == true => true,
+        IPropertySymbol property when property.ContainingType?.IsAnonymousType == true => true,
+        _ => false,
+    };
 }

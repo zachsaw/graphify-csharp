@@ -53,7 +53,8 @@ Nodes contain stable C# properties:
 - `project`: repository-relative project path; and
 - `target_framework`: the compilation’s selected TFM; and
 - `declaration_kind`: the Roslyn declaration shape, such as `class`, `enum`,
-  `enum_member`, `method`, `localfunction`, or `indexer`.
+  `enum_member`, `method`, `localfunction`, `parameter`, `local`, `alias`,
+  `label`, `range_variable`, or `indexer`.
 
 Edges point from the source declaration to the referenced declaration. Reverse
 the edges in Graphify to obtain callers. `calls`, `references`, `implements`,
@@ -62,9 +63,10 @@ explain where the relationship was observed. Compiler-known entry points are
 marked on their node as `is_entry_point=true`.
 
 The declaration catalog covers source namespaces, named types, constructors,
-methods/operators/local functions, properties/indexers, fields/enum values, and
-events. Compiler-generated members, parameters, and local variables are not
-separate graph nodes in v0.1.
+methods/operators/local functions, properties/indexers, fields/enum values,
+events, parameters, locals, type parameters, aliases, labels, and query range
+variables. Unnamed syntax artifacts and compiler-generated implementation
+details are not separate graph nodes in v0.1.
 
 This output is evidence for downstream analysis. The enricher deliberately does
 not decide whether a caller is a test, whether a target has zero inbound edges,

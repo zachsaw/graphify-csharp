@@ -82,7 +82,8 @@ public sealed class SemanticOperationWalker : OperationWalker
         ArgumentNullException.ThrowIfNull(location);
 
         var target = FindDeclaration(targetSymbol);
-        if (target is null || !_catalog.TryGet(callerSymbol, out var caller))
+        var caller = ResolveCaller(callerSymbol);
+        if (target is null || caller is null)
         {
             return;
         }
@@ -100,6 +101,19 @@ public sealed class SemanticOperationWalker : OperationWalker
             EvidenceKind.Extracted,
             confidence: 1.0,
             [sourceLocation]));
+    }
+
+    private SymbolDeclaration? ResolveCaller(ISymbol symbol)
+    {
+        for (var current = symbol; current is not null; current = current.ContainingSymbol)
+        {
+            if (_catalog.TryGet(current, out var declaration))
+            {
+                return declaration;
+            }
+        }
+
+        return null;
     }
 
     private void AddMethodEdge(IMethodSymbol? target, GraphRelation relation, IOperation operation)

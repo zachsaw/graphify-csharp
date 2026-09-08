@@ -100,12 +100,21 @@ public sealed class SemanticSyntaxWalker : CSharpSyntaxWalker
         }
 
         var caller = _semanticModel.GetEnclosingSymbol(node.SpanStart);
-        if (symbol is null || caller is null)
+        if (caller is null)
         {
             return;
         }
 
-        _operationWalker.AddReference(caller, symbol, node.GetLocation());
+        if (symbol is not null)
+        {
+            _operationWalker.AddReference(caller, symbol, node.GetLocation());
+        }
+
+        if (node is IdentifierNameSyntax identifier
+            && _semanticModel.GetAliasInfo(identifier) is { } alias)
+        {
+            _operationWalker.AddReference(caller, alias, identifier.GetLocation());
+        }
     }
 
     private static bool IsInvocationTarget(SyntaxNode node)

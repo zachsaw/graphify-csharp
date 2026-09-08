@@ -12,7 +12,8 @@ Its output is the evidence layer, not the repository-specific analysis layer:
 
 - source declaration nodes for namespaces, named types, constructors,
   methods/operators/local functions, properties/indexers, fields/enum values,
-  and events with stable semantic identity;
+  events, parameters, locals, type parameters, aliases, labels, and query
+  range variables with stable semantic identity;
 - directed `calls`, `references`, `inherits`, `implements`, and `overrides`
   edges resolved by Roslyn;
 - namespace, project, TFM, source-location, and compiler-known entry-point facts;
@@ -61,7 +62,8 @@ limitations in the plan/docs instead of silently weakening the contract.
 
 Treat extraction cost as part of the design. Prefer Roslyn’s compilation symbol
 tree for the declaration catalog, and use targeted syntax queries only for
-declarations that are not exposed as type members, such as local functions.
+declarations that are not exposed as type members, such as local functions,
+locals, aliases, labels, and query range variables.
 Reuse each project’s semantic models and source-location factory; do not reload
 or reparse a project per relationship. Feed observations into a deduplicating
 edge accumulator so overlapping operation and syntax evidence does not create a
@@ -140,9 +142,9 @@ Static absence is not proof of runtime absence. Distinguish at least:
 Do not pretend that a full call graph can resolve arbitrary reflection, DI,
 function pointers, P/Invoke, or host callbacks. Make those limits visible
 in diagnostics and documentation; leave policy-specific roots to the consumer.
-The v1 declaration catalog intentionally models source named declarations with
-meaningful graph identities; compiler-generated members, parameters, and local
-variables are not separate graph nodes.
+The v1 declaration catalog models source declarations for which Roslyn exposes
+a stable, meaningful graph identity, including scoped declarations. Unnamed
+syntax artifacts and compiler-generated implementation details remain omitted.
 
 ## Verification
 
@@ -152,8 +154,9 @@ Prioritize:
 
 - overloaded, generic, nested, partial, and multi-project symbol identity;
 - namespaces, class/record/struct/interface/enum/delegate types, enum values,
-  constructors/operators/local functions, properties/indexers, fields, and
-  events;
+  constructors/operators/local functions, properties/indexers, fields, events,
+  parameters, locals, type parameters, aliases, labels, and query range
+  variables;
 - caller-to-callee direction and overload resolution;
 - cross-project target resolution and inheritance/interface relationships;
 - a pinned real-world repository with complex generic and inheritance syntax;

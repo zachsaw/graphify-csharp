@@ -111,6 +111,83 @@ public sealed class SemanticReferenceExtractorTests
     }
 
     [Fact]
+    public async Task Catalogs_source_symbols_for_every_declaration_shape()
+    {
+        using var loaded = await LoadFixtureAsync();
+        var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
+
+        Assert.Contains(catalog.Declarations, declaration => declaration.Identity.Kind == SymbolKind.Alias
+            && declaration.Identity.Name == "ServiceAlias");
+        Assert.Contains(catalog.Declarations, declaration => declaration.Identity.Kind == SymbolKind.Label
+            && declaration.Identity.Name == "finished");
+        Assert.True(catalog.Declarations.Count(declaration => declaration.Identity.Kind == SymbolKind.Label) >= 3);
+        Assert.Contains(catalog.Declarations, declaration => declaration.Identity.Kind == SymbolKind.RangeVariable
+            && declaration.Identity.Name == "item");
+        Assert.Contains(catalog.Declarations, declaration => declaration.Identity.Kind == SymbolKind.Local
+            && declaration.Identity.Name == "localConstant"
+            && declaration.Node.Properties["declaration_kind"] == "local_constant");
+        Assert.Contains(catalog.Declarations, declaration => declaration.Identity.Kind == SymbolKind.Parameter
+            && declaration.Identity.Name == "reference");
+        Assert.Contains(catalog.Declarations, declaration => declaration.Identity.Kind == SymbolKind.Parameter
+            && declaration.Identity.Name == "implicitParameter");
+        Assert.Contains(catalog.Declarations, declaration => declaration.Identity.Kind == SymbolKind.TypeParameter
+            && declaration.Identity.Name == "U");
+        Assert.Contains(catalog.Declarations, declaration => declaration.Node.Properties["declaration_kind"] == "record");
+        Assert.Contains(catalog.Declarations, declaration => declaration.Node.Properties["declaration_kind"] == "record_struct");
+        Assert.Contains(catalog.Declarations, declaration => declaration.Node.Properties["declaration_kind"] == "destructor");
+        Assert.Contains(catalog.Declarations, declaration => declaration.Node.Properties["declaration_kind"] == "conversion");
+        Assert.Contains(catalog.Declarations, declaration => declaration.Node.Properties["declaration_kind"] == "userdefinedoperator");
+        Assert.Contains(catalog.Declarations, declaration => declaration.Node.Properties["declaration_kind"] == "eventadd");
+        Assert.Contains(catalog.Declarations, declaration => declaration.Node.Properties["declaration_kind"] == "eventremove");
+        Assert.DoesNotContain(catalog.Declarations, declaration =>
+            declaration.Identity.Namespace == "System"
+            && declaration.Identity.ContainingTypes.Any(type => type.Name == "ValueTuple"));
+
+        var fileLocalTypes = catalog.Declarations
+            .Where(declaration => declaration.Identity.Namespace == "ReferenceFixture.AllDeclarations"
+                && declaration.Identity.Kind == SymbolKind.Type
+                && declaration.Identity.Name == "SameName")
+            .ToArray();
+        Assert.Equal(2, fileLocalTypes.Length);
+        Assert.NotEqual(fileLocalTypes[0].Identity.CanonicalKey, fileLocalTypes[1].Identity.CanonicalKey);
+
+        var fileLocalMethods = catalog.Declarations
+            .Where(declaration => declaration.Identity.Namespace == "ReferenceFixture.AllDeclarations"
+                && declaration.Identity.ContainingTypes.Any(type => type.Name == "SameName")
+                && declaration.Identity.Kind == SymbolKind.Method)
+            .ToArray();
+        Assert.Equal(2, fileLocalMethods.Length);
+        Assert.NotEqual(fileLocalMethods[0].Identity.CanonicalKey, fileLocalMethods[1].Identity.CanonicalKey);
+    }
+
+    [Fact]
+    public async Task Resolves_references_to_scoped_declarations_and_aliases()
+    {
+        using var loaded = await LoadFixtureAsync();
+        var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
+        var graph = await new SemanticReferenceExtractor().ExtractAsync(loaded, catalog);
+
+        var execute = Find(catalog, "ReferenceFixture.AllDeclarations", "DeclarationHost", "Execute", "int", "int", "int", "int[]");
+        var alias = FindScoped(catalog, SymbolKind.Alias, "ServiceAlias");
+        var local = FindScoped(catalog, SymbolKind.Local, "first");
+        var parameter = FindScoped(catalog, SymbolKind.Parameter, "reference");
+        var implicitParameter = FindScoped(catalog, SymbolKind.Parameter, "implicitParameter");
+        var label = FindScoped(catalog, SymbolKind.Label, "finished");
+        var rangeVariable = FindScoped(catalog, SymbolKind.RangeVariable, "item");
+        var typeParameter = FindScoped(catalog, SymbolKind.TypeParameter, "U");
+        var constrainedType = Find(catalog, "ReferenceFixture.AllDeclarations", "RecordDeclaration");
+
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, execute, alias, GraphRelation.References));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, execute, local, GraphRelation.References));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, execute, parameter, GraphRelation.References));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, execute, implicitParameter, GraphRelation.References));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, execute, label, GraphRelation.References));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, execute, rangeVariable, GraphRelation.References));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, typeParameter, constrainedType, GraphRelation.References));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, alias, Find(catalog, "ReferenceFixture.Production", "Service"), GraphRelation.References));
+    }
+
+    [Fact]
     public async Task Resolves_source_calls_across_project_compilations()
     {
         var root = RepositoryRoot();
@@ -182,6 +259,11 @@ public sealed class SemanticReferenceExtractorTests
             && declaration.Identity.Kind == global::Graphify.CSharp.Domain.SymbolKind.Type);
         return Assert.Single(matches);
     }
+
+    private static SymbolDeclaration FindScoped(DeclarationCatalog catalog, SymbolKind kind, string name) =>
+        Assert.Single(catalog.Declarations.Where(declaration =>
+            declaration.Identity.Kind == kind
+            && declaration.Identity.Name == name));
 
     private static bool IsEdge(GraphEdge edge, SymbolDeclaration source, SymbolDeclaration target, GraphRelation relation) =>
         edge.SourceId == source.Node.Id && edge.TargetId == target.Node.Id && edge.Relation == relation;

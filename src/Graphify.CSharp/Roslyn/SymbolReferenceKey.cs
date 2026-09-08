@@ -22,7 +22,9 @@ internal static class SymbolReferenceKey
     public static bool TryCreate(ISymbol symbol, out string referenceKey)
     {
         ArgumentNullException.ThrowIfNull(symbol);
-        if (symbol is not INamespaceSymbol
+        if (string.IsNullOrWhiteSpace(symbol.Name)
+            || symbol.IsImplicitlyDeclared
+            || symbol is not INamespaceSymbol
             and not INamedTypeSymbol
             and not IMethodSymbol
             and not IPropertySymbol
@@ -33,7 +35,15 @@ internal static class SymbolReferenceKey
             return false;
         }
 
-        referenceKey = IdentityFactory.Create(symbol, ReferenceProject).ReferenceKey;
-        return true;
+        try
+        {
+            referenceKey = IdentityFactory.Create(symbol, ReferenceProject).ReferenceKey;
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            referenceKey = string.Empty;
+            return false;
+        }
     }
 }

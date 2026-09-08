@@ -120,8 +120,9 @@ Roslyn-resolved facts. v0.1 emits `calls`, `references`, `inherits`,
 `implements`, and `overrides`; node properties include the full symbol key,
 namespace, project, target framework, and declaration kind. The catalog covers
 namespaces, named types, constructors, methods/operators/local functions,
-properties/indexers, fields/enum values, and events. `graphify_csharp` contains
-only the versioned extractor metadata and loader diagnostics.
+properties/indexers, fields/enum values, events, parameters, locals, type
+parameters, aliases, labels, and query range variables. `graphify_csharp`
+contains only the versioned extractor metadata and loader diagnostics.
 
 The enricher does not classify callers or decide whether a declaration is safe
 to remove. Reflection, dependency injection, generated code, native callbacks,
@@ -135,7 +136,8 @@ Included:
 - `.sln`, `.slnx`, and `.csproj` loading through MSBuildWorkspace;
 - overload-aware symbol identity including project and TFM context;
 - direct calls, constructors, method groups, properties, fields, enum values,
-  events, declaration-header, attribute, generic, and `typeof` references;
+  events, scoped declarations, declaration-header, attribute, generic, and
+  `typeof` references;
 - inheritance, interface implementation, and virtual override relationships;
 - cross-project symbol resolution with conservative ambiguity handling;
 - stable Graphify JSON and a dependency-free command-line parser.
@@ -143,8 +145,8 @@ Included:
 Not a runtime reachability proof. Interface/virtual dispatch expansion,
 reflection heuristics, DI container modeling, and host callbacks are deliberately
 bounded in v0.1 and will be added only with explicit provenance and fixtures.
-Compiler-generated members, parameters, and local variables are not separate
-graph nodes in v0.1.
+Unnamed syntax artifacts and compiler-generated implementation details are not
+separate graph nodes in v0.1.
 
 ## Development
 

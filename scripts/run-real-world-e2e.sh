@@ -41,6 +41,32 @@ dotnet tool install \
   Graphify.CSharp \
   --version "$package_version"
 
+reference_fixture_output="$temporary_root/reference-fixture.json"
+dotnet restore "$repository_root/tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj"
+"$tool_directory/graphify-csharp" \
+  --input "$repository_root/tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj" \
+  --root "$repository_root" \
+  --configuration "$configuration" \
+  --target-framework net10.0 \
+  --output "$reference_fixture_output"
+
+for required_node_kind in parameter local type_parameter; do
+  grep -q "\"node_kind\": \"$required_node_kind\"" "$reference_fixture_output" || {
+    echo "Declaration fixture did not emit node kind '$required_node_kind'." >&2
+    exit 1
+  }
+done
+for required_declaration_kind in alias label range_variable local_constant record record_struct; do
+  grep -q "\"declaration_kind\": \"$required_declaration_kind\"" "$reference_fixture_output" || {
+    echo "Declaration fixture did not emit declaration kind '$required_declaration_kind'." >&2
+    exit 1
+  }
+done
+if grep -q 'System.ValueTuple' "$reference_fixture_output"; then
+  echo "Declaration fixture emitted compiler-generated tuple implementation details." >&2
+  exit 1
+fi
+
 if [[ ! -d "$fixture_root/.git" ]]; then
   mkdir -p "$(dirname -- "$fixture_root")"
   git clone --filter=blob:none --no-checkout --depth 1 "$repository_url" "$fixture_root"
@@ -81,7 +107,7 @@ test "$node_count" -ge 500 || {
   exit 1
 }
 
-for required_node_kind in namespace type method constructor property field event; do
+for required_node_kind in namespace type method constructor property field event parameter local type_parameter; do
   grep -q "\"node_kind\": \"$required_node_kind\"" "$output_root/csharp.json" || {
     echo "Real-world e2e did not emit node kind '$required_node_kind'." >&2
     exit 1

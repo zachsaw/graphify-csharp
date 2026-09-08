@@ -32,6 +32,12 @@ public sealed class SemanticDeclarationRelationshipExtractor
                 case IEventSymbol @event:
                     AddEventRelationships(declaration, @event, catalog, locations, edges);
                     break;
+                case ITypeParameterSymbol typeParameter:
+                    AddTypeParameterRelationships(declaration, typeParameter, catalog, locations, edges);
+                    break;
+                case IAliasSymbol alias:
+                    AddEdge(declaration, alias.Target, GraphRelation.References, catalog, locations, edges);
+                    break;
             }
         }
 
@@ -87,6 +93,19 @@ public sealed class SemanticDeclarationRelationshipExtractor
         AddEdge(source, @event.OverriddenEvent, GraphRelation.Overrides, catalog, locations, edges);
         AddExplicitInterfaceRelationships(source, @event.ExplicitInterfaceImplementations, catalog, locations, edges);
         AddImplicitInterfaceRelationships(source, @event, catalog, locations, edges);
+    }
+
+    private static void AddTypeParameterRelationships(
+        SymbolDeclaration source,
+        ITypeParameterSymbol typeParameter,
+        DeclarationCatalog catalog,
+        SourceLocationFactory locations,
+        ICollection<GraphEdge> edges)
+    {
+        foreach (var constraintType in typeParameter.ConstraintTypes.OrderBy(item => item.ToDisplayString(), StringComparer.Ordinal))
+        {
+            AddEdge(source, constraintType, GraphRelation.References, catalog, locations, edges);
+        }
     }
 
     private static void AddExplicitInterfaceRelationships(

@@ -6,7 +6,9 @@ Ship a small, reusable, OSS Graphify C# semantic enricher. Given a C# solution
 or project, it deterministically emits:
 
 - source declaration nodes for namespaces, named types, type members, enum
-  values, and local functions with stable, project/TFM-aware symbol identity;
+  values, local functions, parameters, locals, type parameters, aliases,
+  labels, and query range variables with stable, project/TFM-aware symbol
+  identity;
 - directed edges for Roslyn-resolved calls, inheritance, and non-call
   references;
 - namespace, project/TFM context, source locations, and compiler-known entry
@@ -85,9 +87,10 @@ Commit: `feat: add deterministic graph domain model`
 ### 3. Roslyn project loading and declaration catalog — complete
 
 Deliver a headless loader for an explicit `.sln`, `.slnx`, or `.csproj` and a
-catalog of all source named declarations that have meaningful graph identities:
+catalog of all source declarations that have meaningful graph identities:
 namespaces, named types, constructors, methods/operators/local functions,
-properties/indexers, fields/enum values, and events. Record project and
+properties/indexers, fields/enum values, events, parameters, locals, type
+parameters, aliases, labels, and query range variables. Record project and
 target-framework context; do not silently merge symbols from different target frameworks. The
 `--target-framework` selector is optional for an unambiguous single-target
 project and required only when a multi-target project cannot be selected
@@ -113,7 +116,8 @@ this slice.
 
 Gate: focused fixtures cover overload resolution, constructors, interfaces,
 virtual methods, inheritance, partial declarations, generics, enum values,
-local functions, and cross-project calls. A pinned real-world third-party
+local functions, scoped declarations, and cross-project calls. A pinned
+real-world third-party
 fixture must also catalog multiple declaration kinds and pass a repeated-run
 byte determinism check. The result must be deterministic across repeated runs.
 
@@ -149,9 +153,8 @@ Commit: `chore: add deterministic extraction release gates`
 
 - proving runtime reachability in the presence of reflection or arbitrary
   dependency injection;
-- emitting separate graph nodes for compiler-generated members, parameters, or
-  local variables; the source named declaration that contains them remains the
-  graph entity;
+- emitting separate graph nodes for unnamed syntax artifacts or compiler-
+  generated implementation details;
 - classifying callers as production/test/mixed or zero-reference;
 - replacing Graphify’s generic syntax extractor for every language;
 - requiring Rider or commercial analyzers in CI;

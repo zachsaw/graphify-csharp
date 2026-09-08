@@ -11,6 +11,12 @@ public enum SymbolKind
     Property,
     Field,
     Event,
+    Parameter,
+    Local,
+    RangeVariable,
+    TypeParameter,
+    Label,
+    Alias,
 }
 
 public enum ParameterModifier
@@ -25,20 +31,32 @@ public enum ParameterModifier
 
 public sealed record ContainingTypeIdentity
 {
-    public ContainingTypeIdentity(string name, int genericArity = 0)
+    public ContainingTypeIdentity(string name, int genericArity = 0, string? declarationDiscriminator = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentOutOfRangeException.ThrowIfNegative(genericArity);
 
         Name = name.Trim();
         GenericArity = genericArity;
+        DeclarationDiscriminator = string.IsNullOrWhiteSpace(declarationDiscriminator)
+            ? null
+            : declarationDiscriminator.Trim();
     }
 
     public string Name { get; }
 
     public int GenericArity { get; }
 
-    public string CanonicalName => GenericArity == 0 ? Name : $"{Name}`{GenericArity}";
+    public string? DeclarationDiscriminator { get; }
+
+    public string CanonicalName
+    {
+        get
+        {
+            var name = GenericArity == 0 ? Name : $"{Name}`{GenericArity}";
+            return DeclarationDiscriminator is null ? name : $"{name}[{DeclarationDiscriminator}]";
+        }
+    }
 }
 
 public sealed record ParameterIdentity
@@ -78,7 +96,8 @@ public sealed class SymbolIdentity : IEquatable<SymbolIdentity>
         int genericArity = 0,
         IEnumerable<ParameterIdentity>? parameters = null,
         string? returnTypeName = null,
-        IEnumerable<string>? containingMemberPath = null)
+        IEnumerable<string>? containingMemberPath = null,
+        string? declarationDiscriminator = null)
     {
         Project = project ?? throw new ArgumentNullException(nameof(project));
         Namespace = CanonicalText.NormalizeNamespace(namespaceName);
@@ -94,6 +113,9 @@ public sealed class SymbolIdentity : IEquatable<SymbolIdentity>
         GenericArity = genericArity;
         Parameters = (parameters ?? Array.Empty<ParameterIdentity>()).ToImmutableArray();
         ReturnTypeName = string.IsNullOrWhiteSpace(returnTypeName) ? null : CanonicalText.NormalizeType(returnTypeName);
+        DeclarationDiscriminator = string.IsNullOrWhiteSpace(declarationDiscriminator)
+            ? null
+            : declarationDiscriminator.Trim();
         CanonicalKey = BuildCanonicalKey();
         ReferenceKey = BuildReferenceKey();
     }
@@ -115,6 +137,8 @@ public sealed class SymbolIdentity : IEquatable<SymbolIdentity>
     public ImmutableArray<ParameterIdentity> Parameters { get; }
 
     public string? ReturnTypeName { get; }
+
+    public string? DeclarationDiscriminator { get; }
 
     public string CanonicalKey { get; }
 
@@ -140,7 +164,17 @@ public sealed class SymbolIdentity : IEquatable<SymbolIdentity>
                 ? string.Empty
                 : "(" + string.Join(", ", Parameters.Select(parameter => parameter.CanonicalName)) + ")";
 
-            return qualifiedName + genericSuffix + parameterSuffix;
+            /*
+             * Parameters and type parameters are already unique within their
+             * containing declaration. Their source discriminator belongs in
+             * the key, not in the human-readable label.
+             */
+            var discriminatorSuffix = Kind is SymbolKind.Local or SymbolKind.RangeVariable or SymbolKind.Label
+                && DeclarationDiscriminator is not null
+                ? $" [{DeclarationDiscriminator}]"
+                : string.Empty;
+
+            return qualifiedName + genericSuffix + parameterSuffix + discriminatorSuffix;
         }
     }
 
@@ -176,6 +210,7 @@ public sealed class SymbolIdentity : IEquatable<SymbolIdentity>
             $"name={CanonicalText.Escape(Name)}",
             $"arity={GenericArity}",
             $"params={CanonicalText.Escape(parameters)}",
-            $"return={CanonicalText.Escape(ReturnTypeName ?? string.Empty)}");
+            $"return={CanonicalText.Escape(ReturnTypeName ?? string.Empty)}",
+            $"discriminator={CanonicalText.Escape(DeclarationDiscriminator ?? string.Empty)}");
     }
 }
