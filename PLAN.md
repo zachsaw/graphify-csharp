@@ -52,7 +52,7 @@ test-namespace classification inputs without Roslyn or MSBuild.
 
 Commit: `feat: add deterministic graph domain model`
 
-### 3. Roslyn project loading and declaration catalog — next
+### 3. Roslyn project loading and declaration catalog — complete
 
 Deliver a headless loader for an explicit `.sln`, `.slnx`, or `.csproj` and a
 catalog of source declarations. Record project and target-framework context;
@@ -63,7 +63,7 @@ declaration keys on the installed SDK.
 
 Commit: `feat: load CSharp projects and catalog symbols`
 
-### 4. Direct semantic references and callers
+### 4. Direct semantic references and callers — next
 
 Deliver extraction of direct invocation/call, method-group/delegate, type,
 attribute, `typeof`, and related Roslyn-resolved references. Orient caller edges
