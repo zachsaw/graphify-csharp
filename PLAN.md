@@ -75,7 +75,7 @@ result must be deterministic across repeated runs.
 
 Commit: `feat: extract deterministic CSharp semantic references`
 
-### 5. Audit classification and safe uncertainty boundaries — next
+### 5. Audit classification and safe uncertainty boundaries — complete
 
 Deliver zero-reference, production-used, test-only, and mixed classifications
 using the configurable namespace naming convention. Add explicit handling for
@@ -87,7 +87,7 @@ policy, `nameof`/compile-time-only uses, and configured roots.
 
 Commit: `feat: classify production and test-only callers`
 
-### 6. Graphify serialization and command-line interface
+### 6. Graphify serialization and command-line interface — next
 
 Deliver Graphify-compatible JSON, a versioned metadata envelope where needed,
 stable ordering, diagnostics, and a headless command that accepts the solution,

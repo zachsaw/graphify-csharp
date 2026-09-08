@@ -4,6 +4,7 @@ public enum CallerClassification
 {
     Production,
     Test,
+    External,
 }
 
 public sealed record NamespaceTestPolicy

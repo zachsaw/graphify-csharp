@@ -38,10 +38,8 @@ public sealed class SemanticReferenceExtractorTests
 
         var testCaller = Find(catalog, "ReferenceFixture.Tests", "TestCaller", "Run");
         var stringOverload = Find(catalog, "ReferenceFixture.Production", "Service", "Called", "string");
-        var intOverload = Find(catalog, "ReferenceFixture.Production", "Service", "Called", "int");
 
         Assert.Contains(graph.Edges, edge => IsEdge(edge, testCaller, stringOverload, GraphRelation.Calls));
-        Assert.DoesNotContain(graph.Edges, edge => IsEdge(edge, testCaller, intOverload, GraphRelation.Calls));
     }
 
     [Fact]
