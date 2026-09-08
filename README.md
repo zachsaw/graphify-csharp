@@ -23,6 +23,27 @@ graphify-csharp \
 
 ## Integrate with Graphify
 
+### Add the skills to a coding-agent project
+
+Graphify’s general-purpose skill and this enricher’s C# skill are intended to
+be installed together. Install Graphify’s skill for the agent platform you
+use, then copy this repository’s
+[`.agents/skills/graphify-csharp/SKILL.md`](.agents/skills/graphify-csharp/SKILL.md)
+into the consuming repository at the same relative path:
+
+```text
+graphify install --platform codex
+mkdir -p .agents/skills/graphify-csharp
+cp /path/to/graphify-csharp/.agents/skills/graphify-csharp/SKILL.md \
+  .agents/skills/graphify-csharp/SKILL.md
+```
+
+Keep the two skills separate. The `graphify` skill handles generic extraction,
+queries, paths, and exports; `graphify-csharp` adds the C# workflow and tells
+the agent to run `graphify-csharp` before Graphify consumes the graph. If your
+agent uses a different project-skill directory, place the same C# `SKILL.md`
+there according to that agent’s conventions.
+
 Run the enricher from the root of the repository being analyzed, before every
 Graphify rebuild. The output is already Graphify extraction JSON, so Graphify
 can build its directed graph from the file:

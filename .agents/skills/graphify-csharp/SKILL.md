@@ -152,3 +152,20 @@ boundary. Keep C# semantic metadata additive and versioned when it cannot fit
 the base schema. Use directed mode so downstream consumers can distinguish
 caller from callee. Keep extraction deterministic and avoid inventing
 relationships to satisfy a visualization.
+
+When this skill is installed in a consuming C# repository alongside Graphify’s
+general `graphify` skill, regenerate the C# evidence layer before Graphify
+queries, paths, explanations, or exports:
+
+```text
+graphify-csharp \
+  --input ./src/MyProduct.sln \
+  --root . \
+  --configuration Release \
+  --output ./graphify-out/csharp.json
+```
+
+Pass the resulting file to Graphify with `--graph`. Preserve the raw C# JSON
+for audits because it retains directed, relation-level edges. This workflow
+does not move repository-specific policy into the enricher; consumers decide
+how to interpret namespaces, callers, and compiler facts.
