@@ -63,7 +63,7 @@ declaration keys on the installed SDK.
 
 Commit: `feat: load CSharp projects and catalog symbols`
 
-### 4. Direct semantic references and callers — next
+### 4. Direct semantic references and callers — complete
 
 Deliver extraction of direct invocation/call, method-group/delegate, type,
 attribute, `typeof`, and related Roslyn-resolved references. Orient caller edges
@@ -75,7 +75,7 @@ result must be deterministic across repeated runs.
 
 Commit: `feat: extract deterministic CSharp semantic references`
 
-### 5. Audit classification and safe uncertainty boundaries
+### 5. Audit classification and safe uncertainty boundaries — next
 
 Deliver zero-reference, production-used, test-only, and mixed classifications
 using the configurable namespace naming convention. Add explicit handling for

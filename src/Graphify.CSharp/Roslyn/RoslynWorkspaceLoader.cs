@@ -75,9 +75,18 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
         return extension.ToLowerInvariant() switch
         {
             ".sln" or ".slnx" => (await workspace.OpenSolutionAsync(request.InputPath, cancellationToken: cancellationToken).ConfigureAwait(false)).Projects.ToArray(),
-            ".csproj" => [await workspace.OpenProjectAsync(request.InputPath, cancellationToken: cancellationToken).ConfigureAwait(false)],
+            ".csproj" => await OpenProjectAndReferencesAsync(workspace, request.InputPath, cancellationToken).ConfigureAwait(false),
             _ => throw new ArgumentException("Input must be a .sln, .slnx, or .csproj file.", nameof(request)),
         };
+    }
+
+    private static async Task<IReadOnlyList<Project>> OpenProjectAndReferencesAsync(
+        MSBuildWorkspace workspace,
+        string projectPath,
+        CancellationToken cancellationToken)
+    {
+        await workspace.OpenProjectAsync(projectPath, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return workspace.CurrentSolution.Projects.ToArray();
     }
 
     private static void EnsureMsBuildRegistered()
