@@ -55,6 +55,8 @@ test "$configured_url" = "$repository_url" || {
 current_commit="$(git -C "$fixture_root" rev-parse HEAD 2>/dev/null || true)"
 if [[ "$current_commit" != "$repository_commit" ]]; then
   git -C "$fixture_root" fetch --depth 1 origin "$repository_commit"
+fi
+if [[ ! -f "$fixture_root/Dapper/Dapper.csproj" ]]; then
   git -C "$fixture_root" checkout --detach "$repository_commit"
 fi
 test "$(git -C "$fixture_root" rev-parse HEAD)" = "$repository_commit"
