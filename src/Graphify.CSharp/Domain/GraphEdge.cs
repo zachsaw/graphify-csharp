@@ -6,6 +6,7 @@ public enum GraphRelation
 {
     Calls,
     References,
+    Inherits,
     Implements,
     Overrides,
     DispatchesTo,

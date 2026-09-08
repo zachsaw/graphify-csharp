@@ -116,10 +116,12 @@ mixed graph.
 
 The output keeps Graphify’s required `nodes`, `edges`, and `hyperedges` arrays.
 Edges are directed from source/caller to target/contract and use `EXTRACTED` for
-Roslyn-resolved facts. v0.1 emits `calls`, `references`, `implements`, and
-`overrides`; node properties include the full symbol key, namespace, project,
-and target framework. `graphify_csharp` contains only the versioned extractor
-metadata and loader diagnostics.
+Roslyn-resolved facts. v0.1 emits `calls`, `references`, `inherits`,
+`implements`, and `overrides`; node properties include the full symbol key,
+namespace, project, target framework, and declaration kind. The catalog covers
+namespaces, named types, constructors, methods/operators/local functions,
+properties/indexers, fields/enum values, and events. `graphify_csharp` contains
+only the versioned extractor metadata and loader diagnostics.
 
 The enricher does not classify callers or decide whether a declaration is safe
 to remove. Reflection, dependency injection, generated code, native callbacks,
@@ -132,14 +134,17 @@ Included:
 
 - `.sln`, `.slnx`, and `.csproj` loading through MSBuildWorkspace;
 - overload-aware symbol identity including project and TFM context;
-- direct calls, constructors, method groups, properties, fields, events, and
-  `typeof` references;
-- interface implementation and virtual override relationships;
+- direct calls, constructors, method groups, properties, fields, enum values,
+  events, declaration-header, attribute, generic, and `typeof` references;
+- inheritance, interface implementation, and virtual override relationships;
+- cross-project symbol resolution with conservative ambiguity handling;
 - stable Graphify JSON and a dependency-free command-line parser.
 
 Not a runtime reachability proof. Interface/virtual dispatch expansion,
 reflection heuristics, DI container modeling, and host callbacks are deliberately
 bounded in v0.1 and will be added only with explicit provenance and fixtures.
+Compiler-generated members, parameters, and local variables are not separate
+graph nodes in v0.1.
 
 ## Development
 
@@ -156,6 +161,22 @@ To verify byte-for-byte repeatability against a fixture or another solution:
   --input ./src/MyProduct/MyProduct.sln \
   --root . \
   --configuration Release
+```
+
+The pinned real-world semantic end-to-end gate clones a third-party C# project
+into the ignored `.e2e/` directory, restores its selected TFM, checks multiple
+declaration kinds and relationships, and runs extraction twice:
+
+```text
+./scripts/run-real-world-e2e.sh
+```
+
+By default it runs the current checkout. To validate a packed or globally
+installed tool, provide its executable explicitly:
+
+```text
+GRAPHIFY_CSHARP_TOOL="$HOME/.dotnet/tools/graphify-csharp" \
+  ./scripts/run-real-world-e2e.sh
 ```
 
 The implementation slices and acceptance gates are in [PLAN.md](PLAN.md). The

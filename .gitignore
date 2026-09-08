@@ -4,6 +4,7 @@
 .vs/
 TestResults/
 graphify-out/
+.e2e/
 *.user
 *.suo
 .DS_Store

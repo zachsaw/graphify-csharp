@@ -71,6 +71,68 @@ public sealed class SemanticReferenceExtractorTests
         Assert.Contains(graph.Edges, edge => IsEdge(edge, contractType, contractInterface, GraphRelation.Implements));
     }
 
+    [Fact]
+    public async Task Catalogs_namespaces_enum_members_delegates_and_local_functions()
+    {
+        using var loaded = await LoadFixtureAsync();
+        var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
+
+        Assert.Contains(catalog.Declarations, declaration =>
+            declaration.Identity.Kind == SymbolKind.Namespace
+            && declaration.Identity.DisplayName == "ReferenceFixture.Production");
+        Assert.Equal("enum", Find(catalog, "ReferenceFixture.Production", "BaseKind").Node.Properties["declaration_kind"]);
+        Assert.Equal("enum_member", Find(catalog, "ReferenceFixture.Production", "BaseKind", "Selected").Node.Properties["declaration_kind"]);
+        Assert.Equal("delegate", Find(catalog, "ReferenceFixture.Production", "Transformer").Node.Properties["declaration_kind"]);
+
+        var localFunction = Find(catalog, "ReferenceFixture.Production", "GenericContract", "LocalFunction", "T");
+        Assert.Equal(SymbolKind.Method, localFunction.Identity.Kind);
+        Assert.NotEmpty(localFunction.Identity.ContainingMemberPath);
+    }
+
+    [Fact]
+    public async Task Resolves_enum_generic_inheritance_and_local_function_relationships()
+    {
+        using var loaded = await LoadFixtureAsync();
+        var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
+        var graph = await new SemanticReferenceExtractor().ExtractAsync(loaded, catalog);
+
+        var enumMember = Find(catalog, "ReferenceFixture.Production", "DerivedKind", "Selected");
+        var referencedEnumMember = Find(catalog, "ReferenceFixture.Production", "BaseKind", "Selected");
+        var genericType = Find(catalog, "ReferenceFixture.Production", "GenericContract");
+        var genericBase = Find(catalog, "ReferenceFixture.Production", "GenericBase");
+        var genericInterface = Find(catalog, "ReferenceFixture.Production", "IGenericContract");
+        var run = Find(catalog, "ReferenceFixture.Production", "GenericContract", "Run", "T");
+        var localFunction = Find(catalog, "ReferenceFixture.Production", "GenericContract", "LocalFunction", "T");
+
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, enumMember, referencedEnumMember, GraphRelation.References));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, genericType, genericBase, GraphRelation.Inherits));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, genericType, genericInterface, GraphRelation.Implements));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, run, localFunction, GraphRelation.Calls));
+    }
+
+    [Fact]
+    public async Task Resolves_source_calls_across_project_compilations()
+    {
+        var root = RepositoryRoot();
+        using var loaded = await new RoslynWorkspaceLoader().LoadAsync(new ProjectLoadRequest(
+            Path.Combine(root, "Graphify.CSharp.sln"),
+            root,
+            configuration: "Release"));
+        var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
+        var graph = await new SemanticReferenceExtractor().ExtractAsync(loaded, catalog);
+
+        var main = FindProjectMember(catalog, "src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj", "Graphify.CSharp.Cli", "Program", SymbolKind.Method, "Main", "string[]");
+        var loader = FindProjectMember(catalog, "src/Graphify.CSharp/Graphify.CSharp.csproj", "Graphify.CSharp.Roslyn", "RoslynWorkspaceLoader", SymbolKind.Method, "LoadAsync", "Graphify.CSharp.Roslyn.ProjectLoadRequest", "System.Threading.CancellationToken");
+        var builder = FindProjectMember(catalog, "src/Graphify.CSharp/Graphify.CSharp.csproj", "Graphify.CSharp.Roslyn", "DeclarationCatalogBuilder", SymbolKind.Method, "BuildAsync", "Graphify.CSharp.Roslyn.LoadedSolution", "System.Threading.CancellationToken");
+        var extractor = FindProjectMember(catalog, "src/Graphify.CSharp/Graphify.CSharp.csproj", "Graphify.CSharp.Roslyn", "SemanticReferenceExtractor", SymbolKind.Method, "ExtractAsync", "Graphify.CSharp.Roslyn.LoadedSolution", "Graphify.CSharp.Roslyn.DeclarationCatalog", "System.Threading.CancellationToken");
+        var serializer = FindProjectMember(catalog, "src/Graphify.CSharp/Graphify.CSharp.csproj", "Graphify.CSharp.Graphify", "GraphifyJsonSerializer", SymbolKind.Method, "Serialize", "Graphify.CSharp.Domain.GraphSnapshot", "Graphify.CSharp.Graphify.GraphifySerializationOptions");
+
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, main, loader, GraphRelation.Calls));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, main, builder, GraphRelation.Calls));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, main, extractor, GraphRelation.Calls));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, main, serializer, GraphRelation.Calls));
+    }
+
     private static async Task<LoadedSolution> LoadFixtureAsync()
     {
         var root = RepositoryRoot();
@@ -86,6 +148,26 @@ public sealed class SemanticReferenceExtractorTests
             declaration.Identity.Namespace == namespaceName
             && declaration.Identity.ContainingTypes.Length == 1
             && declaration.Identity.ContainingTypes[0].Name == typeName
+            && declaration.Identity.Name == memberName
+            && declaration.Identity.Parameters.Select(parameter => parameter.TypeName).SequenceEqual(parameterTypes));
+        return Assert.Single(matches);
+    }
+
+    private static SymbolDeclaration FindProjectMember(
+        DeclarationCatalog catalog,
+        string projectPath,
+        string namespaceName,
+        string typeName,
+        SymbolKind kind,
+        string memberName,
+        params string[] parameterTypes)
+    {
+        var matches = catalog.Declarations.Where(declaration =>
+            declaration.Identity.Project.RelativePath == projectPath
+            && declaration.Identity.Namespace == namespaceName
+            && declaration.Identity.ContainingTypes.Length == 1
+            && declaration.Identity.ContainingTypes[0].Name == typeName
+            && declaration.Identity.Kind == kind
             && declaration.Identity.Name == memberName
             && declaration.Identity.Parameters.Select(parameter => parameter.TypeName).SequenceEqual(parameterTypes));
         return Assert.Single(matches);

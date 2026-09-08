@@ -43,8 +43,27 @@ public sealed class SemanticSyntaxWalker : CSharpSyntaxWalker
 
     public override void VisitAttribute(AttributeSyntax node)
     {
+        VisitSymbol(node);
         VisitOperation(node);
         base.VisitAttribute(node);
+    }
+
+    public override void VisitGenericName(GenericNameSyntax node)
+    {
+        VisitSymbol(node);
+        base.VisitGenericName(node);
+    }
+
+    public override void VisitQualifiedName(QualifiedNameSyntax node)
+    {
+        VisitSymbol(node);
+        base.VisitQualifiedName(node);
+    }
+
+    public override void VisitAliasQualifiedName(AliasQualifiedNameSyntax node)
+    {
+        VisitSymbol(node);
+        base.VisitAliasQualifiedName(node);
     }
 
     public override void VisitMemberAccessExpression(MemberAccessExpressionSyntax node)
@@ -67,8 +86,43 @@ public sealed class SemanticSyntaxWalker : CSharpSyntaxWalker
 
     public override void VisitIdentifierName(IdentifierNameSyntax node)
     {
+        VisitSymbol(node);
         VisitOperation(node);
         base.VisitIdentifierName(node);
+    }
+
+    private void VisitSymbol(SyntaxNode node)
+    {
+        var symbol = _semanticModel.GetSymbolInfo(node).Symbol;
+        if (symbol is IMethodSymbol && IsInvocationTarget(node))
+        {
+            return;
+        }
+
+        var caller = _semanticModel.GetEnclosingSymbol(node.SpanStart);
+        if (symbol is null || caller is null)
+        {
+            return;
+        }
+
+        _operationWalker.AddReference(caller, symbol, node.GetLocation());
+    }
+
+    private static bool IsInvocationTarget(SyntaxNode node)
+    {
+        return node.Parent switch
+        {
+            InvocationExpressionSyntax invocation when invocation.Expression == node => true,
+            MemberAccessExpressionSyntax memberAccess
+                when memberAccess.Name == node
+                    && memberAccess.Parent is InvocationExpressionSyntax invocation
+                    && invocation.Expression == memberAccess => true,
+            MemberBindingExpressionSyntax memberBinding
+                when memberBinding.Name == node
+                    && memberBinding.Parent is InvocationExpressionSyntax invocation
+                    && invocation.Expression == memberBinding => true,
+            _ => false,
+        };
     }
 
     private void VisitOperation(SyntaxNode node)

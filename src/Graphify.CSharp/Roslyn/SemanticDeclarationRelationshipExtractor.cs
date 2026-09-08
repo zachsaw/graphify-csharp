@@ -49,6 +49,8 @@ public sealed class SemanticDeclarationRelationshipExtractor
         {
             AddEdge(source, interfaceType, GraphRelation.Implements, catalog, locations, edges);
         }
+
+        AddEdge(source, type.BaseType, GraphRelation.Inherits, catalog, locations, edges);
     }
 
     private static void AddMethodRelationships(
@@ -156,11 +158,14 @@ public sealed class SemanticDeclarationRelationshipExtractor
 
     private static SymbolDeclaration? FindDeclaration(ISymbol symbol, DeclarationCatalog catalog)
     {
-        if (catalog.TryGet(symbol, out var declaration))
+        if (catalog.TryGet(symbol, out var declaration) || catalog.TryGetReference(symbol, out declaration))
         {
             return declaration;
         }
 
-        return catalog.TryGet(symbol.OriginalDefinition, out declaration) ? declaration : null;
+        return catalog.TryGet(symbol.OriginalDefinition, out declaration)
+            || catalog.TryGetReference(symbol.OriginalDefinition, out declaration)
+            ? declaration
+            : null;
     }
 }

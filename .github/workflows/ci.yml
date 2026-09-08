@@ -56,3 +56,8 @@ jobs:
 
       - name: Verify deterministic fixture extraction
         run: ./scripts/check-deterministic-extraction.sh --input tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj --root . --configuration Release
+
+      - name: Verify pinned real-world semantic extraction
+        env:
+          GRAPHIFY_CSHARP_TOOL: ${{ github.workspace }}/.ci-tool/graphify-csharp
+        run: ./scripts/run-real-world-e2e.sh

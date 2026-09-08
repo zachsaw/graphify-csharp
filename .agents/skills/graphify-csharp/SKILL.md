@@ -10,8 +10,11 @@ description: Build the Roslyn-backed C# semantic Graphify enricher that emits de
 This repository builds a headless, reusable C# semantic enricher for Graphify.
 Its output is the evidence layer, not the repository-specific analysis layer:
 
-- source declaration nodes with stable semantic identity;
-- directed `calls` and `references` edges resolved by Roslyn;
+- source declaration nodes for namespaces, named types, constructors,
+  methods/operators/local functions, properties/indexers, fields/enum values,
+  and events with stable semantic identity;
+- directed `calls`, `references`, `inherits`, `implements`, and `overrides`
+  edges resolved by Roslyn;
 - namespace, project, TFM, source-location, and compiler-known entry-point facts;
   and
 - deterministic Graphify-compatible JSON with diagnostics and provenance.
@@ -54,6 +57,20 @@ high blast radius. Do not allow more than one logical slice of unverified
 behavior to accumulate. Record deliberately deferred coverage or known dynamic
 limitations in the plan/docs instead of silently weakening the contract.
 
+### Performance invariants
+
+Treat extraction cost as part of the design. Prefer Roslyn’s compilation symbol
+tree for the declaration catalog, and use targeted syntax queries only for
+declarations that are not exposed as type members, such as local functions.
+Reuse each project’s semantic models and source-location factory; do not reload
+or reparse a project per relationship. Feed observations into a deduplicating
+edge accumulator so overlapping operation and syntax evidence does not create a
+large intermediate list. Keep fallback symbol matching O(1) on a prebuilt key
+index and reject ambiguous matches without broad name scans. Measure the pinned
+real-world e2e before and after semantic changes; use coarse project-level
+parallelism only when profiling shows it is beneficial and Roslyn/MSBuild
+thread-safety remains clear.
+
 ## Design rules
 
 ### Keep actors small
@@ -90,7 +107,9 @@ In v0.1, emit directed edges from source to target:
 
 - `calls` for a Roslyn-resolved invocation or object creation;
 - `references` for supported non-call symbol uses such as method groups,
-  `typeof`, attributes, and type/member references;
+  `typeof`, attributes, enum initializers, declaration headers, and
+  type/member references;
+- `inherits` for a source type’s Roslyn-resolved base class;
 - `implements` for a source type/member implementing a Roslyn-resolved contract;
   and
 - `overrides` for a source member overriding a Roslyn-resolved base member.
@@ -121,6 +140,9 @@ Static absence is not proof of runtime absence. Distinguish at least:
 Do not pretend that a full call graph can resolve arbitrary reflection, DI,
 function pointers, P/Invoke, or host callbacks. Make those limits visible
 in diagnostics and documentation; leave policy-specific roots to the consumer.
+The v1 declaration catalog intentionally models source named declarations with
+meaningful graph identities; compiler-generated members, parameters, and local
+variables are not separate graph nodes.
 
 ## Verification
 
@@ -129,7 +151,12 @@ one end-to-end fixture when the change crosses Roslyn or Graphify boundaries.
 Prioritize:
 
 - overloaded, generic, nested, partial, and multi-project symbol identity;
+- namespaces, class/record/struct/interface/enum/delegate types, enum values,
+  constructors/operators/local functions, properties/indexers, fields, and
+  events;
 - caller-to-callee direction and overload resolution;
+- cross-project target resolution and inheritance/interface relationships;
+- a pinned real-world repository with complex generic and inheritance syntax;
 - namespace/project/TFM metadata and compiler-known entry-point facts;
 - deterministic ordering and duplicate elimination;
 - malformed input and unsupported-language diagnostics; and

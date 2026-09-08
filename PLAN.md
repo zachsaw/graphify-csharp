@@ -5,8 +5,10 @@
 Ship a small, reusable, OSS Graphify C# semantic enricher. Given a C# solution
 or project, it deterministically emits:
 
-- source declaration nodes with stable, project/TFM-aware symbol identity;
-- directed edges for Roslyn-resolved calls and non-call references;
+- source declaration nodes for namespaces, named types, type members, enum
+  values, and local functions with stable, project/TFM-aware symbol identity;
+- directed edges for Roslyn-resolved calls, inheritance, and non-call
+  references;
 - namespace, project/TFM context, source locations, and compiler-known entry
   point facts as node metadata; and
 - Graphify-compatible JSON with diagnostics and provenance.
@@ -83,29 +85,37 @@ Commit: `feat: add deterministic graph domain model`
 ### 3. Roslyn project loading and declaration catalog — complete
 
 Deliver a headless loader for an explicit `.sln`, `.slnx`, or `.csproj` and a
-catalog of source declarations. Record project and target-framework context;
-do not silently merge symbols from different target frameworks. The
+catalog of all source named declarations that have meaningful graph identities:
+namespaces, named types, constructors, methods/operators/local functions,
+properties/indexers, fields/enum values, and events. Record project and
+target-framework context; do not silently merge symbols from different target frameworks. The
 `--target-framework` selector is optional for an unambiguous single-target
 project and required only when a multi-target project cannot be selected
 unambiguously.
 
 Gate: fixture solution loads from the CLI/test harness, produces stable
-declaration keys with the actual TFM when selection is unambiguous, and rejects
-ambiguous multi-target selection with an actionable diagnostic.
+declaration keys with the actual TFM when selection is unambiguous, catalogs
+representative declaration kinds, and rejects ambiguous multi-target selection
+with an actionable diagnostic.
 
 Commit: `feat: load CSharp projects and catalog symbols`
 
 ### 4. Direct semantic references and callers — complete
 
 Deliver extraction of direct invocation/call, method-group/delegate, type,
-attribute, `typeof`, and related Roslyn-resolved references. Also emit
-declaration-level `implements` and `overrides` edges for source members/types.
-Orient edges from source to target and retain source locations and relation
-provenance. Do not infer `dispatches_to` expansion in this slice.
+attribute, enum-initializer, `typeof`, declaration-header, and related
+Roslyn-resolved references. Also emit declaration-level `inherits`,
+`implements`, and `overrides` edges for source members/types. Resolve source
+targets across project compilations using a unique canonical fallback and skip
+ambiguous matches. Orient edges from source to target and retain source
+locations and relation provenance. Do not infer `dispatches_to` expansion in
+this slice.
 
 Gate: focused fixtures cover overload resolution, constructors, interfaces,
-virtual methods, partial declarations, and generics. The result must be
-deterministic across repeated runs.
+virtual methods, inheritance, partial declarations, generics, enum values,
+local functions, and cross-project calls. A pinned real-world third-party
+fixture must also catalog multiple declaration kinds and pass a repeated-run
+byte determinism check. The result must be deterministic across repeated runs.
 
 Commit: `feat: extract deterministic CSharp semantic references`
 
@@ -129,8 +139,9 @@ documentation, CI for the supported SDK, and a small compatibility matrix. Keep
 optional dispatch expansion and advanced reflection heuristics out of the
 critical release path unless the direct graph reveals a concrete need.
 
-Gate: clean checkout build/test, package install/run smoke test, and documented
-known limitations.
+Gate: clean checkout build/test, package install/run smoke test, pinned
+real-world semantic e2e, representative real-solution determinism check, and
+documented known limitations.
 
 Commit: `chore: add deterministic extraction release gates`
 
@@ -138,6 +149,9 @@ Commit: `chore: add deterministic extraction release gates`
 
 - proving runtime reachability in the presence of reflection or arbitrary
   dependency injection;
+- emitting separate graph nodes for compiler-generated members, parameters, or
+  local variables; the source named declaration that contains them remains the
+  graph entity;
 - classifying callers as production/test/mixed or zero-reference;
 - replacing Graphify’s generic syntax extractor for every language;
 - requiring Rider or commercial analyzers in CI;

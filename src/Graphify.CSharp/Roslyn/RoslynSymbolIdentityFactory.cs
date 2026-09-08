@@ -54,7 +54,8 @@ public sealed class RoslynSymbolIdentityFactory
             method.Parameters.Select(parameter => new ParameterIdentity(TypeName(parameter.Type), Modifier(parameter))),
             returnTypeName: method.MethodKind is MethodKind.Constructor or MethodKind.StaticConstructor
                 ? null
-                : TypeName(method.ReturnType));
+                : TypeName(method.ReturnType),
+            containingMemberPath: ContainingMemberPath(method.ContainingSymbol));
     }
 
     private static SymbolIdentity CreateProperty(IPropertySymbol property, ProjectIdentity project) => new(
@@ -93,6 +94,28 @@ public sealed class RoslynSymbolIdentityFactory
     }
 
     private static string TypeName(ITypeSymbol type) => type.ToDisplayString(TypeDisplayFormat);
+
+    private static IEnumerable<string> ContainingMemberPath(ISymbol? containingSymbol)
+    {
+        var path = new Stack<string>();
+        for (var current = containingSymbol; current is IMethodSymbol method; current = current.ContainingSymbol)
+        {
+            path.Push(MemberSignature(method));
+        }
+
+        return path;
+    }
+
+    private static string MemberSignature(IMethodSymbol method)
+    {
+        var parameters = string.Join(
+            ",",
+            method.Parameters.Select(parameter => new ParameterIdentity(TypeName(parameter.Type), Modifier(parameter)).CanonicalName));
+        var returnType = method.MethodKind is MethodKind.Constructor or MethodKind.StaticConstructor
+            ? string.Empty
+            : TypeName(method.ReturnType);
+        return $"{method.MethodKind}:{method.Name}`{method.Arity}({parameters}):{returnType}";
+    }
 
     private static string? NamespaceOf(ISymbol symbol) =>
         symbol.ContainingNamespace is null || symbol.ContainingNamespace.IsGlobalNamespace

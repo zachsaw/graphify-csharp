@@ -13,9 +13,12 @@ public sealed class SemanticReferenceExtractor
         ArgumentNullException.ThrowIfNull(solution);
         ArgumentNullException.ThrowIfNull(catalog);
 
-        var edges = new List<GraphEdge>();
+        var edges = new GraphEdgeAccumulator();
         var locations = new SourceLocationFactory(solution.RepositoryRoot);
-        edges.AddRange(new SemanticDeclarationRelationshipExtractor().Extract(solution, catalog, cancellationToken));
+        foreach (var edge in new SemanticDeclarationRelationshipExtractor().Extract(solution, catalog, cancellationToken))
+        {
+            edges.Add(edge);
+        }
         foreach (var project in solution.Projects.OrderBy(project => project.Identity.Key, StringComparer.Ordinal))
         {
             foreach (var document in project.Project.Documents.OrderBy(document => document.FilePath ?? document.Name, StringComparer.Ordinal))

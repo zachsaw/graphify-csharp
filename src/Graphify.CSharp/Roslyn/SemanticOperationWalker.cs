@@ -75,6 +75,33 @@ public sealed class SemanticOperationWalker : OperationWalker
         base.VisitTypeOf(operation);
     }
 
+    internal void AddReference(ISymbol callerSymbol, ISymbol targetSymbol, Location location)
+    {
+        ArgumentNullException.ThrowIfNull(callerSymbol);
+        ArgumentNullException.ThrowIfNull(targetSymbol);
+        ArgumentNullException.ThrowIfNull(location);
+
+        var target = FindDeclaration(targetSymbol);
+        if (target is null || !_catalog.TryGet(callerSymbol, out var caller))
+        {
+            return;
+        }
+
+        var sourceLocation = _locations.Create(location);
+        if (sourceLocation is null)
+        {
+            return;
+        }
+
+        _edges.Add(new GraphEdge(
+            caller.Node.Id,
+            target.Node.Id,
+            GraphRelation.References,
+            EvidenceKind.Extracted,
+            confidence: 1.0,
+            [sourceLocation]));
+    }
+
     private void AddMethodEdge(IMethodSymbol? target, GraphRelation relation, IOperation operation)
     {
         if (target is not null)
@@ -86,30 +113,43 @@ public sealed class SemanticOperationWalker : OperationWalker
     private void AddSymbolEdge(ISymbol target, GraphRelation relation, IOperation operation)
     {
         var targetDeclaration = FindDeclaration(target);
+        if (targetDeclaration is null)
+        {
+            return;
+        }
+
         var caller = _callerResolver.Resolve(_semanticModel, operation.Syntax.SpanStart);
-        if (targetDeclaration is null || caller is null)
+        if (caller is null)
         {
             return;
         }
 
         var location = _locations.Create(operation.Syntax.GetLocation());
+        if (location is null)
+        {
+            return;
+        }
+
         _edges.Add(new GraphEdge(
             caller.Node.Id,
             targetDeclaration.Node.Id,
             relation,
             EvidenceKind.Extracted,
             confidence: 1.0,
-            location is null ? null : [location]));
+            [location]));
     }
 
     private SymbolDeclaration? FindDeclaration(ISymbol symbol)
     {
-        if (_catalog.TryGet(symbol, out var declaration))
+        if (_catalog.TryGet(symbol, out var declaration) || _catalog.TryGetReference(symbol, out declaration))
         {
             return declaration;
         }
 
         var originalDefinition = symbol.OriginalDefinition;
-        return _catalog.TryGet(originalDefinition, out declaration) ? declaration : null;
+        return _catalog.TryGet(originalDefinition, out declaration)
+            || _catalog.TryGetReference(originalDefinition, out declaration)
+            ? declaration
+            : null;
     }
 }

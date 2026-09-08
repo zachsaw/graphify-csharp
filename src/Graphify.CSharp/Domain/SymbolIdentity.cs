@@ -77,11 +77,15 @@ public sealed class SymbolIdentity : IEquatable<SymbolIdentity>
         string name,
         int genericArity = 0,
         IEnumerable<ParameterIdentity>? parameters = null,
-        string? returnTypeName = null)
+        string? returnTypeName = null,
+        IEnumerable<string>? containingMemberPath = null)
     {
         Project = project ?? throw new ArgumentNullException(nameof(project));
         Namespace = CanonicalText.NormalizeNamespace(namespaceName);
         ContainingTypes = (containingTypes ?? Array.Empty<ContainingTypeIdentity>()).ToImmutableArray();
+        ContainingMemberPath = (containingMemberPath ?? Array.Empty<string>())
+            .Select(CanonicalText.NormalizeType)
+            .ToImmutableArray();
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ArgumentOutOfRangeException.ThrowIfNegative(genericArity);
 
@@ -91,6 +95,7 @@ public sealed class SymbolIdentity : IEquatable<SymbolIdentity>
         Parameters = (parameters ?? Array.Empty<ParameterIdentity>()).ToImmutableArray();
         ReturnTypeName = string.IsNullOrWhiteSpace(returnTypeName) ? null : CanonicalText.NormalizeType(returnTypeName);
         CanonicalKey = BuildCanonicalKey();
+        ReferenceKey = BuildReferenceKey();
     }
 
     public ProjectIdentity Project { get; }
@@ -98,6 +103,8 @@ public sealed class SymbolIdentity : IEquatable<SymbolIdentity>
     public string Namespace { get; }
 
     public ImmutableArray<ContainingTypeIdentity> ContainingTypes { get; }
+
+    public ImmutableArray<string> ContainingMemberPath { get; }
 
     public SymbolKind Kind { get; }
 
@@ -111,16 +118,23 @@ public sealed class SymbolIdentity : IEquatable<SymbolIdentity>
 
     public string CanonicalKey { get; }
 
+    internal string ReferenceKey { get; }
+
     public string DisplayName
     {
         get
         {
             var typeName = string.Join('.', ContainingTypes.Select(type => type.CanonicalName));
             var prefix = string.IsNullOrEmpty(Namespace) ? typeName : Namespace + (string.IsNullOrEmpty(typeName) ? string.Empty : "." + typeName);
+            var memberContext = ContainingMemberPath.Length == 0
+                ? string.Empty
+                : string.Join("::", ContainingMemberPath) + "::";
             var memberName = Kind == SymbolKind.Constructor && ContainingTypes.Length > 0
                 ? ContainingTypes[^1].CanonicalName
                 : Name;
-            var qualifiedName = string.IsNullOrEmpty(prefix) ? memberName : prefix + "." + memberName;
+            var qualifiedName = string.IsNullOrEmpty(prefix)
+                ? memberContext + memberName
+                : prefix + "." + memberContext + memberName;
             var genericSuffix = GenericArity == 0 ? string.Empty : $"<{GenericArity}>";
             var parameterSuffix = Parameters.Length == 0
                 ? string.Empty
@@ -140,16 +154,25 @@ public sealed class SymbolIdentity : IEquatable<SymbolIdentity>
 
     private string BuildCanonicalKey()
     {
-        var containingTypes = string.Join('.', ContainingTypes.Select(type => type.CanonicalName));
-        var parameters = string.Join(';', Parameters.Select(parameter => parameter.CanonicalName));
-
         return string.Join(
             '|',
             "csharp/v1",
             Project.Key,
+            BuildReferenceKey());
+    }
+
+    private string BuildReferenceKey()
+    {
+        var containingTypes = string.Join('.', ContainingTypes.Select(type => type.CanonicalName));
+        var containingMembers = string.Join(';', ContainingMemberPath.Select(CanonicalText.Escape));
+        var parameters = string.Join(';', Parameters.Select(parameter => parameter.CanonicalName));
+
+        return string.Join(
+            '|',
             $"symbol={Kind.ToString().ToLowerInvariant()}",
             $"namespace={CanonicalText.Escape(Namespace)}",
             $"type={CanonicalText.Escape(containingTypes)}",
+            $"member={CanonicalText.Escape(containingMembers)}",
             $"name={CanonicalText.Escape(Name)}",
             $"arity={GenericArity}",
             $"params={CanonicalText.Escape(parameters)}",

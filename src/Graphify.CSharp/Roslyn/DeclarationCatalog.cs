@@ -8,6 +8,7 @@ public sealed class DeclarationCatalog
 {
     private readonly ImmutableDictionary<string, SymbolDeclaration> _byKey;
     private readonly ImmutableDictionary<string, SymbolDeclaration> _byNodeId;
+    private readonly ImmutableDictionary<string, ImmutableArray<SymbolDeclaration>> _byReferenceKey;
     private readonly Dictionary<ISymbol, SymbolDeclaration> _bySymbol;
 
     public DeclarationCatalog(IEnumerable<SymbolDeclaration> declarations)
@@ -33,6 +34,10 @@ public sealed class DeclarationCatalog
         Declarations = ordered;
         _byKey = ordered.ToImmutableDictionary(declaration => declaration.Identity.CanonicalKey, StringComparer.Ordinal);
         _byNodeId = ordered.ToImmutableDictionary(declaration => declaration.Node.Id, StringComparer.Ordinal);
+        _byReferenceKey = ordered
+            .Where(declaration => !string.IsNullOrWhiteSpace(declaration.ReferenceKey))
+            .GroupBy(declaration => declaration.ReferenceKey!, StringComparer.Ordinal)
+            .ToImmutableDictionary(group => group.Key, group => group.ToImmutableArray(), StringComparer.Ordinal);
         _bySymbol = new Dictionary<ISymbol, SymbolDeclaration>(SymbolEqualityComparer.Default);
         foreach (var declaration in ordered)
         {
@@ -46,6 +51,27 @@ public sealed class DeclarationCatalog
     {
         ArgumentNullException.ThrowIfNull(symbol);
         return _bySymbol.TryGetValue(symbol, out declaration!);
+    }
+
+    public bool TryGetReference(ISymbol symbol, out SymbolDeclaration declaration)
+    {
+        ArgumentNullException.ThrowIfNull(symbol);
+
+        if (!symbol.Locations.Any(location => location.IsInSource)
+            || !SymbolReferenceKey.TryCreate(symbol, out var referenceKey))
+        {
+            declaration = null!;
+            return false;
+        }
+
+        if (_byReferenceKey.TryGetValue(referenceKey, out var matches) && matches.Length == 1)
+        {
+            declaration = matches[0];
+            return true;
+        }
+
+        declaration = null!;
+        return false;
     }
 
     public bool TryGet(string canonicalKey, out SymbolDeclaration declaration)
