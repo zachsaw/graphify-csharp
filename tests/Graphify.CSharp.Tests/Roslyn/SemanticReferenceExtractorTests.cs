@@ -79,7 +79,7 @@ public sealed class SemanticReferenceExtractorTests
             declaration.Identity.Namespace == namespaceName
             && declaration.Identity.ContainingTypes.Length == 0
             && declaration.Identity.Name == typeName
-            && declaration.Identity.Kind == Graphify.CSharp.Domain.SymbolKind.Type);
+            && declaration.Identity.Kind == global::Graphify.CSharp.Domain.SymbolKind.Type);
         return Assert.Single(matches);
     }
 

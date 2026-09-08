@@ -6,6 +6,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Graphify.CSharp", "src\Grap
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Graphify.CSharp.Tests", "tests\Graphify.CSharp.Tests\Graphify.CSharp.Tests.csproj", "{D9E5B0DF-EF3E-4DE3-B4A1-CC9D5E8A504F}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Graphify.CSharp.Cli", "src\Graphify.CSharp.Cli\Graphify.CSharp.Cli.csproj", "{8C0A63D2-8D39-4BA3-9BB5-9FECE2F5B8A7}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -20,6 +22,10 @@ Global
 		{D9E5B0DF-EF3E-4DE3-B4A1-CC9D5E8A504F}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{D9E5B0DF-EF3E-4DE3-B4A1-CC9D5E8A504F}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{D9E5B0DF-EF3E-4DE3-B4A1-CC9D5E8A504F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8C0A63D2-8D39-4BA3-9BB5-9FECE2F5B8A7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8C0A63D2-8D39-4BA3-9BB5-9FECE2F5B8A7}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8C0A63D2-8D39-4BA3-9BB5-9FECE2F5B8A7}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8C0A63D2-8D39-4BA3-9BB5-9FECE2F5B8A7}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

@@ -87,7 +87,7 @@ policy, `nameof`/compile-time-only uses, and configured roots.
 
 Commit: `feat: classify production and test-only callers`
 
-### 6. Graphify serialization and command-line interface — next
+### 6. Graphify serialization and command-line interface — complete
 
 Deliver Graphify-compatible JSON, a versioned metadata envelope where needed,
 stable ordering, diagnostics, and a headless command that accepts the solution,
@@ -98,7 +98,7 @@ invalid input produces actionable diagnostics and a non-zero exit code.
 
 Commit: `feat: emit Graphify CSharp enrichment output`
 
-### 7. OSS release hardening
+### 7. OSS release hardening — next
 
 Deliver packaging, usage documentation, sample output, CI for supported SDKs,
 and a small compatibility matrix. Keep optional dispatch expansion and advanced
