@@ -6,8 +6,6 @@ namespace Graphify.CSharp.Roslyn;
 
 public sealed class DeclarationCatalog
 {
-    private readonly ImmutableDictionary<string, SymbolDeclaration> _byKey;
-    private readonly ImmutableDictionary<string, SymbolDeclaration> _byNodeId;
     private readonly ImmutableDictionary<string, ImmutableArray<SymbolDeclaration>> _byReferenceKey;
     private readonly ImmutableDictionary<string, ImmutableArray<SymbolDeclaration>> _bySourceLocation;
     private readonly Dictionary<ISymbol, SymbolDeclaration> _bySymbol;
@@ -33,8 +31,6 @@ public sealed class DeclarationCatalog
             .OrderBy(declaration => declaration.Identity.CanonicalKey, StringComparer.Ordinal)
             .ToImmutableArray();
         Declarations = ordered;
-        _byKey = ordered.ToImmutableDictionary(declaration => declaration.Identity.CanonicalKey, StringComparer.Ordinal);
-        _byNodeId = ordered.ToImmutableDictionary(declaration => declaration.Node.Id, StringComparer.Ordinal);
         _byReferenceKey = ordered
             .Where(declaration => !string.IsNullOrWhiteSpace(declaration.ReferenceKey))
             .GroupBy(declaration => declaration.ReferenceKey!, StringComparer.Ordinal)
@@ -115,15 +111,4 @@ public sealed class DeclarationCatalog
         return false;
     }
 
-    public bool TryGet(string canonicalKey, out SymbolDeclaration declaration)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(canonicalKey);
-        return _byKey.TryGetValue(canonicalKey, out declaration!);
-    }
-
-    public bool TryGetByNodeId(string nodeId, out SymbolDeclaration declaration)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(nodeId);
-        return _byNodeId.TryGetValue(nodeId, out declaration!);
-    }
 }
