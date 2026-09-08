@@ -15,6 +15,7 @@ public sealed class SemanticReferenceExtractor
 
         var edges = new List<GraphEdge>();
         var locations = new SourceLocationFactory(solution.RepositoryRoot);
+        edges.AddRange(new SemanticDeclarationRelationshipExtractor().Extract(solution, catalog, cancellationToken));
         foreach (var project in solution.Projects.OrderBy(project => project.Identity.Key, StringComparer.Ordinal))
         {
             foreach (var document in project.Project.Documents.OrderBy(document => document.FilePath ?? document.Name, StringComparer.Ordinal))

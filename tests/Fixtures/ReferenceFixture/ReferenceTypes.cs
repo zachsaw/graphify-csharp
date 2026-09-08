@@ -19,6 +19,21 @@ public sealed class ReferencedType
 {
 }
 
+public interface IContract
+{
+    int Execute(int value);
+}
+
+public class BaseContract
+{
+    public virtual int Execute(int value) => value;
+}
+
+public sealed class Contract : BaseContract, IContract
+{
+    public override int Execute(int value) => base.Execute(value);
+}
+
 public static class ProductionCaller
 {
     public static void Run()

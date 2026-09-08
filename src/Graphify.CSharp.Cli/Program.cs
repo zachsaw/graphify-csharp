@@ -1,4 +1,3 @@
-using Graphify.CSharp.Audit;
 using Graphify.CSharp.Domain;
 using Graphify.CSharp.Graphify;
 using Graphify.CSharp.Roslyn;
@@ -36,15 +35,10 @@ public static class Program
                 options.TargetFramework));
             var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
             var graph = await new SemanticReferenceExtractor().ExtractAsync(loaded, catalog);
-            var auditOptions = new AuditOptions(
-                new NamespaceTestPolicy(options.TestNamespaceSegment),
-                options.ProductionRootNodeIds);
-            var audit = new UsageAuditAnalyzer(catalog).Analyze(graph, auditOptions);
             var diagnostics = loaded.Diagnostics.Select(diagnostic => $"{diagnostic.Kind}: {diagnostic.Message}");
             var json = new GraphifyJsonSerializer().Serialize(
                 graph,
-                audit,
-                new GraphifySerializationOptions(options.TestNamespaceSegment, diagnostics));
+                new GraphifySerializationOptions(diagnostics));
 
             var outputDirectory = Path.GetDirectoryName(options.OutputPath);
             if (!string.IsNullOrWhiteSpace(outputDirectory))

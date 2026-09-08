@@ -53,6 +53,24 @@ public sealed class SemanticReferenceExtractorTests
         Assert.DoesNotContain(graph.Edges, edge => edge.TargetId == unused.Node.Id);
     }
 
+    [Fact]
+    public async Task Emits_interface_implementation_and_override_edges()
+    {
+        using var loaded = await LoadFixtureAsync();
+        var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
+        var graph = await new SemanticReferenceExtractor().ExtractAsync(loaded, catalog);
+
+        var implementation = Find(catalog, "ReferenceFixture.Production", "Contract", "Execute", "int");
+        var contractMethod = Find(catalog, "ReferenceFixture.Production", "IContract", "Execute", "int");
+        var baseMethod = Find(catalog, "ReferenceFixture.Production", "BaseContract", "Execute", "int");
+        var contractType = Find(catalog, "ReferenceFixture.Production", "Contract");
+        var contractInterface = Find(catalog, "ReferenceFixture.Production", "IContract");
+
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, implementation, contractMethod, GraphRelation.Implements));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, implementation, baseMethod, GraphRelation.Overrides));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, contractType, contractInterface, GraphRelation.Implements));
+    }
+
     private static async Task<LoadedSolution> LoadFixtureAsync()
     {
         var root = RepositoryRoot();

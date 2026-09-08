@@ -68,7 +68,24 @@ public sealed class GraphNode
             _ => throw new ArgumentOutOfRangeException(nameof(symbol), symbol.Kind, "Unknown symbol kind."),
         };
 
-        return new GraphNode(NodeId.ForSymbol(symbol), kind, symbol.DisplayName, symbol.CanonicalKey, sourceLocations, properties);
+        var semanticProperties = new List<KeyValuePair<string, string>>
+        {
+            new("namespace", symbol.Namespace),
+            new("project", symbol.Project.RelativePath),
+            new("target_framework", symbol.Project.TargetFramework),
+        };
+        if (properties is not null)
+        {
+            semanticProperties.AddRange(properties);
+        }
+
+        return new GraphNode(
+            NodeId.ForSymbol(symbol),
+            kind,
+            symbol.DisplayName,
+            symbol.CanonicalKey,
+            sourceLocations,
+            semanticProperties);
     }
 
     public GraphNode Merge(GraphNode other)

@@ -30,6 +30,9 @@ public sealed class GraphifyJsonSerializerTests
         Assert.Equal("EXTRACTED", document.RootElement.GetProperty("edges")[0].GetProperty("confidence").GetString());
         Assert.Equal("L12:C9", document.RootElement.GetProperty("edges")[0].GetProperty("source_location").GetString());
         Assert.True(document.RootElement.GetProperty("edges")[0].GetProperty("source").GetString() is not null);
+        Assert.Equal("csharp/v1", document.RootElement.GetProperty("graphify_csharp").GetProperty("schema_version").GetString());
+        Assert.False(document.RootElement.GetProperty("graphify_csharp").TryGetProperty("audit", out _));
+        Assert.Equal("App", document.RootElement.GetProperty("nodes")[0].GetProperty("properties").GetProperty("namespace").GetString());
     }
 
     [Fact]

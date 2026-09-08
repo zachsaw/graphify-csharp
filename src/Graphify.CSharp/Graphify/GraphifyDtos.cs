@@ -98,57 +98,6 @@ public sealed class GraphifyCSharpMetadataDto
     [JsonPropertyName("schema_version")]
     public required string SchemaVersion { get; init; }
 
-    [JsonPropertyName("test_namespace_segment")]
-    public required string TestNamespaceSegment { get; init; }
-
     [JsonPropertyName("diagnostics")]
     public required IReadOnlyList<string> Diagnostics { get; init; }
-
-    [JsonPropertyName("audit")]
-    public required IReadOnlyList<GraphifyAuditDto> Audit { get; init; }
-}
-
-public sealed class GraphifyAuditDto
-{
-    [JsonPropertyName("node_id")]
-    public required string NodeId { get; init; }
-
-    [JsonPropertyName("symbol_key")]
-    public required string SymbolKey { get; init; }
-
-    [JsonPropertyName("classification")]
-    public required string Classification { get; init; }
-
-    [JsonPropertyName("is_configured_production_root")]
-    public bool IsConfiguredProductionRoot { get; init; }
-
-    [JsonPropertyName("warnings")]
-    public required IReadOnlyList<string> Warnings { get; init; }
-
-    [JsonPropertyName("callers")]
-    public required IReadOnlyList<GraphifyCallerDto> Callers { get; init; }
-}
-
-public sealed class GraphifyCallerDto
-{
-    [JsonPropertyName("node_id")]
-    public required string NodeId { get; init; }
-
-    [JsonPropertyName("label")]
-    public required string Label { get; init; }
-
-    [JsonPropertyName("namespace")]
-    public string? Namespace { get; init; }
-
-    [JsonPropertyName("classification")]
-    public required string Classification { get; init; }
-
-    [JsonPropertyName("relations")]
-    public required IReadOnlyList<string> Relations { get; init; }
-
-    [JsonPropertyName("evidence")]
-    public required IReadOnlyList<string> Evidence { get; init; }
-
-    [JsonPropertyName("source_locations")]
-    public required IReadOnlyList<GraphifySourceLocationDto> SourceLocations { get; init; }
 }

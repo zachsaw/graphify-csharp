@@ -11,8 +11,7 @@ public sealed class WorkspaceLoaderTests
         var root = RepositoryRoot();
         var request = new ProjectLoadRequest(
             Path.Combine(root, "tests/Fixtures/LoaderFixture/LoaderFixture.csproj"),
-            root,
-            targetFramework: "net10.0");
+            root);
 
         using var loaded = await new RoslynWorkspaceLoader().LoadAsync(request);
 
@@ -62,6 +61,28 @@ public sealed class WorkspaceLoaderTests
         var request = new ProjectLoadRequest(Path.Combine(RepositoryRoot(), "README.md"), RepositoryRoot());
 
         await Assert.ThrowsAsync<ArgumentException>(() => new RoslynWorkspaceLoader().LoadAsync(request));
+    }
+
+    [Fact]
+    public void Resolves_single_target_framework_when_the_selector_is_omitted()
+    {
+        var path = Path.Combine(RepositoryRoot(), "tests/Fixtures/LoaderFixture/LoaderFixture.csproj");
+
+        var targetFramework = new TargetFrameworkResolver().Resolve(path, "Release");
+
+        Assert.Equal("net10.0", targetFramework);
+    }
+
+    [Fact]
+    public void Requires_a_selector_for_multi_target_projects()
+    {
+        var path = Path.Combine(RepositoryRoot(), "tests/Fixtures/MultiTargetFixture/MultiTargetFixture.csproj");
+
+        var exception = Assert.Throws<InvalidOperationException>(() => new TargetFrameworkResolver().Resolve(path, "Release"));
+
+        Assert.Contains("net10.0", exception.Message, StringComparison.Ordinal);
+        Assert.Contains("netstandard2.0", exception.Message, StringComparison.Ordinal);
+        Assert.Equal("netstandard2.0", new TargetFrameworkResolver().Resolve(path, "Release", "netstandard2.0"));
     }
 
     private static string RepositoryRoot()

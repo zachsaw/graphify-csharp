@@ -3,10 +3,10 @@
 A headless Roslyn/MSBuild semantic enricher for
 [Graphify](https://github.com/Graphify-Labs/graphify).
 
-It answers a focused audit question: which C# declarations have production
-callers, only test callers, both, or zero observed static references? It emits
-deterministic symbol nodes, directed semantic relationships, caller evidence,
-and stable source locations in Graphify’s JSON shape.
+It emits deterministic C# declaration nodes, directed Roslyn-resolved semantic
+relationships, provenance, and stable source locations in Graphify’s JSON shape.
+Downstream Graphify queries can use the edges and namespace metadata to answer
+repository-specific questions such as caller and zero-inbound-reference audits.
 
 ## Quick start
 
@@ -18,8 +18,6 @@ graphify-csharp \
   --input ./src/MyProduct.sln \
   --root . \
   --configuration Release \
-  --target-framework net10.0 \
-  --test-namespace Tests \
   --output ./graphify-out/csharp.json
 ```
 
@@ -31,22 +29,24 @@ install command with:
 dotnet run --project src/Graphify.CSharp.Cli -- --input ./src/MyProduct.sln --root .
 ```
 
-Pass an explicit `--target-framework` for multi-targeted projects. The default
-test convention treats any namespace segment named `Tests` as a test caller;
-change it with `--test-namespace`.
+`--target-framework` is optional. The loader resolves a single project target
+automatically; pass it when a project targets multiple frameworks. An ambiguous
+multi-target project fails with an actionable message instead of producing a
+mixed graph.
 
 ## Output
 
 The output keeps Graphify’s required `nodes`, `edges`, and `hyperedges` arrays.
-Edges are directed from caller/source to callee/target and use `EXTRACTED` for
-Roslyn-resolved facts. C#-specific audit evidence is additive under
-`graphify_csharp.audit`, including each direct caller, its namespace-based
-classification, relation, source locations, and warnings.
+Edges are directed from source/caller to target/contract and use `EXTRACTED` for
+Roslyn-resolved facts. v0.1 emits `calls`, `references`, `implements`, and
+`overrides`; node properties include the full symbol key, namespace, project,
+and target framework. `graphify_csharp` contains only the versioned extractor
+metadata and loader diagnostics.
 
-`ZeroReferences` means “no supported static reference was observed.” It is not
-a safe-delete proof: reflection, dependency injection, generated code,
-native/Wasm callbacks, and other runtime entry points require explicit roots or
-human review. Use `--production-root <node-id>` for a known production root.
+The enricher does not classify callers or decide whether a declaration is safe
+to remove. Reflection, dependency injection, generated code, native/Wasm
+callbacks, and other runtime mechanisms are outside static extraction and must
+be handled by the consuming analysis.
 
 ## Scope of v0.1
 
@@ -56,10 +56,10 @@ Included:
 - overload-aware symbol identity including project and TFM context;
 - direct calls, constructors, method groups, properties, fields, events, and
   `typeof` references;
-- production/test/mixed/zero-observed classification by namespace convention;
+- interface implementation and virtual override relationships;
 - stable Graphify JSON and a dependency-free command-line parser.
 
-Not a runtime reachability proof. Virtual/interface dispatch expansion,
+Not a runtime reachability proof. Interface/virtual dispatch expansion,
 reflection heuristics, DI container modeling, and host callbacks are deliberately
 bounded in v0.1 and will be added only with explicit provenance and fixtures.
 

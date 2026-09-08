@@ -1,5 +1,4 @@
 using System.Text.Json;
-using Graphify.CSharp.Audit;
 using Graphify.CSharp.Domain;
 
 namespace Graphify.CSharp.Graphify;
@@ -13,7 +12,6 @@ public sealed class GraphifyJsonSerializer
 
     public string Serialize(
         GraphSnapshot graph,
-        UsageAuditReport? audit = null,
         GraphifySerializationOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(graph);
@@ -26,7 +24,7 @@ public sealed class GraphifyJsonSerializer
             Hyperedges = Array.Empty<object>(),
             InputTokens = 0,
             OutputTokens = 0,
-            GraphifyCSharp = audit is null ? null : ToMetadata(audit, options),
+            GraphifyCSharp = ToMetadata(options),
         };
 
         return JsonSerializer.Serialize(document, SerializerOptions) + Environment.NewLine;
@@ -75,29 +73,10 @@ public sealed class GraphifyJsonSerializer
         };
     }
 
-    private static GraphifyCSharpMetadataDto ToMetadata(UsageAuditReport audit, GraphifySerializationOptions options) => new()
+    private static GraphifyCSharpMetadataDto ToMetadata(GraphifySerializationOptions options) => new()
     {
         SchemaVersion = "csharp/v1",
-        TestNamespaceSegment = options.TestNamespaceSegment,
         Diagnostics = options.Diagnostics,
-        Audit = audit.Results.Select(result => new GraphifyAuditDto
-        {
-            NodeId = result.Target.Node.Id,
-            SymbolKey = result.Target.Identity.CanonicalKey,
-            Classification = SnakeCase(result.Classification.ToString()),
-            IsConfiguredProductionRoot = result.IsConfiguredProductionRoot,
-            Warnings = result.Warnings.Select(warning => SnakeCase(warning.ToString())).ToArray(),
-            Callers = result.Callers.Select(caller => new GraphifyCallerDto
-            {
-                NodeId = caller.CallerNodeId,
-                Label = caller.CallerLabel,
-                Namespace = caller.CallerNamespace,
-                Classification = SnakeCase(caller.Classification.ToString()),
-                Relations = caller.Relations.Select(relation => SnakeCase(relation.ToString())).ToArray(),
-                Evidence = caller.Evidence.Select(evidence => evidence.ToString().ToUpperInvariant()).ToArray(),
-                SourceLocations = caller.SourceLocations.Select(ToLocation).ToArray(),
-            }).ToArray(),
-        }).ToArray(),
     };
 
     private static GraphifySourceLocationDto ToLocation(SourceLocation location) => new()

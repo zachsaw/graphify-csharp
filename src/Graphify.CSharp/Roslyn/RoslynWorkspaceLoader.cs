@@ -6,12 +6,10 @@ namespace Graphify.CSharp.Roslyn;
 
 public sealed class RoslynWorkspaceLoader : IProjectLoader
 {
-    private static readonly object RegistrationGate = new();
-
     public async Task<LoadedSolution> LoadAsync(ProjectLoadRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        EnsureMsBuildRegistered();
+        MsBuildEnvironment.EnsureRegistered();
 
         var diagnostics = new List<WorkspaceLoadDiagnostic>();
         var workspaceProperties = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -49,7 +47,11 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
                 }
 
                 var projectPath = project.FilePath ?? throw new InvalidOperationException($"Project '{project.Name}' has no file path.");
-                var identity = Domain.ProjectIdentity.FromPath(projectPath, request.RepositoryRoot, request.TargetFramework);
+                var targetFramework = new TargetFrameworkResolver().Resolve(
+                    projectPath,
+                    request.Configuration,
+                    request.TargetFramework);
+                var identity = Domain.ProjectIdentity.FromPath(projectPath, request.RepositoryRoot, targetFramework);
                 if (!seenProjectKeys.Add(identity.Key))
                 {
                     continue;
@@ -95,14 +97,4 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
         return workspace.CurrentSolution.Projects.ToArray();
     }
 
-    private static void EnsureMsBuildRegistered()
-    {
-        lock (RegistrationGate)
-        {
-            if (!MSBuildLocator.IsRegistered)
-            {
-                MSBuildLocator.RegisterDefaults();
-            }
-        }
-    }
 }

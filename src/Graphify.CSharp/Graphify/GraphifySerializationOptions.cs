@@ -4,16 +4,15 @@ namespace Graphify.CSharp.Graphify;
 
 public sealed class GraphifySerializationOptions
 {
-    public GraphifySerializationOptions(
-        string testNamespaceSegment = "Tests",
-        IEnumerable<string>? diagnostics = null)
+    public GraphifySerializationOptions(IEnumerable<string>? diagnostics = null)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(testNamespaceSegment);
-        TestNamespaceSegment = testNamespaceSegment.Trim();
-        Diagnostics = (diagnostics ?? Array.Empty<string>()).ToImmutableArray();
+        Diagnostics = (diagnostics ?? Array.Empty<string>())
+            .Where(diagnostic => !string.IsNullOrWhiteSpace(diagnostic))
+            .Select(diagnostic => diagnostic.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(diagnostic => diagnostic, StringComparer.Ordinal)
+            .ToImmutableArray();
     }
-
-    public string TestNamespaceSegment { get; }
 
     public ImmutableArray<string> Diagnostics { get; }
 }

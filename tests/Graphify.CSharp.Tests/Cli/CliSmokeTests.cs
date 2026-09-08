@@ -17,7 +17,6 @@ public sealed class CliSmokeTests
             "--input", Path.Combine(root, "tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj"),
             "--root", root,
             "--output", outputPath,
-            "--target-framework", "net10.0",
         ]);
 
         Assert.Equal(0, exitCode);

@@ -15,7 +15,7 @@ dotnet run --project src/Graphify.CSharp.Cli -- --help
 dotnet pack src/Graphify.CSharp.Cli --configuration Release
 ```
 
-## Analyze a repository
+## Extract a repository
 
 Use a repository-relative root so symbol keys and source files do not depend on
 the machine’s absolute path:
@@ -25,30 +25,34 @@ graphify-csharp \
   --input ./src/Product/Product.sln \
   --root . \
   --configuration Release \
-  --target-framework net10.0 \
-  --test-namespace Tests \
   --output ./graphify-out/csharp.json
 ```
 
 The input may be a solution, solution filter supported by MSBuild, or project
 file. A project input also loads its project references that MSBuildWorkspace
-reports. Specify one TFM when a project is multi-targeted; do not merge output
-from different TFMs unless that is an intentional analysis decision.
+reports. The TFM selector is optional for single-target projects. For a
+multi-target project, specify one TFM; the tool refuses to silently merge
+different compilations.
 
-## Read the audit
+## Read the graph
 
-Each entry in `graphify_csharp.audit` has a target node ID and one of:
+Nodes contain stable C# properties:
 
-- `production_used`: at least one caller is outside the configured test
-  namespace convention;
-- `test_only`: callers exist and every observed caller is in a test namespace;
-- `mixed`: both kinds of caller exist; or
-- `zero_references`: no supported static inbound edge was observed.
+- `symbol_key`: the complete project/TFM-aware semantic identity;
+- `namespace`: the containing namespace, or an empty string for the global
+  namespace;
+- `project`: repository-relative project path; and
+- `target_framework`: the compilation’s selected TFM.
 
-The `callers` array is the evidence list. It includes caller node ID, display
-label, namespace, classification, relation names, provenance, and source
-locations. `warnings` makes uncertainty visible. A zero-reference result is an
-audit observation, not permission to delete code.
+Edges point from the source declaration to the referenced declaration. Reverse
+the edges in Graphify to obtain callers. `calls`, `references`, `implements`,
+and `overrides` are direct Roslyn evidence; locations on each edge explain where
+the relationship was observed. Compiler-known entry points are marked on their
+node as `is_entry_point=true`.
+
+This output is evidence for downstream analysis. The enricher deliberately does
+not decide whether a caller is a test, whether a target has zero inbound edges,
+or whether code is safe to delete.
 
 ## Graphify integration
 
@@ -57,13 +61,13 @@ The file is valid Graphify extraction JSON: it has the base `nodes`, `edges`, an
 required edge confidence fields. Use Graphify’s directed mode for caller/callee
 questions. The semantic node IDs are stable hashes of full C# symbol keys, so
 this output is intended to be the authoritative C# semantic extraction for the
-analyzed scope; merging it with a name-only C# extraction requires an explicit
+selected scope; merging it with a name-only C# extraction requires an explicit
 ID-join layer.
 
 ## Known limitations
 
-The analyzer follows Roslyn-resolved source symbols. It does not claim to
+The extractor follows Roslyn-resolved source symbols. It does not claim to
 resolve arbitrary reflection strings, DI registrations, function pointers,
-P/Invoke, generated code excluded by the project, or host/Wasm callbacks. Add a
-known production root with `--production-root` and review all warnings before
-acting on zero-reference results.
+P/Invoke, generated code excluded by the project, or host/Wasm callbacks. Add
+consumer-specific roots and policies in downstream analysis, and review static
+limitations before acting on zero-inbound-reference results.

@@ -4,6 +4,6 @@
 
 - Added deterministic project/TFM-aware C# symbol identity.
 - Added Roslyn/MSBuild declaration cataloging and direct semantic references.
-- Added production/test/mixed/zero-observed caller classification.
+- Added interface implementation and virtual override relationships.
 - Added Graphify-compatible JSON and the `graphify-csharp` .NET tool command.
-- Documented dynamic-analysis boundaries and explicit production roots.
+- Documented the extraction boundary and dynamic-analysis limitations.
