@@ -29,7 +29,7 @@ configured roots rather than guessed.
 
 ## Slices
 
-### 1. Repository contract and release shape — current
+### 1. Repository contract and release shape — complete
 
 Deliver:
 
@@ -41,7 +41,7 @@ Gate: clean patch, valid skill frontmatter, and documented acceptance criteria.
 
 Commit: `docs: define Graphify C# enricher plan and skill`
 
-### 2. Pure domain model and canonical symbol identity
+### 2. Pure domain model and canonical symbol identity — complete
 
 Deliver deterministic records for symbols, relationships, provenance, source
 locations, and caller classification. Canonical keys must distinguish projects,
@@ -52,7 +52,7 @@ test-namespace classification inputs without Roslyn or MSBuild.
 
 Commit: `feat: add deterministic graph domain model`
 
-### 3. Roslyn project loading and declaration catalog
+### 3. Roslyn project loading and declaration catalog — next
 
 Deliver a headless loader for an explicit `.sln`, `.slnx`, or `.csproj` and a
 catalog of source declarations. Record project and target-framework context;

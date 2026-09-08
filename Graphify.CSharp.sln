@@ -1,0 +1,27 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Graphify.CSharp", "src\Graphify.CSharp\Graphify.CSharp.csproj", "{A5A738E1-4C08-4B92-A074-F1F88799B2C7}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Graphify.CSharp.Tests", "tests\Graphify.CSharp.Tests\Graphify.CSharp.Tests.csproj", "{D9E5B0DF-EF3E-4DE3-B4A1-CC9D5E8A504F}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{A5A738E1-4C08-4B92-A074-F1F88799B2C7}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A5A738E1-4C08-4B92-A074-F1F88799B2C7}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A5A738E1-4C08-4B92-A074-F1F88799B2C7}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A5A738E1-4C08-4B92-A074-F1F88799B2C7}.Release|Any CPU.Build.0 = Release|Any CPU
+		{D9E5B0DF-EF3E-4DE3-B4A1-CC9D5E8A504F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{D9E5B0DF-EF3E-4DE3-B4A1-CC9D5E8A504F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{D9E5B0DF-EF3E-4DE3-B4A1-CC9D5E8A504F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{D9E5B0DF-EF3E-4DE3-B4A1-CC9D5E8A504F}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal
