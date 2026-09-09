@@ -264,6 +264,7 @@ public sealed class DeclarationCatalogBuilder
     private static string DeclarationKind(ISymbol symbol) => symbol switch
     {
         INamespaceSymbol => "namespace",
+        INamedTypeSymbol type when IsUnionType(type) => "union",
         INamedTypeSymbol type => type.IsRecord
             ? type.IsValueType ? "record_struct" : "record"
             : type.TypeKind.ToString().ToLowerInvariant(),
@@ -281,6 +282,15 @@ public sealed class DeclarationCatalogBuilder
         IAliasSymbol => "alias",
         _ => symbol.Kind.ToString().ToLowerInvariant(),
     };
+
+    private static bool IsUnionType(INamedTypeSymbol type)
+    {
+#if NET11_0_OR_GREATER
+        return type.IsUnion;
+#else
+        return false;
+#endif
+    }
 
     private static bool IsSourceDeclaration(
         ISymbol symbol,

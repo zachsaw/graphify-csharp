@@ -191,10 +191,16 @@ public sealed class SemanticReferenceExtractorTests
     public async Task Resolves_source_calls_across_project_compilations()
     {
         var root = RepositoryRoot();
+#if NET11_0_OR_GREATER
+        const string targetFramework = "net11.0";
+#else
+        const string targetFramework = "net10.0";
+#endif
         using var loaded = await new RoslynWorkspaceLoader().LoadAsync(new ProjectLoadRequest(
             Path.Combine(root, "Graphify.CSharp.sln"),
             root,
-            configuration: "Release"));
+            configuration: "Release",
+            targetFramework: targetFramework));
         var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
         var graph = await new SemanticReferenceExtractor().ExtractAsync(loaded, catalog);
 

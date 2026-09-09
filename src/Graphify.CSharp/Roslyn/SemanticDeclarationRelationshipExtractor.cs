@@ -51,6 +51,16 @@ public sealed class SemanticDeclarationRelationshipExtractor
         SourceLocationFactory locations,
         ICollection<GraphEdge> edges)
     {
+#if NET11_0_OR_GREATER
+        if (type.IsUnion)
+        {
+            foreach (var caseType in type.UnionCaseTypes.OrderBy(item => item.ToDisplayString(), StringComparer.Ordinal))
+            {
+                AddEdge(source, caseType, GraphRelation.References, catalog, locations, edges);
+            }
+        }
+#endif
+
         foreach (var interfaceType in type.AllInterfaces.OrderBy(item => item.ToDisplayString(), StringComparer.Ordinal))
         {
             AddEdge(source, interfaceType, GraphRelation.Implements, catalog, locations, edges);

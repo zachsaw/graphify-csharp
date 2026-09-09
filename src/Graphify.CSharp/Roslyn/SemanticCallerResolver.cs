@@ -16,6 +16,14 @@ public sealed class SemanticCallerResolver
     {
         ArgumentNullException.ThrowIfNull(semanticModel);
 
+#if NET11_0_OR_GREATER
+        if (IsInsideUnionDeclaration(semanticModel, position))
+        {
+            return ResolveSyntaxDeclaration(semanticModel, position)
+                ?? ResolveSymbolChain(semanticModel.GetEnclosingSymbol(position));
+        }
+#endif
+
         var enclosingSymbol = semanticModel.GetEnclosingSymbol(position);
         if (!IsInsideExtensionBlock(enclosingSymbol))
         {
@@ -25,6 +33,17 @@ public sealed class SemanticCallerResolver
         var syntaxDeclaration = ResolveSyntaxDeclaration(semanticModel, position);
         return syntaxDeclaration ?? ResolveSymbolChain(enclosingSymbol);
     }
+
+#if NET11_0_OR_GREATER
+    private static bool IsInsideUnionDeclaration(SemanticModel semanticModel, int position)
+    {
+        var root = semanticModel.SyntaxTree.GetRoot();
+        var tokenPosition = Math.Clamp(position, root.FullSpan.Start, Math.Max(root.FullSpan.Start, root.FullSpan.End - 1));
+        return root.FindToken(tokenPosition).Parent?.AncestorsAndSelf()
+            .OfType<UnionDeclarationSyntax>()
+            .Any() == true;
+    }
+#endif
 
     private SymbolDeclaration? ResolveSymbolChain(ISymbol? symbol)
     {
