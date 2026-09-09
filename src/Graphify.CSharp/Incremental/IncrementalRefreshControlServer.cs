@@ -196,10 +196,36 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
         }
         catch (Exception exception) when (exception is ArgumentException or IOException or InvalidOperationException)
         {
+            await TryWriteErrorAsync(writer, exception.Message, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Keep the local control channel alive if a new Roslyn or file
+            // system exception is introduced above the session boundary.
+            await TryWriteErrorAsync(writer, exception.Message, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task TryWriteErrorAsync(
+        StreamWriter writer,
+        string message,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
             await WriteResponseAsync(
-                writer,
-                ControlResponse.Error(exception.Message),
-                cancellationToken).ConfigureAwait(false);
+                    writer,
+                    ControlResponse.Error(message),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (IOException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // The client may have disconnected while the operation failed.
+        }
+        catch (ObjectDisposedException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // The client may have disconnected while the operation failed.
         }
     }
 

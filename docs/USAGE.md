@@ -94,6 +94,13 @@ reconciliation completes before the watcher becomes healthy again. The
 previous complete JSON remains readable while recovery runs, and recovery does
 not delete user files. Stop the watcher with Ctrl-C.
 
+To exercise the packaged tool rather than the solution test doubles, run the
+repeatable watcher lifecycle check from the repository root:
+
+```text
+./scripts/run-watcher-e2e.sh
+```
+
 The input may be a solution, solution filter supported by MSBuild, project
 file, or SDK file-based `.cs` app. A project input also loads its project
 references that MSBuildWorkspace reports. For a file-based app, the SDK

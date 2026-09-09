@@ -401,6 +401,11 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
             {
                 return;
             }
+            catch (InvalidOperationException)
+            {
+                // A session that has already failed is already untrusted. The
+                // host must still continue with watcher recovery below.
+            }
         }
 
         if (releaseSignal)

@@ -336,8 +336,9 @@ Graphify JSON.
 The watcher combines the .NET `FileSystemWatcher` fast path with a configurable
 backup `PeriodicTimer` reconciliation (initial default: five minutes). The
 backup path enumerates the configured input inventory and compares cheap
-metadata, escalating to content verification or cold reconciliation when the
-inventory is uncertain. Queue overflow, watcher `Error`/buffer overflow,
+metadata. If the inventory cannot establish a complete scan boundary, it
+invalidates the session and takes the cold reconciliation path. Queue
+overflow, watcher `Error`/buffer overflow,
 missing roots, failed scans, or an uncertain event boundary tear down and
 recreate the watcher and invalidate the session; recovery scans current roots
 and completes a cold reconciliation before readiness. No user files are
@@ -365,32 +366,51 @@ foreground request. The focused watcher suite and complete solution suite pass
 on both supported frameworks (61 tests on `net10.0`, 64 on `net11.0`), and a
 real CLI watcher/client smoke run completed successfully.
 
-Commit target: `feat: add trusted watcher and manual refresh protocol`
+Commit: `feat: add trusted watcher and manual refresh protocol`
 
-### Phase 5 — release hardening and performance validation — in progress
+### Phase 5 — release hardening and performance validation — complete
 
 Deliver:
 
 - the explicit cache-invalidating `--rebuild` path through both standalone and
   watcher refreshes;
-- diagnostics/status for starting, ready, dirty, refreshing, and failed
-  sessions;
+- internal generation and session-status data for starting, ready, refreshing,
+  and failed sessions;
 - recovery after process termination and incomplete cache/output swaps;
 - focused and end-to-end tests for the documented command flows; and
-- performance measurements separating workspace load, Roslyn extraction,
-  cache merge, metadata reconciliation, serialization, and foreground wait
-  time.
+- performance measurements comparing cold startup with warm indexing,
+  metadata reconciliation, serialization, and foreground wait time.
 
 The watcher reliability defaults are now implemented: built-in
 `FileSystemWatcher` fast-path callbacks only enqueue paths, the bounded queue
 cannot silently overflow, and the five-minute metadata inventory backstop
 reuses the same invalidation path. This phase adds the final repeatable
 watch/restart/rebuild e2e script, package smoke coverage, and measured
-performance notes before release.
+performance notes before release. The metadata backstop intentionally does not
+hash every file; exact same-size/same-timestamp rewrites require `--rebuild`.
 
 The pinned real-world e2e must exercise a cold start, a warm no-change refresh,
 a changed source refresh, watcher restart, and rebuild-from-scratch. Results
 must remain deterministic and Graphify-compatible.
+
+Completed: background indexing and local control-channel failures now mark the
+warm boundary untrusted and enter the same cold watcher recovery path as an OS
+watcher error. Backup inventory failures have an explicit regression test.
+The repeatable `scripts/run-watcher-e2e.sh` check packs and installs the tool
+into an isolated path, validates cold startup, warm refresh, delayed
+publication, restart, rebuild, and Graphify JSON on both supported assets.
+
+Verification: full .NET 10 and .NET 11 suites pass (63 and 66 tests), the
+real-world Dapper gate remains deterministic at 3,656 nodes and 6,960 edges,
+the watcher package E2E passes with 159 nodes and 130 edges on net10 and net11,
+and a clean Dapper cold rebuild took 4.69 seconds versus 0.15 seconds for a
+warm clean refresh through the local watcher. `dotnet-trace` was also tried;
+its macOS/.NET-preview child-process trace stayed dominated by runtime waits
+and did not produce an actionable hot path, so no speculative optimization was
+added. `act -n` validates the complete workflow graph; a live `act` run passed
+the build, tests, and vulnerability checks, but its medium image failed only in
+the `actions/setup-dotnet` post-cache hook after the action removed `node` from
+`PATH` (the hosted GitHub runner is unaffected).
 
 Gate: full .NET 10 and .NET 11 test suites, Release builds, package/tool smoke
 tests, real-world determinism, watcher lifecycle tests, and `git diff --check`.

@@ -80,6 +80,78 @@ public sealed class IncrementalWatcherHostTests
     }
 
     [Fact]
+    public async Task Failed_backup_scan_invalidates_the_session_and_recovers()
+    {
+        var fixture = await CreateFixtureAsync();
+        try
+        {
+            var factory = new FakeWatcherFactory();
+            var scanner = new FailNextInventoryScanner();
+            var loader = new CountingLoader(new RoslynWorkspaceLoader());
+            await using var host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(
+                    backupScanInterval: TimeSpan.FromMilliseconds(50),
+                    recoveryRetryDelay: TimeSpan.FromMilliseconds(25)),
+                projectLoader: loader,
+                inventoryScanner: scanner,
+                watcherFactory: factory);
+
+            await host.StartAsync();
+            scanner.FailNext();
+
+            await WaitUntilAsync(
+                () => factory.CreateCount >= 2 && loader.LoadCount >= 2 && host.IsReady,
+                TimeSpan.FromSeconds(10));
+
+            Assert.True(host.IsReady);
+            Assert.True(scanner.ScanCount >= 3);
+            Assert.Equal(2, loader.LoadCount);
+            Assert.True(factory.Current.IsStarted);
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task Failed_background_index_invalidates_the_session_and_recovers()
+    {
+        var fixture = await CreateFixtureAsync();
+        try
+        {
+            var factory = new FakeWatcherFactory();
+            var loader = new FailNextLoader(new RoslynWorkspaceLoader());
+            await using var host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(
+                    backupScanInterval: TimeSpan.FromHours(1),
+                    recoveryRetryDelay: TimeSpan.FromMilliseconds(25)),
+                projectLoader: loader,
+                watcherFactory: factory);
+
+            await host.StartAsync();
+            loader.FailNext();
+            factory.Current.TriggerPath(fixture.ProjectPath);
+
+            await WaitUntilAsync(
+                () => factory.CreateCount >= 2 && loader.LoadCount >= 3 && host.IsReady,
+                TimeSpan.FromSeconds(10));
+
+            Assert.True(host.IsReady);
+            Assert.Equal(3, loader.LoadCount);
+            Assert.True(factory.Current.IsStarted);
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
     public async Task Local_refresh_client_uses_the_warm_watcher()
     {
         var fixture = await CreateFixtureAsync();
@@ -196,6 +268,31 @@ public sealed class IncrementalWatcherHostTests
         }
     }
 
+    private sealed class FailNextInventoryScanner : IFileInventoryScanner
+    {
+        private readonly FileInventoryScanner _inner = new();
+        private int _failNext;
+
+        public int ScanCount { get; private set; }
+
+        public void FailNext() => Interlocked.Exchange(ref _failNext, 1);
+
+        public async Task<FileInventorySnapshot> ScanAsync(
+            IReadOnlyList<string> roots,
+            string repositoryRoot,
+            bool includeContentHashes = false,
+            CancellationToken cancellationToken = default)
+        {
+            ScanCount++;
+            if (Interlocked.Exchange(ref _failNext, 0) != 0)
+            {
+                throw new InvalidDataException("synthetic backup inventory failure");
+            }
+
+            return await _inner.ScanAsync(roots, repositoryRoot, includeContentHashes, cancellationToken);
+        }
+    }
+
     private sealed class FakeWatcherFactory : IFileChangeWatcherFactory
     {
         public int CreateCount { get; private set; }
@@ -264,6 +361,32 @@ public sealed class IncrementalWatcherHostTests
         public async Task<LoadedSolution> LoadAsync(ProjectLoadRequest request, CancellationToken cancellationToken = default)
         {
             LoadCount++;
+            return await _inner.LoadAsync(request, cancellationToken);
+        }
+    }
+
+    private sealed class FailNextLoader : IProjectLoader
+    {
+        private readonly IProjectLoader _inner;
+        private int _failNext;
+
+        public FailNextLoader(IProjectLoader inner)
+        {
+            _inner = inner;
+        }
+
+        public int LoadCount { get; private set; }
+
+        public void FailNext() => Interlocked.Exchange(ref _failNext, 1);
+
+        public async Task<LoadedSolution> LoadAsync(ProjectLoadRequest request, CancellationToken cancellationToken = default)
+        {
+            LoadCount++;
+            if (Interlocked.Exchange(ref _failNext, 0) != 0)
+            {
+                throw new InvalidDataException("synthetic background indexing failure");
+            }
+
             return await _inner.LoadAsync(request, cancellationToken);
         }
     }

@@ -289,6 +289,13 @@ dotnet test Graphify.CSharp.sln --configuration Release \
   --filter FullyQualifiedName~IncrementalWatcherHostTests
 ```
 
+The packaged watcher lifecycle test exercises the real tool process, local
+refresh client, backup scan, restart, rebuild, and Graphify JSON validation:
+
+```text
+./scripts/run-watcher-e2e.sh
+```
+
 The temporary feed and tool directory are removed on exit; the pinned source
 checkout and Graphify output remain under `.e2e/` for inspection. Override the
 fixture URL, commit, TFM, configuration, or local package version with the

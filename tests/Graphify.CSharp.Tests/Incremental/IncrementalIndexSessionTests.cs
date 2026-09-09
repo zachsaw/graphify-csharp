@@ -101,7 +101,7 @@ public sealed class IncrementalIndexSessionTests
             var result = await session.RefreshAsync();
 
             Assert.Equal(2, loader.LoadCount);
-            Assert.True(result.ExtractedProjectCount > 0);
+            Assert.NotEmpty(result.Graph.Nodes);
         }
         finally
         {

@@ -1,8 +1,8 @@
 # Incremental indexing and refresh design
 
 > Status: the deterministic cache, warm worker, local refresh protocol, and
-> resilient watcher are implemented on `feature/incremental-indexing`. The
-> remaining work is release hardening and end-to-end performance validation.
+> resilient watcher are implemented on `feature/incremental-indexing`. Release
+> hardening and the documented lifecycle/performance gates are complete.
 
 ## Decision
 
@@ -79,13 +79,15 @@ The watcher combines four mechanisms:
   files are deleted as part of recovery.
 
 The backup scan is deliberately metadata-first so it does not turn every
-healthy refresh into a full content hash or Roslyn pass. A metadata collision,
-unreadable input, inventory enumeration error, or any other uncertainty
-escalates to content verification or a cold full-scope reconciliation. If the
-timer or watcher cannot establish a complete scan boundary, the session loses
-trust rather than claiming that no files changed. This gives the fast path the
-performance of events and gives a live session a bounded recovery interval for
-missed events; a process restart still requires the full cold-start rule above.
+healthy refresh into a full content hash or Roslyn pass. Normal editor saves,
+replacements, and deletes change the tracked metadata and are detected without
+reading every source file. If the scanner cannot establish a complete boundary
+because an input is unreadable, enumeration fails, or a root disappears, the
+session loses trust and performs a cold full-scope reconciliation. This version
+does not claim to detect an adversarial in-place rewrite that preserves both
+size and timestamp; use `--rebuild` when exact content verification is needed.
+The fast path therefore gets event latency plus a bounded metadata backstop,
+while watcher restart/error recovery always takes the trusted cold path above.
 
 There is no need for a third-party watcher wrapper. The reliability comes from
 the queue, explicit error/restart handling, and reconciliation policy around
@@ -222,9 +224,10 @@ Roslyn pipeline.
 
 The cache does not need to read every source file during a healthy watcher
 session. Events identify dirty inputs, and the warm workspace reads the files
-when their projects are rebuilt. During a cold reconciliation, the persisted
-manifest can use cheap filesystem metadata as a first pass and escalate to
-content inspection or full extraction when the cache cannot be verified.
+when their projects are rebuilt. A normal standalone refresh uses cheap
+filesystem metadata to reuse contributions; `--rebuild` bypasses that reuse and
+reads/extracts the complete configured scope when exact content verification is
+required.
 
 ## Refresh protocol
 
@@ -299,8 +302,10 @@ The following states are distinct:
   reconciliation.
 
 A manual refresh succeeds only when its requested generation is both indexed
-and published. A failed extraction leaves the prior complete JSON untouched and
-marks the session as requiring a cold rebuild.
+and published. A failed refresh leaves the prior complete JSON untouched. A
+background indexing failure marks the warm session untrusted and triggers cold
+recovery; a foreground failure leaves the affected work pending for a retry or
+an explicit `--rebuild`.
 
 ## Graphify compatibility
 

@@ -49,6 +49,10 @@ jobs:
         run: |
           dotnet restore tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj
           dotnet restore tests/Fixtures/CSharp14Fixture/CSharp14Fixture.csproj
+          dotnet restore tests/Fixtures/ExtensionBlockFixture/ExtensionBlockFixture.csproj
+          dotnet restore tests/Fixtures/LanguageSurfaceFixture/LanguageSurfaceFixture.csproj
+          dotnet restore tests/Fixtures/LoaderFixture/LoaderFixture.csproj
+          dotnet restore tests/Fixtures/MultiTargetFixture/MultiTargetFixture.csproj
 
       - name: Restore .NET 11 semantic fixtures
         if: matrix.framework == 'net11.0'
@@ -85,6 +89,10 @@ jobs:
         run: |
           dotnet restore tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj
           dotnet restore tests/Fixtures/CSharp14Fixture/CSharp14Fixture.csproj
+          dotnet restore tests/Fixtures/ExtensionBlockFixture/ExtensionBlockFixture.csproj
+          dotnet restore tests/Fixtures/LanguageSurfaceFixture/LanguageSurfaceFixture.csproj
+          dotnet restore tests/Fixtures/LoaderFixture/LoaderFixture.csproj
+          dotnet restore tests/Fixtures/MultiTargetFixture/MultiTargetFixture.csproj
           dotnet restore tests/Fixtures/CSharp15Fixture/CSharp15Fixture.csproj
 
       - name: Build
@@ -132,3 +140,6 @@ jobs:
 
       - name: Verify pinned real-world semantic extraction
         run: ./scripts/run-real-world-e2e.sh
+
+      - name: Verify packaged watcher lifecycle
+        run: ./scripts/run-watcher-e2e.sh

@@ -268,6 +268,18 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                     {
                         await IndexBackgroundAsync(_stop.Token).ConfigureAwait(false);
                     }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        // Background work is opportunistic. A transient write,
+                        // project change, or Roslyn failure must invalidate the
+                        // warm boundary and allow the host (when present) to
+                        // perform a trusted cold recovery. A standalone session
+                        // will take the same cold path on its next foreground
+                        // refresh.
+                        _requiresColdReconciliation = true;
+                        MarkEventDeliveryUntrusted(
+                            $"Background indexing failed and requires cold recovery: {exception.Message}");
+                    }
                     finally
                     {
                         if (Status != IncrementalSessionStatus.Failed)
