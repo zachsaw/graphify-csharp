@@ -45,6 +45,38 @@ One-shot runs keep the complete Graphify JSON public output while reusing a
 validated internal project-contribution cache when inputs are unchanged. Use
 `--rebuild` to invalidate that cache and extract every project again.
 
+For repeated work in a repository, keep one warm watcher process running:
+
+```text
+graphify-csharp \
+  --input ./src/MyProduct.sln \
+  --root . \
+  --configuration Release \
+  --output ./graphify-out/csharp.json \
+  --watch
+```
+
+The watcher keeps Roslyn state in memory, queues file-system hints, performs
+background indexing, and does not rewrite JSON for ordinary file changes. A
+normal invocation in another shell connects to that watcher and waits for the
+complete JSON publication barrier; if no matching watcher is running, it falls
+back to a cold one-shot refresh:
+
+```text
+graphify-csharp \
+  --input ./src/MyProduct.sln \
+  --root . \
+  --configuration Release \
+  --output ./graphify-out/csharp.json
+```
+
+Use `--rebuild` on that foreground command to force a full cache-invalidating
+rebuild. The watcher’s independent backup inventory scan defaults to five
+minutes and can be changed when starting it with, for example,
+`--watch-scan-interval 00:02:00`. Watcher errors, queue overflow, missing roots,
+and failed inventory scans recreate the watcher and complete a cold rebuild
+before serving the next request. No user files are removed during recovery.
+
 An SDK file-based app can be passed directly when there is no `.csproj` yet:
 
 ```text
@@ -246,6 +278,15 @@ extraction twice:
 
 ```text
 ./scripts/run-real-world-e2e.sh
+```
+
+The watcher lifecycle smoke test can be run directly from the solution tests;
+it covers missed-event backup detection, recovery after watcher failure, local
+refresh IPC, and bounded event delivery:
+
+```text
+dotnet test Graphify.CSharp.sln --configuration Release \
+  --filter FullyQualifiedName~IncrementalWatcherHostTests
 ```
 
 The temporary feed and tool directory are removed on exit; the pinned source

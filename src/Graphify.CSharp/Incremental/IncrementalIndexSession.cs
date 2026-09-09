@@ -38,7 +38,9 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     private readonly CancellationTokenSource _stop = new();
     private readonly Dictionary<string, DirtyPathState> _dirtyPaths = new(StringComparer.Ordinal);
     private long _eventClock;
+    private long _eventTrustVersion;
     private int _queuedEventCount;
+    private int _backgroundIndexRequested;
     private int _eventDeliveryUntrusted;
     private int _status = (int)IncrementalSessionStatus.Created;
     private Exception? _failure;
@@ -86,6 +88,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 
     public Guid SessionId => _generation.SessionId;
 
+    public long EventGeneration => Volatile.Read(ref _eventClock);
+
     public Task StartAsync(CancellationToken cancellationToken = default)
     {
         EnsureWorkerStarted();
@@ -123,15 +127,40 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         EnsureWorkerStarted();
         var generation = Interlocked.Increment(ref _eventClock);
         var queued = Interlocked.Increment(ref _queuedEventCount);
-        if (string.IsNullOrWhiteSpace(path)
-            || queued > EventQueueCapacity
-            || !_fileEvents.Writer.TryWrite(new FileChangeCommand(path, generation)))
+        var accepted = !string.IsNullOrWhiteSpace(path)
+            && queued <= EventQueueCapacity
+            && _fileEvents.Writer.TryWrite(new FileChangeCommand(path, generation));
+        if (!accepted)
         {
             Interlocked.Decrement(ref _queuedEventCount);
-            Interlocked.Exchange(ref _eventDeliveryUntrusted, 1);
+            MarkEventDeliveryUntrusted("The file-system event queue is full or received an invalid path.");
+        }
+        else if (Volatile.Read(ref _eventDeliveryUntrusted) == 0
+            && Interlocked.Exchange(ref _backgroundIndexRequested, 1) == 0)
+        {
+            // The event signal below wakes the worker; this flag causes the
+            // worker to index after it has drained the event queue.
         }
 
-        _workSignal.Release();
+        if (accepted)
+        {
+            _workSignal.Release();
+        }
+    }
+
+    public void RequestBackgroundIndex()
+    {
+        EnsureWorkerStarted();
+        if (Volatile.Read(ref _eventDeliveryUntrusted) != 0
+            || _requiresColdReconciliation)
+        {
+            return;
+        }
+
+        if (Interlocked.Exchange(ref _backgroundIndexRequested, 1) == 0)
+        {
+            _workSignal.Release();
+        }
     }
 
     public void ReportWatcherFailure(string reason)
@@ -224,6 +253,29 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                     Interlocked.Decrement(ref _queuedEventCount);
                     HandleFileChange(fileEvent);
                 }
+
+                // Foreground commands win over background work that was
+                // requested before the worker reached this point.
+                while (_commands.Reader.TryRead(out var foregroundCommand))
+                {
+                    await HandleCommandAsync(foregroundCommand, _stop.Token).ConfigureAwait(false);
+                }
+
+                if (Interlocked.Exchange(ref _backgroundIndexRequested, 0) != 0)
+                {
+                    _status = (int)IncrementalSessionStatus.Refreshing;
+                    try
+                    {
+                        await IndexBackgroundAsync(_stop.Token).ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        if (Status != IncrementalSessionStatus.Failed)
+                        {
+                            _status = (int)IncrementalSessionStatus.Ready;
+                        }
+                    }
+                }
             }
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested)
@@ -253,7 +305,11 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         var duePaths = DueDirtyPaths(target.EventGeneration);
         if (Volatile.Read(ref _eventDeliveryUntrusted) != 0 || duePaths.Count > 0)
         {
-            await ReconcileAsync(target, forceCold: Volatile.Read(ref _eventDeliveryUntrusted) != 0, cancellationToken)
+            await ReconcileAsync(
+                    target,
+                    forceCold: Volatile.Read(ref _eventDeliveryUntrusted) != 0,
+                    publishOutput: true,
+                    cancellationToken)
                 .ConfigureAwait(false);
             return;
         }
@@ -274,7 +330,11 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                 try
                 {
                     _status = (int)IncrementalSessionStatus.Refreshing;
-                    var result = await ReconcileAsync(refresh.Target, forceCold: refresh.Rebuild, cancellationToken)
+                    var result = await ReconcileAsync(
+                            refresh.Target,
+                            forceCold: refresh.Rebuild,
+                            publishOutput: true,
+                            cancellationToken)
                         .ConfigureAwait(false);
                     refresh.Completion.TrySetResult(result);
                     _status = (int)IncrementalSessionStatus.Ready;
@@ -295,6 +355,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     private async Task<IncrementalRefreshResult> ReconcileAsync(
         RefreshTarget target,
         bool forceCold,
+        bool publishOutput,
         CancellationToken cancellationToken)
     {
         ValidateTarget(target);
@@ -316,13 +377,20 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             _generation = _generation.AdvanceEventsThrough(
                 Math.Max(_generation.EventGeneration, target.EventGeneration));
             _generation = MarkGenerationIndexed(target.EventGeneration);
-            _generation = MarkGenerationPublished(target.EventGeneration);
+            if (!publishOutput)
+            {
+                return CreateUnpublishedResult(
+                    extractedProjectCount: 0,
+                    reusedProjectCount: _contributions.Count);
+            }
+
             var result = await PublishCurrentAsync(
-                target,
-                extractedProjectCount: 0,
-                reusedProjectCount: _contributions.Count,
-                outputRepublished: false,
-                cancellationToken).ConfigureAwait(false);
+                    target,
+                    extractedProjectCount: 0,
+                    reusedProjectCount: _contributions.Count,
+                    outputRepublished: _generation.PublishedGeneration < target.EventGeneration,
+                    cancellationToken)
+                .ConfigureAwait(false);
             ClearDirtyPaths(duePaths, target.EventGeneration);
             return result;
         }
@@ -331,10 +399,18 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         var reusedProjectCount = 0;
         if (fullRebuild)
         {
+            var trustVersionAtStart = Volatile.Read(ref _eventTrustVersion);
             await LoadAndExtractAllAsync(cancellationToken).ConfigureAwait(false);
             extractedProjectCount = _contributions.Count;
             _requiresColdReconciliation = false;
-            Interlocked.Exchange(ref _eventDeliveryUntrusted, 0);
+            if (Volatile.Read(ref _eventTrustVersion) == trustVersionAtStart)
+            {
+                Interlocked.Exchange(ref _eventDeliveryUntrusted, 0);
+            }
+            else
+            {
+                _requiresColdReconciliation = true;
+            }
         }
         else
         {
@@ -406,6 +482,12 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         _generation = _generation.AdvanceEventsThrough(
             Math.Max(_generation.EventGeneration, target.EventGeneration));
         _generation = MarkGenerationIndexed(target.EventGeneration);
+        if (!publishOutput)
+        {
+            ClearDirtyPaths(duePaths, target.EventGeneration);
+            return CreateUnpublishedResult(extractedProjectCount, reusedProjectCount);
+        }
+
         var published = await PublishCurrentAsync(
             target,
             extractedProjectCount,
@@ -414,6 +496,42 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             cancellationToken).ConfigureAwait(false);
         ClearDirtyPaths(duePaths, target.EventGeneration);
         return published;
+    }
+
+    private async Task IndexBackgroundAsync(CancellationToken cancellationToken)
+    {
+        if (Volatile.Read(ref _eventDeliveryUntrusted) != 0)
+        {
+            return;
+        }
+
+        DrainFileEvents();
+        var target = new RefreshTarget(_generation.SessionId, Volatile.Read(ref _eventClock));
+        await ReconcileAsync(
+                target,
+                forceCold: false,
+                publishOutput: false,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private IncrementalRefreshResult CreateUnpublishedResult(
+        int extractedProjectCount,
+        int reusedProjectCount)
+    {
+        if (string.IsNullOrWhiteSpace(_publishedOutputDigest))
+        {
+            throw new InvalidOperationException("Background indexing cannot complete before the initial output is published.");
+        }
+
+        return new IncrementalRefreshResult(
+            MergeContributions(_contributions.Values),
+            _publishedOutputDigest,
+            IncrementalCacheLoadStatus.Missing,
+            extractedProjectCount,
+            reusedProjectCount,
+            outputRepublished: false,
+            _generation);
     }
 
     private async Task<IncrementalRefreshResult> PublishCurrentAsync(
@@ -641,6 +759,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     {
         if (Interlocked.Exchange(ref _eventDeliveryUntrusted, 1) == 0)
         {
+            Interlocked.Increment(ref _eventTrustVersion);
             try
             {
                 _trustLostCallback?.Invoke(reason);

@@ -138,6 +138,36 @@ public sealed class IncrementalIndexSessionTests
         }
     }
 
+    [Fact]
+    public async Task A_full_event_queue_marks_delivery_untrusted_without_blocking_the_callback()
+    {
+        var fixture = await CreateFixtureAsync();
+        try
+        {
+            var trustLost = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var loader = new CountingLoader(new RoslynWorkspaceLoader(), TimeSpan.FromSeconds(1));
+            await using var session = new IncrementalIndexSession(
+                fixture.Request,
+                fixture.OutputPath,
+                loader,
+                trustLostCallback: reason => trustLost.TrySetResult(reason));
+            _ = session.StartAsync();
+
+            for (var index = 0; index < 5000; index++)
+            {
+                session.ReportFileChanged(fixture.SourcePath);
+            }
+
+            var reason = await trustLost.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.Contains("queue", reason, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
     private static async Task<Fixture> CreateFixtureAsync()
     {
         var repositoryRoot = RepositoryRoot();

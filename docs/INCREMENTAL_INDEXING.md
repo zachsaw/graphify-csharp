@@ -1,8 +1,8 @@
 # Incremental indexing and refresh design
 
-> Status: the deterministic cache and cold reconciliation are implemented for
-> the one-shot CLI, including `--rebuild`. The warm worker, local refresh
-> protocol, and watcher remain in the later implementation phases below.
+> Status: the deterministic cache, warm worker, local refresh protocol, and
+> resilient watcher are implemented on `feature/incremental-indexing`. The
+> remaining work is release hardening and end-to-end performance validation.
 
 ## Decision
 

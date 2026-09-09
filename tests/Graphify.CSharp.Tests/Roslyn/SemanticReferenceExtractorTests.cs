@@ -212,7 +212,7 @@ public sealed class SemanticReferenceExtractorTests
         var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
         var graph = await new SemanticReferenceExtractor().ExtractAsync(loaded, catalog);
 
-        var main = FindProjectMember(catalog, "src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj", "Graphify.CSharp.Cli", "Program", SymbolKind.Method, "Main", "string[]");
+        var main = FindProjectMember(catalog, "src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj", "Graphify.CSharp.Cli", "Program", SymbolKind.Method, "RunAsync", "string[]", "System.Threading.CancellationToken");
         var refresh = FindProjectMember(catalog, "src/Graphify.CSharp/Graphify.CSharp.csproj", "Graphify.CSharp.Incremental", "IncrementalRefreshEngine", SymbolKind.Method, "RefreshAsync", "Graphify.CSharp.Roslyn.ProjectLoadRequest", "string", "bool", "System.Threading.CancellationToken");
         var resultGraph = FindProjectMember(catalog, "src/Graphify.CSharp/Graphify.CSharp.csproj", "Graphify.CSharp.Incremental", "IncrementalRefreshResult", SymbolKind.Method, "get_Graph");
 

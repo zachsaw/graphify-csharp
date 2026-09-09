@@ -323,7 +323,7 @@ supported frameworks (56 tests on `net10.0`, 59 on `net11.0`).
 
 Commit target: `feat: add warm incremental refresh session`
 
-### Phase 4 — trusted file watcher and background indexing — in progress
+### Phase 4 — trusted file watcher and background indexing — complete
 
 Deliver the long-running `--watch` mode using the session from Phase 3. The
 watcher subscribes before its initial cold reconciliation, records filesystem
@@ -361,11 +361,13 @@ manual refresh while cold or warm work is running, background-to-foreground
 promotion, dirty work coalescing, event queue overflow, backup-timer detection,
 watcher recreation, failed reconciliation, and output visibility during
 replacement. The watcher must not create a second MSBuild workspace for a
-foreground request.
+foreground request. The focused watcher suite and complete solution suite pass
+on both supported frameworks (61 tests on `net10.0`, 64 on `net11.0`), and a
+real CLI watcher/client smoke run completed successfully.
 
 Commit target: `feat: add trusted watcher and manual refresh protocol`
 
-### Phase 5 — release hardening and performance validation
+### Phase 5 — release hardening and performance validation — in progress
 
 Deliver:
 
@@ -378,6 +380,13 @@ Deliver:
 - performance measurements separating workspace load, Roslyn extraction,
   cache merge, metadata reconciliation, serialization, and foreground wait
   time.
+
+The watcher reliability defaults are now implemented: built-in
+`FileSystemWatcher` fast-path callbacks only enqueue paths, the bounded queue
+cannot silently overflow, and the five-minute metadata inventory backstop
+reuses the same invalidation path. This phase adds the final repeatable
+watch/restart/rebuild e2e script, package smoke coverage, and measured
+performance notes before release.
 
 The pinned real-world e2e must exercise a cold start, a warm no-change refresh,
 a changed source refresh, watcher restart, and rebuild-from-scratch. Results

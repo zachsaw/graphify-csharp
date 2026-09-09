@@ -1,7 +1,7 @@
 # Usage
 
-The planned incremental indexing, watcher, refresh, and cache-rebuild behavior
-is described in [Incremental indexing and refresh design](INCREMENTAL_INDEXING.md).
+The incremental indexing, watcher, refresh, and cache-rebuild behavior is
+described in [Incremental indexing and refresh design](INCREMENTAL_INDEXING.md).
 
 ## Install
 
@@ -54,6 +54,45 @@ graphify-csharp \
 The cache is an implementation detail and is safe to delete. A missing,
 incompatible, corrupt, or incomplete cache causes a cold extraction; it is
 never treated as evidence for a partial graph.
+
+## Keep a warm watcher
+
+For repeated refreshes, start one watcher for the selected input identity:
+
+```text
+graphify-csharp \
+  --input ./src/Product/Product.sln \
+  --root . \
+  --configuration Release \
+  --output ./graphify-out/csharp.json \
+  --watch
+```
+
+The watcher subscribes before its cold startup, keeps the loaded Roslyn
+workspace alive, and queues file-system paths without doing extraction in an
+OS callback. It may index dirty projects in the background, but ordinary file
+changes do not publish a new JSON document. Run the normal command when a
+consumer needs a fresh snapshot; it connects to the matching local watcher and
+waits until the complete document is atomically published:
+
+```text
+graphify-csharp \
+  --input ./src/Product/Product.sln \
+  --root . \
+  --configuration Release \
+  --output ./graphify-out/csharp.json
+```
+
+If there is no live matching watcher, the normal command performs a cold
+one-shot refresh. `--rebuild` forces a full cache-invalidating extraction in
+either mode. The watcher keeps an OS file watcher for low latency and runs an
+independent metadata inventory scan every five minutes by default. Change the
+interval at startup with `--watch-scan-interval 00:02:00`. Watcher errors,
+native-buffer overflow, bounded-queue overflow, missing roots, or an incomplete
+backup scan invalidate the session; subscriptions are recreated and a cold
+reconciliation completes before the watcher becomes healthy again. The
+previous complete JSON remains readable while recovery runs, and recovery does
+not delete user files. Stop the watcher with Ctrl-C.
 
 The input may be a solution, solution filter supported by MSBuild, project
 file, or SDK file-based `.cs` app. A project input also loads its project
