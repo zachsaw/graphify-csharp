@@ -24,4 +24,9 @@ internal static class IncrementalHashing
             options: FileOptions.SequentialScan);
         return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
     }
+
+    public static bool IsSha256(string value) =>
+        !string.IsNullOrWhiteSpace(value)
+        && value.Length == SHA256.HashSizeInBytes * 2
+        && value.All(Uri.IsHexDigit);
 }

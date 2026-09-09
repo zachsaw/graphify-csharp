@@ -229,7 +229,7 @@ same-repository public shard format.
 Gate: clean branch baseline, design document linked from usage documentation,
 and no implementation behavior changed by the planning work.
 
-### Phase 1 — deterministic refresh state and cache primitives — in progress
+### Phase 1 — deterministic refresh state and cache primitives — complete
 
 Deliver small, Roslyn-independent contracts for:
 
@@ -239,9 +239,11 @@ Deliver small, Roslyn-independent contracts for:
 - project/TFM contribution envelopes; and
 - atomic, versioned cache read/write with compatibility rejection.
 
-Current progress: the Roslyn-independent contracts, deterministic wire
-envelope, atomic store, and focused tests are implemented. The phase remains
-open until both supported target frameworks and its stated failure cases pass.
+Completed: the Roslyn-independent contracts, deterministic wire envelope,
+atomic store, and focused tests are implemented. The focused gate passes on
+both `net10.0` and `net11.0`, including schema/request incompatibility,
+corrupt/incomplete state, deterministic round trips, generation ordering, and
+atomic failure retention.
 
 The cache format must be domain data rather than serialized Roslyn objects.
 Stable ordering, explicit schema/version checks, and safe handling of corrupt
@@ -254,7 +256,7 @@ this phase.
 
 Commit target: `feat: add incremental refresh state and cache contracts`
 
-### Phase 2 — contribution extraction and cold reconciliation
+### Phase 2 — contribution extraction and cold reconciliation — complete
 
 Deliver:
 
@@ -265,6 +267,13 @@ Deliver:
 - project/TFM invalidation for changed, added, and deleted source inputs;
 - reverse project-reference invalidation for dependent compilations; and
 - atomic reconstruction of the complete Graphify JSON document.
+
+Completed: per-project contribution extraction, complete-scope reconciliation,
+cache reuse, reverse dependency invalidation, atomic output, output validation,
+and the CLI `--rebuild` switch. Added/deleted sources invalidate their owning
+project; changed projects invalidate reverse project-reference dependents.
+The full supported-framework suite passes (`51` tests on `net10.0`, `54` on
+`net11.0`), and the pinned package/fixture e2e remains deterministic.
 
 Normal one-shot refresh must avoid content reads and Roslyn extraction for
 verified unchanged projects where possible. A missing, incompatible, corrupt,
@@ -279,7 +288,7 @@ a clean full extraction.
 
 Commit target: `feat: add deterministic cold incremental refresh`
 
-### Phase 3 — warm indexer session and manual refresh barrier
+### Phase 3 — warm indexer session and manual refresh barrier — in progress
 
 Deliver a single worker-owned session that keeps the loaded solution, project
 graph, Roslyn state where safe, contribution cache, dirty set, and generation
@@ -291,6 +300,11 @@ state in memory. A manual refresh request must:
 - wait until the requested generation is indexed and serialized;
 - validate and atomically publish `csharp.json`; and
 - return only after publication succeeds.
+
+Current progress: beginning the single-worker request coordinator. The one-shot
+engine from Phase 2 is the cold/rebuild fallback; this phase adds in-memory
+workspace reuse, coalesced requests, dirty generations, and a foreground
+publication barrier without changing the public Graphify document.
 
 Clean requests return the current published generation without loading Roslyn
 or rewriting JSON. Events arriving after a request’s target generation remain

@@ -37,6 +37,24 @@ graphify-csharp \
   --output ./graphify-out/csharp.json
 ```
 
+The first run performs a cold reconciliation and stores internal contribution
+state under `.graphify-csharp/` beside the output. Later one-shot runs compare
+project/source fingerprints, reuse unchanged project contributions, and still
+write one complete Graphify document. To intentionally invalidate that state:
+
+```text
+graphify-csharp \
+  --input ./src/Product/Product.sln \
+  --root . \
+  --configuration Release \
+  --output ./graphify-out/csharp.json \
+  --rebuild
+```
+
+The cache is an implementation detail and is safe to delete. A missing,
+incompatible, corrupt, or incomplete cache causes a cold extraction; it is
+never treated as evidence for a partial graph.
+
 The input may be a solution, solution filter supported by MSBuild, project
 file, or SDK file-based `.cs` app. A project input also loads its project
 references that MSBuildWorkspace reports. For a file-based app, the SDK

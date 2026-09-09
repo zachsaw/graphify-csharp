@@ -242,9 +242,18 @@ internal sealed class IncrementalCacheStore
         [JsonPropertyName("contributions")]
         public List<ContributionDto>? Contributions { get; init; }
 
+        [JsonPropertyName("diagnostics")]
+        public List<string>? Diagnostics { get; init; }
+
+        [JsonPropertyName("published_output_path")]
+        public string? PublishedOutputPath { get; init; }
+
+        [JsonPropertyName("published_output_digest")]
+        public string? PublishedOutputDigest { get; init; }
+
         public IncrementalCacheState ToModel()
         {
-            if (Request is null || Generation is null || Manifest is null || Contributions is null)
+            if (Request is null || Generation is null || Manifest is null || Contributions is null || Diagnostics is null)
             {
                 throw new InvalidDataException("The incremental cache is missing a required section.");
             }
@@ -257,7 +266,14 @@ internal sealed class IncrementalCacheStore
             var manifest = Manifest
                 .Select(entry => entry.ToModel())
                 .ToArray();
-            return new IncrementalCacheState(request, contributions, manifest, generation);
+            return new IncrementalCacheState(
+                request,
+                contributions,
+                manifest,
+                generation,
+                Diagnostics,
+                PublishedOutputPath,
+                PublishedOutputDigest);
         }
 
         public static IncrementalCacheDocumentDto FromModel(IncrementalCacheState state) => new()
@@ -267,6 +283,9 @@ internal sealed class IncrementalCacheStore
             Generation = GenerationDto.FromModel(state.Generation),
             Manifest = state.Manifest.Select(ManifestEntryDto.FromModel).ToList(),
             Contributions = state.Contributions.Select(ContributionDto.FromModel).ToList(),
+            Diagnostics = state.Diagnostics.ToList(),
+            PublishedOutputPath = state.PublishedOutputPath,
+            PublishedOutputDigest = state.PublishedOutputDigest,
         };
     }
 

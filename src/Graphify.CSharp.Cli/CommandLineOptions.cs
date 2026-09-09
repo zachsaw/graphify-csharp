@@ -8,6 +8,7 @@ public sealed class CommandLineOptions
         string outputPath,
         string configuration,
         string? targetFramework,
+        bool rebuild,
         bool showHelp)
     {
         InputPath = inputPath;
@@ -15,6 +16,7 @@ public sealed class CommandLineOptions
         OutputPath = outputPath;
         Configuration = configuration;
         TargetFramework = targetFramework;
+        Rebuild = rebuild;
         ShowHelp = showHelp;
     }
 
@@ -28,6 +30,8 @@ public sealed class CommandLineOptions
 
     public string? TargetFramework { get; }
 
+    public bool Rebuild { get; }
+
     public bool ShowHelp { get; }
 
     public static CommandLineOptions Parse(IReadOnlyList<string> args)
@@ -37,12 +41,24 @@ public sealed class CommandLineOptions
         var values = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         var positionalInput = (string?)null;
         var showHelp = false;
+        var rebuild = false;
         for (var index = 0; index < args.Count; index++)
         {
             var argument = args[index];
             if (argument is "--help" or "-h")
             {
                 showHelp = true;
+                continue;
+            }
+
+            if (argument == "--rebuild")
+            {
+                if (rebuild)
+                {
+                    throw new CommandLineException("Option '--rebuild' may only be supplied once.");
+                }
+
+                rebuild = true;
                 continue;
             }
 
@@ -88,6 +104,7 @@ public sealed class CommandLineOptions
                 outputPath: string.Empty,
                 configuration: "Debug",
                 targetFramework: null,
+                rebuild: false,
                 showHelp: true);
         }
 
@@ -113,6 +130,7 @@ public sealed class CommandLineOptions
             outputPath,
             configuration.Trim(),
             Single(values, "target-framework"),
+            rebuild,
             showHelp: false);
     }
 
@@ -123,6 +141,7 @@ public sealed class CommandLineOptions
         + "  -o, --output <path>             Graphify JSON output path\n"
         + "  -c, --configuration <name>      MSBuild configuration (default: Debug)\n"
         + "  -f, --target-framework <tfm>    Select one TFM when target selection is ambiguous\n"
+        + "      --rebuild                  Ignore incremental cache and rebuild all projects\n"
         + "  -h, --help                      Show this help";
 
     private static string? Single(IReadOnlyDictionary<string, List<string>> values, string key)

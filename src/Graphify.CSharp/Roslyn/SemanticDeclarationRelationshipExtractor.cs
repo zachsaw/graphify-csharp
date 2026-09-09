@@ -8,7 +8,8 @@ public sealed class SemanticDeclarationRelationshipExtractor
     public IReadOnlyList<GraphEdge> Extract(
         LoadedSolution solution,
         DeclarationCatalog catalog,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        IReadOnlySet<string>? projectKeys = null)
     {
         ArgumentNullException.ThrowIfNull(solution);
         ArgumentNullException.ThrowIfNull(catalog);
@@ -18,6 +19,11 @@ public sealed class SemanticDeclarationRelationshipExtractor
         foreach (var declaration in catalog.Declarations.OrderBy(item => item.Identity.CanonicalKey, StringComparer.Ordinal))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (projectKeys is not null && !projectKeys.Contains(declaration.Identity.Project.Key))
+            {
+                continue;
+            }
+
             switch (declaration.Symbol)
             {
                 case INamedTypeSymbol type:

@@ -213,15 +213,11 @@ public sealed class SemanticReferenceExtractorTests
         var graph = await new SemanticReferenceExtractor().ExtractAsync(loaded, catalog);
 
         var main = FindProjectMember(catalog, "src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj", "Graphify.CSharp.Cli", "Program", SymbolKind.Method, "Main", "string[]");
-        var loader = FindProjectMember(catalog, "src/Graphify.CSharp/Graphify.CSharp.csproj", "Graphify.CSharp.Roslyn", "RoslynWorkspaceLoader", SymbolKind.Method, "LoadAsync", "Graphify.CSharp.Roslyn.ProjectLoadRequest", "System.Threading.CancellationToken");
-        var builder = FindProjectMember(catalog, "src/Graphify.CSharp/Graphify.CSharp.csproj", "Graphify.CSharp.Roslyn", "DeclarationCatalogBuilder", SymbolKind.Method, "BuildAsync", "Graphify.CSharp.Roslyn.LoadedSolution", "System.Threading.CancellationToken");
-        var extractor = FindProjectMember(catalog, "src/Graphify.CSharp/Graphify.CSharp.csproj", "Graphify.CSharp.Roslyn", "SemanticReferenceExtractor", SymbolKind.Method, "ExtractAsync", "Graphify.CSharp.Roslyn.LoadedSolution", "Graphify.CSharp.Roslyn.DeclarationCatalog", "System.Threading.CancellationToken");
-        var serializer = FindProjectMember(catalog, "src/Graphify.CSharp/Graphify.CSharp.csproj", "Graphify.CSharp.Graphify", "GraphifyJsonSerializer", SymbolKind.Method, "Serialize", "Graphify.CSharp.Domain.GraphSnapshot", "Graphify.CSharp.Graphify.GraphifySerializationOptions");
+        var refresh = FindProjectMember(catalog, "src/Graphify.CSharp/Graphify.CSharp.csproj", "Graphify.CSharp.Incremental", "IncrementalRefreshEngine", SymbolKind.Method, "RefreshAsync", "Graphify.CSharp.Roslyn.ProjectLoadRequest", "string", "bool", "System.Threading.CancellationToken");
+        var resultGraph = FindProjectMember(catalog, "src/Graphify.CSharp/Graphify.CSharp.csproj", "Graphify.CSharp.Incremental", "IncrementalRefreshResult", SymbolKind.Method, "get_Graph");
 
-        Assert.Contains(graph.Edges, edge => IsEdge(edge, main, loader, GraphRelation.Calls));
-        Assert.Contains(graph.Edges, edge => IsEdge(edge, main, builder, GraphRelation.Calls));
-        Assert.Contains(graph.Edges, edge => IsEdge(edge, main, extractor, GraphRelation.Calls));
-        Assert.Contains(graph.Edges, edge => IsEdge(edge, main, serializer, GraphRelation.Calls));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, main, refresh, GraphRelation.Calls));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, main, resultGraph, GraphRelation.Calls));
     }
 
     private static async Task<LoadedSolution> LoadFixtureAsync()

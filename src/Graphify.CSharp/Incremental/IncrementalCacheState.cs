@@ -8,7 +8,10 @@ internal sealed class IncrementalCacheState
         RefreshRequestIdentity request,
         IEnumerable<ProjectContributionEnvelope> contributions,
         IEnumerable<IncrementalManifestEntry> manifest,
-        RefreshGeneration generation)
+        RefreshGeneration generation,
+        IEnumerable<string>? diagnostics = null,
+        string? publishedOutputPath = null,
+        string? publishedOutputDigest = null)
     {
         Request = request ?? throw new ArgumentNullException(nameof(request));
         Generation = generation ?? throw new ArgumentNullException(nameof(generation));
@@ -18,6 +21,26 @@ internal sealed class IncrementalCacheState
         Manifest = (manifest ?? throw new ArgumentNullException(nameof(manifest)))
             .OrderBy(entry => entry.Project.Key, StringComparer.Ordinal)
             .ToImmutableArray();
+        Diagnostics = (diagnostics ?? Array.Empty<string>())
+            .Where(diagnostic => !string.IsNullOrWhiteSpace(diagnostic))
+            .Select(diagnostic => diagnostic.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(diagnostic => diagnostic, StringComparer.Ordinal)
+            .ToImmutableArray();
+        if ((publishedOutputPath is null) != (publishedOutputDigest is null))
+        {
+            throw new ArgumentException("Published output path and digest must be supplied together.");
+        }
+
+        PublishedOutputPath = publishedOutputPath is null
+            ? null
+            : IncrementalPaths.CanonicalAbsolutePath(publishedOutputPath);
+        if (publishedOutputDigest is not null && !IncrementalHashing.IsSha256(publishedOutputDigest))
+        {
+            throw new ArgumentException("Published output digest must be a SHA-256 hexadecimal digest.", nameof(publishedOutputDigest));
+        }
+
+        PublishedOutputDigest = publishedOutputDigest?.ToLowerInvariant();
 
         Validate();
     }
@@ -29,6 +52,12 @@ internal sealed class IncrementalCacheState
     public ImmutableArray<IncrementalManifestEntry> Manifest { get; }
 
     public RefreshGeneration Generation { get; }
+
+    public ImmutableArray<string> Diagnostics { get; }
+
+    public string? PublishedOutputPath { get; }
+
+    public string? PublishedOutputDigest { get; }
 
     private void Validate()
     {

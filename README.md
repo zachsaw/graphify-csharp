@@ -41,6 +41,10 @@ The install/update `--framework` selects the tool runtime. The command’s
 still only needed when that project is multi-targeted or when a particular
 target must be inspected.
 
+One-shot runs keep the complete Graphify JSON public output while reusing a
+validated internal project-contribution cache when inputs are unchanged. Use
+`--rebuild` to invalidate that cache and extract every project again.
+
 An SDK file-based app can be passed directly when there is no `.csproj` yet:
 
 ```text

@@ -1,5 +1,4 @@
-using Graphify.CSharp.Domain;
-using Graphify.CSharp.Graphify;
+using Graphify.CSharp.Incremental;
 using Graphify.CSharp.Roslyn;
 
 namespace Graphify.CSharp.Cli;
@@ -28,30 +27,17 @@ public static class Program
 
         try
         {
-            using var loaded = await new RoslynWorkspaceLoader().LoadAsync(new ProjectLoadRequest(
-                options.InputPath,
-                options.RepositoryRoot,
-                options.Configuration,
-                options.TargetFramework));
-            var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
-            var extractor = new SemanticReferenceExtractor();
-            var graph = await extractor.ExtractAsync(loaded, catalog);
-            var diagnostics = loaded.Diagnostics
-                .Select(diagnostic => $"{diagnostic.Kind}: {diagnostic.Message}")
-                .Concat(catalog.Diagnostics)
-                .Concat(extractor.Diagnostics);
-            var json = new GraphifyJsonSerializer().Serialize(
-                graph,
-                new GraphifySerializationOptions(diagnostics));
-
-            var outputDirectory = Path.GetDirectoryName(options.OutputPath);
-            if (!string.IsNullOrWhiteSpace(outputDirectory))
-            {
-                Directory.CreateDirectory(outputDirectory);
-            }
-
-            await File.WriteAllTextAsync(options.OutputPath, json);
-            Console.WriteLine($"Wrote {graph.Nodes.Length} nodes and {graph.Edges.Length} edges to {options.OutputPath}.");
+            var result = await new IncrementalRefreshEngine().RefreshAsync(
+                new ProjectLoadRequest(
+                    options.InputPath,
+                    options.RepositoryRoot,
+                    options.Configuration,
+                    options.TargetFramework),
+                options.OutputPath,
+                options.Rebuild);
+            var mode = result.ExtractedProjectCount == 0 ? "reused" : $"extracted {result.ExtractedProjectCount} project(s)";
+            Console.WriteLine(
+                $"Wrote {result.Graph.Nodes.Length} nodes and {result.Graph.Edges.Length} edges to {options.OutputPath} ({mode}, reused {result.ReusedProjectCount}).");
             return 0;
         }
         catch (Exception exception) when (exception is ArgumentException or IOException or InvalidOperationException)

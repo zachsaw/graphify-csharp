@@ -1,8 +1,8 @@
 # Incremental indexing and refresh design
 
-> Status: design for a future implementation. The current CLI remains a
-> one-shot extractor and does not yet provide watcher, refresh, or rebuild
-> commands.
+> Status: the deterministic cache and cold reconciliation are implemented for
+> the one-shot CLI, including `--rebuild`. The warm worker, local refresh
+> protocol, and watcher remain in the later implementation phases below.
 
 ## Decision
 

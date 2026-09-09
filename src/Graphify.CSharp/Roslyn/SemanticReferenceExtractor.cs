@@ -16,18 +16,48 @@ public sealed class SemanticReferenceExtractor
         ArgumentNullException.ThrowIfNull(solution);
         ArgumentNullException.ThrowIfNull(catalog);
 
+        var contributions = await ExtractContributionsAsync(solution, catalog, cancellationToken: cancellationToken)
+            .ConfigureAwait(false);
+        return GraphSnapshot.Create(
+            contributions.SelectMany(contribution => contribution.Graph.Nodes),
+            contributions.SelectMany(contribution => contribution.Graph.Edges));
+    }
+
+    internal async Task<IReadOnlyList<ExtractedProjectContribution>> ExtractContributionsAsync(
+        LoadedSolution solution,
+        DeclarationCatalog catalog,
+        IReadOnlySet<string>? projectKeys = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(solution);
+        ArgumentNullException.ThrowIfNull(catalog);
+
         var diagnostics = new HashSet<string>(StringComparer.Ordinal);
-        var edges = new GraphEdgeAccumulator();
         var locations = new SourceLocationFactory(solution.RepositoryRoot);
-        foreach (var edge in new SemanticDeclarationRelationshipExtractor().Extract(solution, catalog, cancellationToken))
-        {
-            edges.Add(edge);
-        }
+        var projectByNodeId = catalog.Declarations.ToDictionary(
+            declaration => declaration.Node.Id,
+            declaration => declaration.Identity.Project.Key,
+            StringComparer.Ordinal);
+        var relationshipEdgesByProject = new SemanticDeclarationRelationshipExtractor()
+            .Extract(solution, catalog, cancellationToken, projectKeys)
+            .Where(edge => projectByNodeId.ContainsKey(edge.SourceId))
+            .GroupBy(edge => projectByNodeId[edge.SourceId], StringComparer.Ordinal)
+            .ToDictionary(
+                group => group.Key,
+                group => group.ToArray(),
+                StringComparer.Ordinal);
+        var contributions = new List<ExtractedProjectContribution>();
         foreach (var project in solution.Projects.OrderBy(project => project.Identity.Key, StringComparer.Ordinal))
         {
+            var edges = new GraphEdgeAccumulator();
             foreach (var document in project.Project.Documents.OrderBy(document => document.FilePath ?? document.Name, StringComparer.Ordinal))
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (projectKeys is not null && !projectKeys.Contains(project.Identity.Key))
+                {
+                    break;
+                }
+
                 var root = await document.GetSyntaxRootAsync(cancellationToken).ConfigureAwait(false);
                 if (root is null)
                 {
@@ -45,12 +75,36 @@ public sealed class SemanticReferenceExtractor
                     diagnostics.Add(SemanticDiagnostic(solution, project, document, exception));
                 }
             }
+
+            if (projectKeys is not null && !projectKeys.Contains(project.Identity.Key))
+            {
+                continue;
+            }
+
+            if (relationshipEdgesByProject.TryGetValue(project.Identity.Key, out var relationshipEdges))
+            {
+                foreach (var edge in relationshipEdges)
+                {
+                    edges.Add(edge);
+                }
+            }
+
+            var projectDiagnostics = diagnostics
+                .Where(diagnostic => diagnostic.Contains($"project '{project.Identity.RelativePath}'", StringComparison.Ordinal))
+                .ToArray();
+            var nodes = catalog.Declarations
+                .Where(declaration => string.Equals(declaration.Identity.Project.Key, project.Identity.Key, StringComparison.Ordinal))
+                .Select(declaration => declaration.Node);
+            contributions.Add(new ExtractedProjectContribution(
+                project.Identity,
+                GraphSnapshot.Create(nodes, edges),
+                projectDiagnostics));
         }
 
         Diagnostics = diagnostics
             .OrderBy(diagnostic => diagnostic, StringComparer.Ordinal)
             .ToImmutableArray();
-        return GraphSnapshot.Create(catalog.Declarations.Select(declaration => declaration.Node), edges);
+        return contributions;
     }
 
     private static bool IsRecoverableSemanticException(Exception exception) =>
