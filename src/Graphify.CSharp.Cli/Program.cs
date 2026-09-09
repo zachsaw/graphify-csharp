@@ -35,7 +35,9 @@ public static class Program
                 options.TargetFramework));
             var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
             var graph = await new SemanticReferenceExtractor().ExtractAsync(loaded, catalog);
-            var diagnostics = loaded.Diagnostics.Select(diagnostic => $"{diagnostic.Kind}: {diagnostic.Message}");
+            var diagnostics = loaded.Diagnostics
+                .Select(diagnostic => $"{diagnostic.Kind}: {diagnostic.Message}")
+                .Concat(catalog.Diagnostics);
             var json = new GraphifyJsonSerializer().Serialize(
                 graph,
                 new GraphifySerializationOptions(diagnostics));

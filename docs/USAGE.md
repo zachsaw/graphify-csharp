@@ -62,6 +62,12 @@ the edges in Graphify to obtain callers. `calls`, `references`, `implements`,
 explain where the relationship was observed. Compiler-known entry points are
 marked on their node as `is_entry_point=true`.
 
+The `graphify_csharp.diagnostics` array reports workspace-load issues and
+recoverable declaration-identity issues. An unsupported or otherwise
+unrepresentable Roslyn declaration is skipped with its kind, display name, and
+repository-relative source location; other declarations continue to be
+emitted.
+
 The declaration catalog covers source namespaces, named types, constructors,
 methods/operators/local functions, properties/indexers, fields/enum values,
 events, parameters, locals, type parameters, aliases, labels, and query range

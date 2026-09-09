@@ -10,9 +10,18 @@ public sealed class DeclarationCatalog
     private readonly ImmutableDictionary<string, ImmutableArray<SymbolDeclaration>> _bySourceLocation;
     private readonly Dictionary<ISymbol, SymbolDeclaration> _bySymbol;
 
-    public DeclarationCatalog(IEnumerable<SymbolDeclaration> declarations)
+    public DeclarationCatalog(
+        IEnumerable<SymbolDeclaration> declarations,
+        IEnumerable<string>? diagnostics = null)
     {
         ArgumentNullException.ThrowIfNull(declarations);
+
+        Diagnostics = (diagnostics ?? Array.Empty<string>())
+            .Where(diagnostic => !string.IsNullOrWhiteSpace(diagnostic))
+            .Select(diagnostic => diagnostic.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(diagnostic => diagnostic, StringComparer.Ordinal)
+            .ToImmutableArray();
 
         var supplied = declarations.ToArray();
         var collision = supplied
@@ -65,10 +74,13 @@ public sealed class DeclarationCatalog
 
     public ImmutableArray<SymbolDeclaration> Declarations { get; }
 
+    public ImmutableArray<string> Diagnostics { get; }
+
     public bool TryGet(ISymbol symbol, out SymbolDeclaration declaration)
     {
         ArgumentNullException.ThrowIfNull(symbol);
-        if (_bySymbol.TryGetValue(symbol, out declaration!))
+        var canonical = PartialSymbolHelper.Canonical(symbol);
+        if (_bySymbol.TryGetValue(canonical, out declaration!))
         {
             return true;
         }

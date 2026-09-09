@@ -17,7 +17,8 @@ Its output is the evidence layer, not the repository-specific analysis layer:
 - directed `calls`, `references`, `inherits`, `implements`, and `overrides`
   edges resolved by Roslyn;
 - namespace, project, TFM, source-location, and compiler-known entry-point facts;
-  and
+- C# 14 extension-block receivers/members and paired partial declarations,
+  represented with stable scope identity and merged source locations; and
 - deterministic Graphify-compatible JSON with diagnostics and provenance.
 
 Graphify or another consumer can derive callers by following incoming edges and
@@ -102,6 +103,13 @@ Use the full canonical key as extraction evidence. If Graphify’s current node-
 constraints require a compact ID, derive a stable ID from the key and retain the
 full key in node properties. Never use a process-local hash, source line, or
 unordered collection to define identity.
+
+Roslyn can expose compiler-generated containing scopes for newer syntax. Do not
+feed an empty synthetic name into the domain identity; encode a deterministic
+semantic scope segment (and coalesce defining/implementing partial symbols while
+retaining all source locations). If a declaration still cannot be represented,
+skip only that declaration and surface a stable diagnostic in the Graphify
+metadata.
 
 ### Edges describe evidence
 

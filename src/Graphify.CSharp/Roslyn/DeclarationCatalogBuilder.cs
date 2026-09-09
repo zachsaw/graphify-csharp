@@ -5,11 +5,21 @@ namespace Graphify.CSharp.Roslyn;
 
 public sealed class DeclarationCatalogBuilder
 {
-    private readonly RoslynSymbolIdentityFactory _identityFactory;
+    private readonly Func<ISymbol, ProjectIdentity, string?, SymbolIdentity> _createIdentity;
 
     public DeclarationCatalogBuilder(RoslynSymbolIdentityFactory? identityFactory = null)
     {
-        _identityFactory = identityFactory ?? new RoslynSymbolIdentityFactory();
+        var factory = identityFactory ?? new RoslynSymbolIdentityFactory();
+        _createIdentity = factory.Create;
+    }
+
+    internal static DeclarationCatalogBuilder ForTesting(
+        Func<ISymbol, ProjectIdentity, string?, SymbolIdentity> createIdentity) =>
+        new(createIdentity);
+
+    private DeclarationCatalogBuilder(Func<ISymbol, ProjectIdentity, string?, SymbolIdentity> createIdentity)
+    {
+        _createIdentity = createIdentity ?? throw new ArgumentNullException(nameof(createIdentity));
     }
 
     public async Task<DeclarationCatalog> BuildAsync(LoadedSolution solution, CancellationToken cancellationToken = default)
@@ -17,7 +27,9 @@ public sealed class DeclarationCatalogBuilder
         ArgumentNullException.ThrowIfNull(solution);
 
         var declarations = new List<SymbolDeclaration>();
+        var diagnostics = new List<string>();
         var seenSymbols = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+        var seenIdentities = new HashSet<string>(StringComparer.Ordinal);
         var locations = new SourceLocationFactory(solution.RepositoryRoot);
         foreach (var project in solution.Projects.OrderBy(project => project.Identity.Key, StringComparer.Ordinal))
         {
@@ -28,9 +40,18 @@ public sealed class DeclarationCatalogBuilder
                 .Select(Path.GetFullPath)
                 .ToHashSet(StringComparer.Ordinal);
             var entryPoint = project.Compilation.GetEntryPoint(cancellationToken);
-            var entryPointIdentity = entryPoint is null
-                ? null
-                : _identityFactory.Create(entryPoint, project.Identity, solution.RepositoryRoot);
+            SymbolIdentity? entryPointIdentity = null;
+            if (entryPoint is not null)
+            {
+                try
+                {
+                    entryPointIdentity = _createIdentity(entryPoint, project.Identity, solution.RepositoryRoot);
+                }
+                catch (ArgumentException exception)
+                {
+                    diagnostics.Add(IdentityDiagnostic(entryPoint, exception, locations));
+                }
+            }
 
             if (entryPoint is { IsImplicitlyDeclared: true }
                 && IsSourceDeclaration(entryPoint, sourcePaths, allowImplicit: true))
@@ -42,7 +63,9 @@ public sealed class DeclarationCatalogBuilder
                     locations,
                     entryPointIdentity,
                     declarations,
-                    seenSymbols);
+                    seenSymbols,
+                    seenIdentities,
+                    diagnostics);
             }
 
             VisitNamespace(
@@ -54,6 +77,8 @@ public sealed class DeclarationCatalogBuilder
                 entryPointIdentity,
                 declarations,
                 seenSymbols,
+                seenIdentities,
+                diagnostics,
                 cancellationToken);
 
             await AddSyntaxDeclarationsAsync(
@@ -65,10 +90,12 @@ public sealed class DeclarationCatalogBuilder
                 entryPointIdentity,
                 declarations,
                 seenSymbols,
+                seenIdentities,
+                diagnostics,
                 cancellationToken).ConfigureAwait(false);
         }
 
-        return new DeclarationCatalog(declarations);
+        return new DeclarationCatalog(declarations, diagnostics);
     }
 
     private void VisitNamespace(
@@ -80,11 +107,13 @@ public sealed class DeclarationCatalogBuilder
         SymbolIdentity? entryPoint,
         ICollection<SymbolDeclaration> declarations,
         ISet<ISymbol> seenSymbols,
+        ISet<string> seenIdentities,
+        ICollection<string> diagnostics,
         CancellationToken cancellationToken)
     {
         if (!@namespace.IsGlobalNamespace && IsSourceDeclaration(@namespace, sourcePaths))
         {
-            Add(@namespace, project, repositoryRoot, locations, entryPoint, declarations, seenSymbols);
+            Add(@namespace, project, repositoryRoot, locations, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics);
         }
 
         foreach (var member in @namespace.GetMembers())
@@ -93,10 +122,10 @@ public sealed class DeclarationCatalogBuilder
             switch (member)
             {
                 case INamespaceSymbol childNamespace:
-                    VisitNamespace(childNamespace, project, repositoryRoot, locations, sourcePaths, entryPoint, declarations, seenSymbols, cancellationToken);
+                    VisitNamespace(childNamespace, project, repositoryRoot, locations, sourcePaths, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics, cancellationToken);
                     break;
                 case INamedTypeSymbol type:
-                    VisitType(type, project, repositoryRoot, locations, sourcePaths, entryPoint, declarations, seenSymbols, cancellationToken);
+                    VisitType(type, project, repositoryRoot, locations, sourcePaths, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics, cancellationToken);
                     break;
             }
         }
@@ -111,6 +140,8 @@ public sealed class DeclarationCatalogBuilder
         SymbolIdentity? entryPoint,
         ICollection<SymbolDeclaration> declarations,
         ISet<ISymbol> seenSymbols,
+        ISet<string> seenIdentities,
+        ICollection<string> diagnostics,
         CancellationToken cancellationToken)
     {
         if (!IsSourceDeclaration(type, sourcePaths))
@@ -118,17 +149,17 @@ public sealed class DeclarationCatalogBuilder
             return;
         }
 
-        Add(type, project, repositoryRoot, locations, entryPoint, declarations, seenSymbols);
+        Add(type, project, repositoryRoot, locations, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics);
         foreach (var member in type.GetMembers())
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (member is INamedTypeSymbol nestedType)
             {
-                VisitType(nestedType, project, repositoryRoot, locations, sourcePaths, entryPoint, declarations, seenSymbols, cancellationToken);
+                VisitType(nestedType, project, repositoryRoot, locations, sourcePaths, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics, cancellationToken);
             }
             else if (IsSourceDeclaration(member, sourcePaths) && IsSupportedMember(member))
             {
-                Add(member, project, repositoryRoot, locations, entryPoint, declarations, seenSymbols);
+                Add(member, project, repositoryRoot, locations, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics);
             }
         }
     }
@@ -142,6 +173,8 @@ public sealed class DeclarationCatalogBuilder
         SymbolIdentity? entryPoint,
         ICollection<SymbolDeclaration> declarations,
         ISet<ISymbol> seenSymbols,
+        ISet<string> seenIdentities,
+        ICollection<string> diagnostics,
         CancellationToken cancellationToken)
     {
         var syntaxDeclarations = await new SourceDeclarationCollector()
@@ -156,7 +189,7 @@ public sealed class DeclarationCatalogBuilder
                 && IsSourceDeclaration(symbol, sourcePaths, allowImplicit: true);
             if (isEntryPoint || IsSourceDeclaration(symbol, sourcePaths))
             {
-                Add(symbol, project.Identity, repositoryRoot, locations, entryPoint, declarations, seenSymbols);
+                Add(symbol, project.Identity, repositoryRoot, locations, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics);
             }
         }
     }
@@ -170,9 +203,12 @@ public sealed class DeclarationCatalogBuilder
         SourceLocationFactory locations,
         SymbolIdentity? entryPoint,
         ICollection<SymbolDeclaration> declarations,
-        ISet<ISymbol> seenSymbols)
+        ISet<ISymbol> seenSymbols,
+        ISet<string> seenIdentities,
+        ICollection<string> diagnostics)
     {
-        if (!seenSymbols.Add(symbol))
+        var declarationSymbol = PartialSymbolHelper.Canonical(symbol);
+        if (!seenSymbols.Add(declarationSymbol))
         {
             return;
         }
@@ -180,28 +216,49 @@ public sealed class DeclarationCatalogBuilder
         SymbolIdentity identity;
         try
         {
-            identity = _identityFactory.Create(symbol, project, repositoryRoot);
+            identity = _createIdentity(declarationSymbol, project, repositoryRoot);
         }
         catch (ArgumentException exception)
         {
-            throw new InvalidOperationException(
-                $"Could not create a stable identity for source symbol '{symbol.ToDisplayString()}' ({symbol.Kind}).",
-                exception);
+            diagnostics.Add(IdentityDiagnostic(declarationSymbol, exception, locations));
+            return;
+        }
+        if (!seenIdentities.Add(identity.CanonicalKey))
+        {
+            diagnostics.Add($"Identity: skipped duplicate {declarationSymbol.Kind} '{declarationSymbol.ToDisplayString()}' at {LocationText(declarationSymbol, locations)}.");
+            return;
         }
         var properties = new List<KeyValuePair<string, string>>
         {
-            new("declaration_kind", DeclarationKind(symbol)),
+            new("declaration_kind", DeclarationKind(declarationSymbol)),
         };
         if (entryPoint is not null && identity.Equals(entryPoint))
         {
             properties.Add(new KeyValuePair<string, string>("is_entry_point", "true"));
         }
 
-        var node = GraphNode.ForSymbol(identity, locations.CreateMany(symbol.Locations), properties);
-        var referenceKey = SymbolReferenceKey.TryCreate(symbol, out var projectIndependentKey)
+        var node = GraphNode.ForSymbol(identity, locations.CreateMany(PartialSymbolHelper.Parts(declarationSymbol).SelectMany(part => part.Locations)), properties);
+        var referenceKey = SymbolReferenceKey.TryCreate(declarationSymbol, out var projectIndependentKey)
             ? projectIndependentKey
             : null;
-        declarations.Add(new SymbolDeclaration(symbol, identity, node, referenceKey));
+        declarations.Add(new SymbolDeclaration(declarationSymbol, identity, node, referenceKey));
+    }
+
+
+    private static string IdentityDiagnostic(
+        ISymbol symbol,
+        ArgumentException exception,
+        SourceLocationFactory locations)
+    {
+        return $"Identity: skipped {symbol.Kind} '{symbol.ToDisplayString()}' at {LocationText(symbol, locations)}: {exception.Message}";
+    }
+
+    private static string LocationText(ISymbol symbol, SourceLocationFactory locations)
+    {
+        var location = locations.CreateMany(symbol.Locations).FirstOrDefault();
+        return location is null
+            ? "<unknown>"
+            : $"{location.FilePath}:{location.Line}:{location.Column}";
     }
 
     private static string DeclarationKind(ISymbol symbol) => symbol switch

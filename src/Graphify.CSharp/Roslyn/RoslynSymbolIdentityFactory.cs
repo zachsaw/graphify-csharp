@@ -81,7 +81,8 @@ public sealed class RoslynSymbolIdentityFactory
         DomainSymbolKind.Property,
         property.Name,
         parameters: property.Parameters.Select(parameter => new ParameterIdentity(TypeName(parameter.Type), Modifier(parameter))),
-        returnTypeName: TypeName(property.Type));
+        returnTypeName: TypeName(property.Type),
+        containingMemberPath: ContainingMemberPath(property.ContainingSymbol));
 
     private static SymbolIdentity CreateSimple(
         ISymbol symbol,
@@ -92,7 +93,8 @@ public sealed class RoslynSymbolIdentityFactory
         NamespaceOf(symbol),
         ContainingTypes(ContainingTypeOf(symbol), repositoryRoot),
         kind,
-        symbol.Name);
+        symbol.Name,
+        containingMemberPath: ContainingMemberPath(symbol.ContainingSymbol));
 
     private static SymbolIdentity CreateParameter(
         IParameterSymbol parameter,
@@ -149,6 +151,11 @@ public sealed class RoslynSymbolIdentityFactory
         var types = new Stack<ContainingTypeIdentity>();
         for (var current = containingType; current is not null; current = current.ContainingType)
         {
+            if (current.TypeKind == TypeKind.Extension)
+            {
+                continue;
+            }
+
             types.Push(new ContainingTypeIdentity(
                 current.Name,
                 current.Arity,
@@ -192,9 +199,16 @@ public sealed class RoslynSymbolIdentityFactory
                 case IFieldSymbol field:
                     path.Push($"field:{field.Name}:{TypeName(field.Type)}");
                     break;
+                case INamedTypeSymbol type when type.TypeKind == TypeKind.Extension:
+                    path.Push(ExtensionBlockSignature(type));
+                    break;
                 case INamedTypeSymbol:
                 case INamespaceSymbol:
                     return path;
+                default:
+                    throw new ArgumentException(
+                        $"Unsupported containing symbol '{current.Kind}' ({current.GetType().Name}).",
+                        nameof(containingSymbol));
             }
         }
 
@@ -219,6 +233,9 @@ public sealed class RoslynSymbolIdentityFactory
             : TypeName(method.ReturnType);
         return $"{method.MethodKind}:{method.Name}`{method.Arity}({parameters}):{returnType}";
     }
+
+    private static string ExtensionBlockSignature(INamedTypeSymbol extensionBlock) =>
+        $"extension:{TypeName(extensionBlock)}";
 
     private static string? NamespaceOf(ISymbol symbol) =>
         NamespaceSymbolOf(symbol) is not { IsGlobalNamespace: false } @namespace

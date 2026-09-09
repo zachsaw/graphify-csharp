@@ -99,7 +99,7 @@ public sealed class SemanticSyntaxWalker : CSharpSyntaxWalker
             return;
         }
 
-        var caller = _semanticModel.GetEnclosingSymbol(node.SpanStart);
+        var caller = _operationWalker.ResolveCaller(node.SpanStart);
         if (caller is null)
         {
             return;

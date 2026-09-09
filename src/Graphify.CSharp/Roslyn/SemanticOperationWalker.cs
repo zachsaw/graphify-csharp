@@ -88,6 +88,30 @@ public sealed class SemanticOperationWalker : OperationWalker
             return;
         }
 
+        AddReference(caller, target, location);
+    }
+
+    internal void AddReference(SymbolDeclaration caller, ISymbol targetSymbol, Location location)
+    {
+        ArgumentNullException.ThrowIfNull(caller);
+        ArgumentNullException.ThrowIfNull(targetSymbol);
+        ArgumentNullException.ThrowIfNull(location);
+
+        if (FindDeclaration(targetSymbol) is { } target)
+        {
+            AddReference(caller, target, location);
+        }
+    }
+
+    internal SymbolDeclaration? ResolveCaller(int position) =>
+        _callerResolver.Resolve(_semanticModel, position);
+
+    private void AddReference(SymbolDeclaration caller, SymbolDeclaration target, Location location)
+    {
+        ArgumentNullException.ThrowIfNull(caller);
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(location);
+
         var sourceLocation = _locations.Create(location);
         if (sourceLocation is null)
         {

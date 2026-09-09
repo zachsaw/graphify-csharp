@@ -127,7 +127,11 @@ namespace, project, target framework, and declaration kind. The catalog covers
 namespaces, named types, constructors, methods/operators/local functions,
 properties/indexers, fields/enum values, events, parameters, locals, type
 parameters, aliases, labels, and query range variables. `graphify_csharp`
-contains only the versioned extractor metadata and loader diagnostics.
+contains only the versioned extractor metadata and loader or
+declaration-extraction diagnostics. If Roslyn exposes a source declaration shape
+that cannot yet be given a stable identity, the enricher skips that declaration,
+records an actionable diagnostic with its source location, and continues emitting
+the rest of the graph.
 
 The enricher does not classify callers or decide whether a declaration is safe
 to remove. Reflection, dependency injection, generated code, native callbacks,
@@ -144,6 +148,8 @@ Included:
   events, scoped declarations, declaration-header, attribute, generic, and
   `typeof` references;
 - inheritance, interface implementation, and virtual override relationships;
+- C# 14 extension blocks, field-backed properties, partial constructors/events,
+  explicit compound-assignment operators, and newer lambda/assignment forms;
 - cross-project symbol resolution with conservative ambiguity handling;
 - stable Graphify JSON and a dependency-free command-line parser.
 
