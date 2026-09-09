@@ -149,6 +149,25 @@ documented known limitations.
 
 Commit: `chore: add deterministic extraction release gates`
 
+### 7. SDK-aligned multi-target tool and C# 15 support — in progress
+
+Deliver:
+
+- one `Graphify.CSharp` tool package with `net10.0` and `net11.0` tool assets;
+- framework-specific Roslyn/MSBuild dependencies so the selected tool asset
+  matches the installed SDK and does not downgrade C# 15 input to the C# 14
+  compiler surface;
+- explicit install and update documentation using `--framework` when needed;
+- C# 15 preview fixture coverage for union declarations, generic unions,
+  union-case references, members, and exhaustive consumers; and
+- CI/package smoke checks that install and execute both framework assets.
+
+Gate: .NET 10 tests and package installation remain green, the .NET 11 asset
+loads a C# 15 project without a crash, union declarations and their case-type
+references are represented deterministically, and a repeated package/tool run
+produces byte-identical output. Missing SDK/framework support must produce an
+actionable diagnostic rather than silently selecting the wrong compiler.
+
 ## Explicit non-goals for v1
 
 - proving runtime reachability in the presence of reflection or arbitrary
