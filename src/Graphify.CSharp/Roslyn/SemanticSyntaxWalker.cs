@@ -35,6 +35,12 @@ public sealed class SemanticSyntaxWalker : CSharpSyntaxWalker
         base.VisitImplicitObjectCreationExpression(node);
     }
 
+    public override void VisitCollectionExpression(CollectionExpressionSyntax node)
+    {
+        VisitOperation(node);
+        base.VisitCollectionExpression(node);
+    }
+
     public override void VisitTypeOfExpression(TypeOfExpressionSyntax node)
     {
         VisitOperation(node);
@@ -83,6 +89,40 @@ public sealed class SemanticSyntaxWalker : CSharpSyntaxWalker
         VisitOperation(node);
         base.VisitElementAccessExpression(node);
     }
+
+    public override void VisitBreakStatement(BreakStatementSyntax node)
+    {
+        VisitOperation(node);
+        base.VisitBreakStatement(node);
+    }
+
+    public override void VisitContinueStatement(ContinueStatementSyntax node)
+    {
+        VisitOperation(node);
+        base.VisitContinueStatement(node);
+    }
+
+    public override void VisitFixedStatement(FixedStatementSyntax node)
+    {
+        VisitOperation(node);
+        base.VisitFixedStatement(node);
+    }
+
+    public override void VisitSizeOfExpression(SizeOfExpressionSyntax node)
+    {
+        VisitOperation(node);
+        base.VisitSizeOfExpression(node);
+    }
+
+#if NET11_0_OR_GREATER
+#pragma warning disable RSEXPERIMENTAL006
+    public override void VisitUnsafeExpression(UnsafeExpressionSyntax node)
+    {
+        VisitOperation(node);
+        base.VisitUnsafeExpression(node);
+    }
+#pragma warning restore RSEXPERIMENTAL006
+#endif
 
     public override void VisitIdentifierName(IdentifierNameSyntax node)
     {

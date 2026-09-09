@@ -5,13 +5,19 @@
 The release artifact is a .NET global tool:
 
 ```text
-dotnet tool install --global Graphify.CSharp
+dotnet tool install --global Graphify.CSharp --framework net10.0
+```
+
+For C# 15 input, select the .NET 11 tool asset from the same package:
+
+```text
+dotnet tool update --global Graphify.CSharp --framework net11.0
 ```
 
 To build and run the current checkout instead:
 
 ```text
-dotnet run --project src/Graphify.CSharp.Cli -- --help
+dotnet run --project src/Graphify.CSharp.Cli --framework net10.0 -- --help
 dotnet pack src/Graphify.CSharp.Cli --configuration Release
 ```
 
@@ -54,7 +60,8 @@ Nodes contain stable C# properties:
 - `target_framework`: the compilation’s selected TFM; and
 - `declaration_kind`: the Roslyn declaration shape, such as `class`, `enum`,
   `enum_member`, `method`, `localfunction`, `parameter`, `local`, `alias`,
-  `label`, `range_variable`, or `indexer`.
+  `label`, `range_variable`, `indexer`, or `union` (with the .NET 11 tool asset).
+  Closed hierarchy types additionally carry `is_closed=true`.
 
 Edges point from the source declaration to the referenced declaration. Reverse
 the edges in Graphify to obtain callers. `calls`, `references`, `implements`,

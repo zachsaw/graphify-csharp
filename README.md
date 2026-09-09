@@ -18,13 +18,27 @@ repository-specific questions such as caller and zero-inbound-reference audits.
 Run from a repository containing the solution or project you want to inspect:
 
 ```text
-dotnet tool install --global Graphify.CSharp
+dotnet tool install --global Graphify.CSharp --framework net10.0
 graphify-csharp \
   --input ./src/MyProduct.sln \
   --root . \
   --configuration Release \
   --output ./graphify-out/csharp.json
 ```
+
+The package contains one tool asset for each supported .NET runtime. Use the
+`net10.0` asset for the normal C# 14 path. For a project using C# 15 syntax,
+install or update the same package with `--framework net11.0`; that asset uses
+the .NET 11 Roslyn compiler surface:
+
+```text
+dotnet tool update --global Graphify.CSharp --framework net11.0
+```
+
+The install/update `--framework` selects the tool runtime. The command’s
+`--target-framework` option selects the analyzed project compilation and is
+still only needed when that project is multi-targeted or when a particular
+target must be inspected.
 
 ## Integrate with Graphify
 
@@ -54,7 +68,7 @@ Graphify rebuild. The output is already Graphify extraction JSON, so Graphify
 can build its directed graph from the file:
 
 ```text
-dotnet tool install --global Graphify.CSharp
+dotnet tool install --global Graphify.CSharp --framework net10.0
 
 graphify-csharp \
   --input ./src/MyProduct.sln \
@@ -109,7 +123,7 @@ the API and Graphify integration settle. For local development, replace the
 install command with:
 
 ```text
-dotnet run --project src/Graphify.CSharp.Cli -- --input ./src/MyProduct.sln --root .
+dotnet run --project src/Graphify.CSharp.Cli --framework net10.0 -- --input ./src/MyProduct.sln --root .
 ```
 
 `--target-framework` is optional. The loader resolves a single project target
@@ -131,7 +145,8 @@ contains only the versioned extractor metadata and loader or
 declaration-extraction diagnostics. If Roslyn exposes a source declaration shape
 that cannot yet be given a stable identity, the enricher skips that declaration,
 records an actionable diagnostic with its source location, and continues emitting
-the rest of the graph.
+the rest of the graph. C# 15 closed hierarchy types additionally carry
+`is_closed=true`.
 
 The enricher does not classify callers or decide whether a declaration is safe
 to remove. Reflection, dependency injection, generated code, native callbacks,
@@ -150,6 +165,9 @@ Included:
 - inheritance, interface implementation, and virtual override relationships;
 - C# 14 extension blocks, field-backed properties, partial constructors/events,
   explicit compound-assignment operators, and newer lambda/assignment forms;
+- C# 15 collection-expression arguments, union declarations and case-type
+  references, closed hierarchies, extension indexers, labeled jumps, and
+  memory-safety syntax when the `net11.0` tool asset is selected;
 - cross-project symbol resolution with conservative ambiguity handling;
 - stable Graphify JSON and a dependency-free command-line parser.
 
@@ -166,6 +184,10 @@ dotnet test Graphify.CSharp.sln --configuration Release
 dotnet build Graphify.CSharp.sln --configuration Release
 dotnet pack src/Graphify.CSharp.Cli --configuration Release
 ```
+
+The full solution and package commands validate both target assets and require
+the .NET 10 and .NET 11 SDKs. A .NET 10-only checkout can still run the
+focused `net10.0` build/test commands with `--framework net10.0`.
 
 To verify byte-for-byte repeatability against a fixture or another solution:
 

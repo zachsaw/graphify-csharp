@@ -232,6 +232,12 @@ public sealed class DeclarationCatalogBuilder
         {
             new("declaration_kind", DeclarationKind(declarationSymbol)),
         };
+#if NET11_0_OR_GREATER
+        if (declarationSymbol is INamedTypeSymbol { IsClosed: true })
+        {
+            properties.Add(new KeyValuePair<string, string>("is_closed", "true"));
+        }
+#endif
         if (entryPoint is not null && identity.Equals(entryPoint))
         {
             properties.Add(new KeyValuePair<string, string>("is_entry_point", "true"));

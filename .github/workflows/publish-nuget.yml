@@ -27,10 +27,13 @@ jobs:
         with:
           ref: ${{ github.event.release.tag_name }}
 
-      - name: Set up .NET
+      - name: Set up .NET SDKs
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 10.0.x
+          dotnet-version: |
+            10.0.x
+            11.0.x
+          dotnet-quality: preview
 
       - name: Derive release version
         id: version
@@ -50,11 +53,20 @@ jobs:
       - name: Restore
         run: dotnet restore Graphify.CSharp.sln
 
+      - name: Restore semantic fixtures
+        run: |
+          dotnet restore tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj
+          dotnet restore tests/Fixtures/CSharp14Fixture/CSharp14Fixture.csproj
+          dotnet restore tests/Fixtures/CSharp15Fixture/CSharp15Fixture.csproj
+
       - name: Build
         run: dotnet build Graphify.CSharp.sln --configuration Release --no-restore
 
       - name: Test
         run: dotnet test Graphify.CSharp.sln --configuration Release --no-build --no-restore
+
+      - name: Build C# 15 fixture
+        run: dotnet build tests/Fixtures/CSharp15Fixture/CSharp15Fixture.csproj --configuration Release
 
       - name: Vulnerability check
         run: dotnet list src/Graphify.CSharp/Graphify.CSharp.csproj package --vulnerable --include-transitive
@@ -90,33 +102,67 @@ jobs:
           path: ${{ steps.package.outputs.path }}
           if-no-files-found: error
 
-      - name: Install packed tool
+      - name: Install packed .NET 10 tool asset
         env:
           PACKAGE_VERSION: ${{ steps.version.outputs.value }}
         shell: bash
         run: |
           set -euo pipefail
-          tool_dir="${RUNNER_TEMP}/graphify-csharp-tool"
+          tool_dir="${RUNNER_TEMP}/graphify-csharp-tool-net10"
           dotnet tool install \
             --tool-path "$tool_dir" \
             --add-source artifacts \
             --ignore-failed-sources \
+            --framework net10.0 \
             Graphify.CSharp \
             --version "$PACKAGE_VERSION"
           "$tool_dir/graphify-csharp" \
             --input tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj \
             --root . \
             --configuration Release \
+            --target-framework net10.0 \
+            --output "$tool_dir/output.json"
+
+      - name: Install packed .NET 11 tool asset
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.value }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tool_dir="${RUNNER_TEMP}/graphify-csharp-tool-net11"
+          dotnet tool install \
+            --tool-path "$tool_dir" \
+            --add-source artifacts \
+            --ignore-failed-sources \
+            --framework net11.0 \
+            Graphify.CSharp \
+            --version "$PACKAGE_VERSION"
+          "$tool_dir/graphify-csharp" \
+            --input tests/Fixtures/CSharp15Fixture/CSharp15Fixture.csproj \
+            --root . \
+            --configuration Release \
+            --target-framework net11.0 \
             --output "$tool_dir/output.json"
 
       - name: Verify deterministic fixture extraction
         run: ./scripts/check-deterministic-extraction.sh --input tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj --root . --configuration Release
 
+      - name: Validate NuGet Trusted Publishing configuration
+        env:
+          NUGET_USER: ${{ secrets.NUGET_USER || vars.NUGET_USER }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$NUGET_USER" || {
+            echo 'NUGET_USER must be configured as a NuGet environment or repository secret/variable.' >&2
+            exit 1
+          }
+
       - name: Get NuGet Trusted Publishing credential
         id: login
         uses: NuGet/login@v1
         with:
-          user: ${{ secrets.NUGET_USER || vars.NUGET_USER || github.repository_owner }}
+          user: ${{ secrets.NUGET_USER || vars.NUGET_USER }}
 
       - name: Publish to NuGet.org
         env:

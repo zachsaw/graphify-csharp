@@ -149,7 +149,7 @@ documented known limitations.
 
 Commit: `chore: add deterministic extraction release gates`
 
-### 7. SDK-aligned multi-target tool and C# 15 support — in progress
+### 7. SDK-aligned multi-target tool and C# 15 support — complete
 
 Deliver:
 
@@ -158,15 +158,26 @@ Deliver:
   matches the installed SDK and does not downgrade C# 15 input to the C# 14
   compiler surface;
 - explicit install and update documentation using `--framework` when needed;
-- C# 15 preview fixture coverage for union declarations, generic unions,
-  union-case references, members, and exhaustive consumers; and
+- C# 15 preview fixture coverage for collection-expression arguments, union
+  declarations and case references, closed hierarchies, extension indexers,
+  labeled jumps, and the preview memory-safety syntax; and
 - CI/package smoke checks that install and execute both framework assets.
 
 Gate: .NET 10 tests and package installation remain green, the .NET 11 asset
-loads a C# 15 project without a crash, union declarations and their case-type
-references are represented deterministically, and a repeated package/tool run
-produces byte-identical output. Missing SDK/framework support must produce an
-actionable diagnostic rather than silently selecting the wrong compiler.
+loads a C# 15 project without a crash, each public-preview feature has a
+representative semantic regression, implicit collection-builder calls and
+branch-label references are represented, closed types retain compiler facts,
+and a repeated package/tool run produces byte-identical output. Missing
+SDK/framework support must produce an actionable diagnostic rather than
+silently selecting the wrong compiler.
+
+Verification: .NET 10 (34 tests) and .NET 11 (37 tests) pass; the C# 15
+fixture produces 89 nodes and 58 edges deterministically; the packed net10 and
+net11 assets install and execute successfully; the pinned Dapper extraction
+produces 3,656 nodes and 4,616 edges deterministically; and the full
+`package-smoke` workflow passes under Docker/`act`.
+
+Commit: `feat: cover CSharp15 semantic feature shapes`
 
 ## Explicit non-goals for v1
 

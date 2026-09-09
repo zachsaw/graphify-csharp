@@ -9,28 +9,95 @@ permissions:
   contents: read
 
 jobs:
-  build-test-pack:
+  build-test:
+    name: Build and test (${{ matrix.framework }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - framework: net10.0
+            dotnet-version: 10.0.x
+            dotnet-quality: ga
+          - framework: net11.0
+            dotnet-version: 11.0.x
+            dotnet-quality: preview
     runs-on: ubuntu-latest
     steps:
       - name: Check out
         uses: actions/checkout@v4
 
-      - name: Set up .NET
+      - name: Set up .NET 10
+        if: matrix.framework == 'net10.0'
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+          dotnet-quality: ga
+
+      - name: Set up .NET 10 and .NET 11
+        if: matrix.framework == 'net11.0'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.x
+            11.0.x
+          dotnet-quality: preview
+
+      - name: Restore
+        run: dotnet restore Graphify.CSharp.sln -p:TargetFrameworks=${{ matrix.framework }}
+
+      - name: Restore .NET 10 semantic fixtures
+        run: |
+          dotnet restore tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj
+          dotnet restore tests/Fixtures/CSharp14Fixture/CSharp14Fixture.csproj
+
+      - name: Restore .NET 11 semantic fixtures
+        if: matrix.framework == 'net11.0'
+        run: dotnet restore tests/Fixtures/CSharp15Fixture/CSharp15Fixture.csproj
+
+      - name: Build
+        run: dotnet build Graphify.CSharp.sln --configuration Release --no-restore -p:TargetFrameworks=${{ matrix.framework }}
+
+      - name: Test
+        run: dotnet test Graphify.CSharp.sln --configuration Release --framework ${{ matrix.framework }} --no-build --no-restore
+
+      - name: Vulnerability check
+        run: dotnet list src/Graphify.CSharp/Graphify.CSharp.csproj package --framework ${{ matrix.framework }} --vulnerable --include-transitive --no-restore
+
+  package-smoke:
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up .NET SDKs
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            10.0.x
+            11.0.x
+          dotnet-quality: preview
 
       - name: Restore
         run: dotnet restore Graphify.CSharp.sln
 
+      - name: Restore semantic fixtures
+        run: |
+          dotnet restore tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj
+          dotnet restore tests/Fixtures/CSharp14Fixture/CSharp14Fixture.csproj
+          dotnet restore tests/Fixtures/CSharp15Fixture/CSharp15Fixture.csproj
+
       - name: Build
         run: dotnet build Graphify.CSharp.sln --configuration Release --no-restore
 
-      - name: Test
-        run: dotnet test Graphify.CSharp.sln --configuration Release --no-build --no-restore
+      - name: Test .NET 10 asset
+        run: dotnet test Graphify.CSharp.sln --configuration Release --framework net10.0 --no-build --no-restore
 
-      - name: Vulnerability check
-        run: dotnet list src/Graphify.CSharp/Graphify.CSharp.csproj package --vulnerable --include-transitive
+      - name: Test .NET 11 asset
+        run: dotnet test Graphify.CSharp.sln --configuration Release --framework net11.0 --no-build --no-restore
+
+      - name: Build C# 15 fixture
+        run: dotnet build tests/Fixtures/CSharp15Fixture/CSharp15Fixture.csproj --configuration Release
 
       - name: Pack
         run: dotnet pack src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj --configuration Release --no-build --no-restore --output artifacts
@@ -48,11 +115,17 @@ jobs:
           echo "value=$package_version" >> "$GITHUB_OUTPUT"
           echo "Packed Graphify.CSharp $package_version"
 
-      - name: Install packed tool
-        run: dotnet tool install --tool-path .ci-tool --add-source artifacts --ignore-failed-sources Graphify.CSharp --version "${{ steps.package.outputs.value }}"
+      - name: Install packed .NET 10 tool asset
+        run: dotnet tool install --tool-path .ci-tool/net10 --add-source artifacts --framework net10.0 --ignore-failed-sources Graphify.CSharp --version "${{ steps.package.outputs.value }}"
 
-      - name: Run packed tool
-        run: ./.ci-tool/graphify-csharp --input tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj --root . --configuration Release --output .ci-tool/output.json
+      - name: Install packed .NET 11 tool asset
+        run: dotnet tool install --tool-path .ci-tool/net11 --add-source artifacts --framework net11.0 --ignore-failed-sources Graphify.CSharp --version "${{ steps.package.outputs.value }}"
+
+      - name: Run packed .NET 10 tool asset
+        run: ./.ci-tool/net10/graphify-csharp --input tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj --root . --configuration Release --target-framework net10.0 --output .ci-tool/net10/output.json
+
+      - name: Run packed .NET 11 tool asset
+        run: ./.ci-tool/net11/graphify-csharp --input tests/Fixtures/CSharp15Fixture/CSharp15Fixture.csproj --root . --configuration Release --target-framework net11.0 --output .ci-tool/net11/output.json
 
       - name: Verify deterministic fixture extraction
         run: ./scripts/check-deterministic-extraction.sh --input tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj --root . --configuration Release

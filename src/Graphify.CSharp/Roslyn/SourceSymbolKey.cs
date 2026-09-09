@@ -8,12 +8,21 @@ internal static class SourceSymbolKey
     {
         ArgumentNullException.ThrowIfNull(symbol);
 
-        var location = symbol.Locations
-            .Where(item => item.IsInSource && item.SourceTree is not null)
-            .OrderBy(item => item.SourceTree!.FilePath, StringComparer.Ordinal)
-            .ThenBy(item => item.SourceSpan.Start)
-            .ThenBy(item => item.SourceSpan.Length)
-            .FirstOrDefault();
+        Location? location;
+        try
+        {
+            location = symbol.Locations
+                .Where(item => item.IsInSource && item.SourceTree is not null)
+                .OrderBy(item => item.SourceTree!.FilePath, StringComparer.Ordinal)
+                .ThenBy(item => item.SourceSpan.Start)
+                .ThenBy(item => item.SourceSpan.Length)
+                .FirstOrDefault();
+        }
+        catch (NotSupportedException)
+        {
+            key = string.Empty;
+            return false;
+        }
         if (location is null || string.IsNullOrWhiteSpace(location.SourceTree!.FilePath))
         {
             key = string.Empty;

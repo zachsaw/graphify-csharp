@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Multi-target the global tool for .NET 10 and .NET 11, with C# 15
+  collection-expression argument calls, union/case relationships, closed
+  hierarchy facts, extension indexers, labeled branch targets, and
+  memory-safety syntax in the `net11.0` asset.
 - Support C# 14 extension-block receiver parameters and members with stable
   identities and correct caller attribution.
 - Coalesce partial constructors, properties, and events while retaining all

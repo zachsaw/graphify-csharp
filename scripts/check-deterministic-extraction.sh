@@ -17,14 +17,34 @@ done
 
 repository_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cli_project="$repository_root/src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj"
+tool_framework="${GRAPHIFY_CSHARP_TOOL_FRAMEWORK:-net10.0}"
+
+argument_index=1
+while [[ $argument_index -le $# ]]; do
+  argument="${!argument_index}"
+  case "$argument" in
+    --target-framework)
+      next_index=$((argument_index + 1))
+      if [[ $next_index -le $# ]]; then
+        tool_framework="${!next_index}"
+      fi
+      argument_index=$((argument_index + 1))
+      ;;
+    --target-framework=*)
+      tool_framework="${argument#*=}"
+      ;;
+  esac
+  argument_index=$((argument_index + 1))
+done
+
 temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/graphify-csharp-determinism.XXXXXX")"
 trap 'rm -rf "$temporary_directory"' EXIT
 
-dotnet build "$cli_project" --configuration Release
+dotnet build "$cli_project" --framework "$tool_framework" --configuration Release
 
-dotnet run --project "$cli_project" --configuration Release --no-build --no-restore -- \
+dotnet run --project "$cli_project" --framework "$tool_framework" --configuration Release --no-build --no-restore -- \
   "$@" --output "$temporary_directory/first.json"
-dotnet run --project "$cli_project" --configuration Release --no-build --no-restore -- \
+dotnet run --project "$cli_project" --framework "$tool_framework" --configuration Release --no-build --no-restore -- \
   "$@" --output "$temporary_directory/second.json"
 
 if ! cmp -s "$temporary_directory/first.json" "$temporary_directory/second.json"; then

@@ -92,17 +92,25 @@ public sealed class DeclarationCatalog
     {
         ArgumentNullException.ThrowIfNull(symbol);
 
-        if (!symbol.Locations.Any(location => location.IsInSource)
-            || !SymbolReferenceKey.TryCreate(symbol, out var referenceKey))
+        try
         {
-            declaration = null!;
-            return false;
-        }
+            if (!symbol.Locations.Any(location => location.IsInSource)
+                || !SymbolReferenceKey.TryCreate(symbol, out var referenceKey))
+            {
+                declaration = null!;
+                return false;
+            }
 
-        if (_byReferenceKey.TryGetValue(referenceKey, out var matches) && matches.Length == 1)
+            if (_byReferenceKey.TryGetValue(referenceKey, out var matches) && matches.Length == 1)
+            {
+                declaration = matches[0];
+                return true;
+            }
+        }
+        catch (NotSupportedException)
         {
-            declaration = matches[0];
-            return true;
+            // Some Roslyn implementation symbols intentionally do not expose
+            // locations or containing symbols. They cannot be reference keys.
         }
 
         declaration = null!;

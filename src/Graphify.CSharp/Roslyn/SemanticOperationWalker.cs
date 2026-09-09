@@ -1,5 +1,6 @@
 using Graphify.CSharp.Domain;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Operations;
 
 namespace Graphify.CSharp.Roslyn;
@@ -45,6 +46,12 @@ public sealed class SemanticOperationWalker : OperationWalker
         base.VisitObjectCreation(operation);
     }
 
+    public override void VisitCollectionExpression(ICollectionExpressionOperation operation)
+    {
+        AddMethodEdge(operation.ConstructMethod, GraphRelation.Calls, operation);
+        base.VisitCollectionExpression(operation);
+    }
+
     public override void VisitMethodReference(IMethodReferenceOperation operation)
     {
         AddMethodEdge(operation.Method, GraphRelation.References, operation);
@@ -69,10 +76,39 @@ public sealed class SemanticOperationWalker : OperationWalker
         base.VisitEventReference(operation);
     }
 
+    public override void VisitBranch(IBranchOperation operation)
+    {
+        if (operation.Syntax is BreakStatementSyntax or ContinueStatementSyntax or GotoStatementSyntax)
+        {
+            var labelNode = operation.Syntax.DescendantNodesAndSelf()
+                .OfType<IdentifierNameSyntax>()
+                .FirstOrDefault();
+            if (labelNode is not null
+                && _semanticModel.GetSymbolInfo(labelNode).Symbol is { } labelSymbol)
+            {
+                AddSymbolEdge(labelSymbol, GraphRelation.References, operation);
+            }
+        }
+        base.VisitBranch(operation);
+    }
+
+    public override void VisitImplicitIndexerReference(IImplicitIndexerReferenceOperation operation)
+    {
+        AddSymbolEdge(operation.IndexerSymbol, GraphRelation.References, operation);
+        AddSymbolEdge(operation.LengthSymbol, GraphRelation.References, operation);
+        base.VisitImplicitIndexerReference(operation);
+    }
+
     public override void VisitTypeOf(ITypeOfOperation operation)
     {
         AddSymbolEdge(operation.TypeOperand, GraphRelation.References, operation);
         base.VisitTypeOf(operation);
+    }
+
+    public override void VisitSizeOf(ISizeOfOperation operation)
+    {
+        AddSymbolEdge(operation.TypeOperand, GraphRelation.References, operation);
+        base.VisitSizeOf(operation);
     }
 
     internal void AddReference(ISymbol callerSymbol, ISymbol targetSymbol, Location location)

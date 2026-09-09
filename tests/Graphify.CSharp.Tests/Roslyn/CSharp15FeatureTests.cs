@@ -67,6 +67,63 @@ public sealed class CSharp15FeatureTests
             serializer.Serialize(secondGraph, new GraphifySerializationOptions(secondCatalog.Diagnostics)));
     }
 
+    [Fact]
+    public async Task Extracts_references_for_the_other_csharp15_features()
+    {
+        using var loaded = await LoadFixtureAsync();
+        var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
+        var graph = await new SemanticReferenceExtractor().ExtractAsync(loaded, catalog);
+
+        Assert.Empty(catalog.Diagnostics);
+
+        var closedState = FindType(catalog, "ClosedState");
+        Assert.Equal("true", closedState.Node.Properties["is_closed"]);
+        var closed = FindType(catalog, "Closed");
+        var open = FindType(catalog, "Open");
+        var closedConsumer = FindMember(catalog, "ClosedHierarchyConsumer", "Describe");
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, closed, closedState, GraphRelation.Inherits));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, open, closedState, GraphRelation.Inherits));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, closedConsumer, closed, GraphRelation.References));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, closedConsumer, open, GraphRelation.References));
+
+        var indexer = Assert.Single(catalog.Declarations.Where(declaration =>
+            declaration.Identity.Namespace == "CSharp15Fixture"
+            && declaration.Identity.Kind == SymbolKind.Property
+            && declaration.Node.Properties["declaration_kind"] == "indexer"));
+        var indexerConsumer = FindMember(catalog, "ExtensionIndexerConsumer", "Read");
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, indexerConsumer, indexer, GraphRelation.References));
+
+        var collectionBuilder = FindMember(catalog, "BufferedValuesBuilder", "Create");
+        var collectionConsumer = FindMember(catalog, "CollectionArgumentConsumer", "Create");
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, collectionConsumer, collectionBuilder, GraphRelation.Calls));
+        var collectionConstructor = Assert.Single(catalog.Declarations.Where(declaration =>
+            declaration.Identity.Kind == SymbolKind.Constructor
+            && declaration.Identity.ContainingTypes.Any(type => type.Name == "CapacityValues")
+            && declaration.Identity.Parameters.Select(parameter => parameter.TypeName).SequenceEqual(["int"])));
+        var constructorConsumer = FindMember(catalog, "CollectionArgumentConsumer", "CreateWithConstructor");
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, constructorConsumer, collectionConstructor, GraphRelation.Calls));
+
+        var label = Assert.Single(catalog.Declarations.Where(declaration =>
+            declaration.Identity.Kind == SymbolKind.Label
+            && declaration.Identity.Name == "outer"));
+        var labeledConsumer = FindMember(catalog, "LabeledJumpConsumer", "Scan");
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, labeledConsumer, label, GraphRelation.References));
+
+        var nativeValue = Assert.Single(catalog.Declarations.Where(declaration =>
+            declaration.Identity.Kind == SymbolKind.Type
+            && declaration.Identity.Name == "NativeValue"
+            && declaration.Identity.ContainingTypes.Any(type => type.Name == "MemorySafetyConsumer")));
+        var sizeOfConsumer = FindMember(catalog, "MemorySafetyConsumer", "SizeOfNativeValue");
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, sizeOfConsumer, nativeValue, GraphRelation.References));
+        Assert.Contains(catalog.Declarations, declaration =>
+            declaration.Identity.Kind == SymbolKind.Method
+            && declaration.Identity.Name == "GetProcessId");
+        Assert.Contains(catalog.Declarations, declaration =>
+            declaration.Identity.Kind == SymbolKind.Field
+            && declaration.Identity.Name == "Value"
+            && declaration.Identity.ContainingTypes.Any(type => type.Name == "ExplicitLayoutValue"));
+    }
+
     private static SymbolDeclaration FindType(DeclarationCatalog catalog, string name) =>
         Assert.Single(catalog.Declarations.Where(declaration =>
             declaration.Identity.Kind == SymbolKind.Type

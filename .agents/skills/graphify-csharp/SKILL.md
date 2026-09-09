@@ -18,7 +18,10 @@ Its output is the evidence layer, not the repository-specific analysis layer:
   edges resolved by Roslyn;
 - namespace, project, TFM, source-location, and compiler-known entry-point facts;
 - C# 14 extension-block receivers/members and paired partial declarations,
-  represented with stable scope identity and merged source locations; and
+  represented with stable scope identity and merged source locations;
+- C# 15 collection-expression arguments, union declarations and case-type
+  references, closed hierarchies, extension indexers, labeled jumps, and
+  memory-safety syntax when the matching .NET 11 tool asset is selected; and
 - deterministic Graphify-compatible JSON with diagnostics and provenance.
 
 Graphify or another consumer can derive callers by following incoming edges and
@@ -161,6 +164,8 @@ one end-to-end fixture when the change crosses Roslyn or Graphify boundaries.
 Prioritize:
 
 - overloaded, generic, nested, partial, and multi-project symbol identity;
+- C# 15 collection-builder calls, union/case relationships, closed hierarchy
+  facts, extension indexers, labeled branch targets, and memory-safety syntax;
 - namespaces, class/record/struct/interface/enum/delegate types, enum values,
   constructors/operators/local functions, properties/indexers, fields, events,
   parameters, locals, type parameters, aliases, labels, and query range
@@ -177,6 +182,13 @@ Use the installed/pinned .NET SDK and explicit solution configuration, with an
 optional TFM selector that becomes mandatory when target selection is
 ambiguous. Do not rely on Rider for correctness or CI; Rider/InspectCode may be
 used as an optional independent comparison during investigation.
+
+The published tool is one multi-targeted package. Select its runtime asset with
+`dotnet tool install` or `dotnet tool update --framework net10.0` or
+`--framework net11.0`; this selection is separate from the input project’s
+`--target-framework` compilation selector. Packaging the complete tool requires
+both SDK lines, because the C# 15 workspace assemblies are taken from the
+matching .NET 11 SDK until a public Roslyn package supplies that surface.
 
 Before a slice commit, run its narrow tests, a build when code compilation is
 affected, and `git diff --check`. Before a release or merge milestone, run the

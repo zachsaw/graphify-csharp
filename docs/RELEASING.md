@@ -15,12 +15,11 @@ package-smoke, and determinism gates used by CI.
    environment `nuget`. The policy must match the workflow that performs the
    publish.
 3. In the repository settings, create a GitHub Actions environment named
-   `nuget`. If the NuGet.org profile name is different from the GitHub
-   repository owner, add an environment or repository variable named
-   `NUGET_USER` containing the profile name, not the account email. An existing
-   `NUGET_USER` secret is also accepted. If the names match, no user setting is
-   required. A protected environment with a required reviewer is recommended
-   before the first public release.
+   `nuget` and add an environment or repository variable/secret named
+   `NUGET_USER` containing the NuGet profile name, not the account email. The
+   workflow passes this value to `NuGet/login@v1`; it is required even when the
+   GitHub and NuGet names happen to match. A protected environment with a
+   required reviewer is recommended before the first public release.
 4. Confirm that `origin` points at the repository that contains this workflow.
 
 The workflow requests the `id-token: write` permission and uses
@@ -31,7 +30,9 @@ required by NuGet’s publishing protocol, and expires after the workflow.
 
 ## Release a version
 
-Run the normal checks locally, then use GitHub’s New release page:
+The release workflow installs both the .NET 10 and .NET 11 SDKs because the
+single package contains both tool assets. Run the normal checks locally, then
+use GitHub’s New release page:
 
 ```text
 dotnet test Graphify.CSharp.sln --configuration Release
@@ -67,3 +68,12 @@ dotnet pack src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj \
 
 The existing CI workflow also installs the generated package from the local
 `artifacts` folder and runs it against the reference fixture.
+
+Install a local package explicitly for either runtime asset:
+
+```text
+dotnet tool install --tool-path .tool-net10 --add-source artifacts \
+  --framework net10.0 Graphify.CSharp --version 0.1.0
+dotnet tool install --tool-path .tool-net11 --add-source artifacts \
+  --framework net11.0 Graphify.CSharp --version 0.1.0
+```
