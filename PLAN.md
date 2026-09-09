@@ -288,7 +288,7 @@ a clean full extraction.
 
 Commit target: `feat: add deterministic cold incremental refresh`
 
-### Phase 3 — warm indexer session and manual refresh barrier — in progress
+### Phase 3 — warm indexer session and manual refresh barrier — complete
 
 Deliver a single worker-owned session that keeps the loaded solution, project
 graph, Roslyn state where safe, contribution cache, dirty set, and generation
@@ -301,10 +301,15 @@ state in memory. A manual refresh request must:
 - validate and atomically publish `csharp.json`; and
 - return only after publication succeeds.
 
-Current progress: beginning the single-worker request coordinator. The one-shot
-engine from Phase 2 is the cold/rebuild fallback; this phase adds in-memory
-workspace reuse, coalesced requests, dirty generations, and a foreground
-publication barrier without changing the public Graphify document.
+Completed: the single-worker request coordinator owns the loaded workspace and
+contribution state. It reuses the warm Roslyn solution for source-only changes,
+coalesces refresh requests, tracks dirty event generations, and publishes the
+complete JSON only after a foreground request reaches its barrier. Project and
+build-input changes take the safe cold path. A bounded event queue marks
+delivery untrusted instead of silently dropping events, and an optional
+trust-loss callback is available for the watcher recovery layer. Explicit
+rebuild requests share the same foreground barrier without changing the public
+Graphify document.
 
 Clean requests return the current published generation without loading Roslyn
 or rewriting JSON. Events arriving after a request’s target generation remain
@@ -313,11 +318,12 @@ pending for the next refresh.
 Gate: a controllable test session proves that a request arriving during a slow
 cold load waits without duplicate extraction, warm clean requests are cheap,
 multiple callers share one generation, and a failed refresh never publishes a
-partial document.
+partial document. The focused session tests and complete suite pass on both
+supported frameworks (56 tests on `net10.0`, 59 on `net11.0`).
 
 Commit target: `feat: add warm incremental refresh session`
 
-### Phase 4 — trusted file watcher and background indexing
+### Phase 4 — trusted file watcher and background indexing — in progress
 
 Deliver the long-running `--watch` mode using the session from Phase 3. The
 watcher subscribes before its initial cold reconciliation, records filesystem

@@ -151,7 +151,8 @@ internal sealed class IncrementalRefreshEngine
             cacheResult.Status,
             extractedProjectCount,
             reusedProjectCount,
-            outputRepublished: dirtyProjectKeys.Count != 0 || rebuild || !IsPublishedOutputCurrent(previousState, fullOutputPath));
+            outputRepublished: dirtyProjectKeys.Count != 0 || rebuild || !IsPublishedOutputCurrent(previousState, fullOutputPath),
+            generation);
     }
 
     private async Task<string> PublishIfNeededAsync(

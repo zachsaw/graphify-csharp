@@ -21,11 +21,16 @@ public sealed class LoadedSolution : IDisposable
 
     public MSBuildWorkspace Workspace { get; }
 
-    public ImmutableArray<AnalyzedProject> Projects { get; }
+    public ImmutableArray<AnalyzedProject> Projects { get; private set; }
 
     public string RepositoryRoot { get; }
 
     public ImmutableArray<WorkspaceLoadDiagnostic> Diagnostics { get; }
+
+    internal void ReplaceProjects(IEnumerable<AnalyzedProject> projects)
+    {
+        Projects = (projects ?? throw new ArgumentNullException(nameof(projects))).ToImmutableArray();
+    }
 
     private IDisposable? Resources { get; }
 

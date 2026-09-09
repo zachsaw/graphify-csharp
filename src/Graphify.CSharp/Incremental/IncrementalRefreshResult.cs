@@ -10,7 +10,8 @@ internal sealed class IncrementalRefreshResult
         IncrementalCacheLoadStatus cacheStatus,
         int extractedProjectCount,
         int reusedProjectCount,
-        bool outputRepublished)
+        bool outputRepublished,
+        RefreshGeneration? generation = null)
     {
         Graph = graph ?? throw new ArgumentNullException(nameof(graph));
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDigest);
@@ -19,6 +20,7 @@ internal sealed class IncrementalRefreshResult
         ExtractedProjectCount = extractedProjectCount;
         ReusedProjectCount = reusedProjectCount;
         OutputRepublished = outputRepublished;
+        Generation = generation;
     }
 
     public GraphSnapshot Graph { get; }
@@ -32,4 +34,6 @@ internal sealed class IncrementalRefreshResult
     public int ReusedProjectCount { get; }
 
     public bool OutputRepublished { get; }
+
+    public RefreshGeneration? Generation { get; }
 }

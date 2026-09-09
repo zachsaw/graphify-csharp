@@ -67,6 +67,22 @@ internal sealed record RefreshGeneration
         IndexedGeneration,
         PublishedGeneration);
 
+    public RefreshGeneration AdvanceEventsThrough(long generation)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(generation);
+        if (generation < EventGeneration)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(generation),
+                generation,
+                "Event generation cannot move backwards.");
+        }
+
+        return generation == EventGeneration
+            ? this
+            : new RefreshGeneration(SessionId, generation, IndexedGeneration, PublishedGeneration);
+    }
+
     public RefreshGeneration MarkIndexed(long generation)
     {
         ValidateAdvancement(generation, IndexedGeneration, EventGeneration, nameof(generation));
