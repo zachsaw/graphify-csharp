@@ -8,6 +8,8 @@ public sealed class SemanticSyntaxWalker : CSharpSyntaxWalker
 {
     private readonly SemanticModel _semanticModel;
     private readonly SemanticOperationWalker _operationWalker;
+    private readonly ISet<SyntaxNode> _visitedOperationRoots =
+        new HashSet<SyntaxNode>(ReferenceEqualityComparer.Instance);
 
     public SemanticSyntaxWalker(
         SemanticModel semanticModel,
@@ -17,40 +19,38 @@ public sealed class SemanticSyntaxWalker : CSharpSyntaxWalker
         _operationWalker = operationWalker ?? throw new ArgumentNullException(nameof(operationWalker));
     }
 
-    public override void VisitInvocationExpression(InvocationExpressionSyntax node)
+    public override void Visit(SyntaxNode? node)
     {
-        VisitOperation(node);
-        base.VisitInvocationExpression(node);
+        if (node is null)
+        {
+            return;
+        }
+
+        var operation = _semanticModel.GetOperation(node);
+        if (operation is not null && ShouldVisitOperationRoot(operation.Syntax))
+        {
+            _operationWalker.Visit(operation);
+        }
+
+        base.Visit(node);
     }
 
-    public override void VisitObjectCreationExpression(ObjectCreationExpressionSyntax node)
+    private bool ShouldVisitOperationRoot(SyntaxNode syntax)
     {
-        VisitOperation(node);
-        base.VisitObjectCreationExpression(node);
-    }
+        for (var parent = syntax.Parent; parent is not null; parent = parent.Parent)
+        {
+            if (_visitedOperationRoots.Contains(parent))
+            {
+                return false;
+            }
+        }
 
-    public override void VisitImplicitObjectCreationExpression(ImplicitObjectCreationExpressionSyntax node)
-    {
-        VisitOperation(node);
-        base.VisitImplicitObjectCreationExpression(node);
-    }
-
-    public override void VisitCollectionExpression(CollectionExpressionSyntax node)
-    {
-        VisitOperation(node);
-        base.VisitCollectionExpression(node);
-    }
-
-    public override void VisitTypeOfExpression(TypeOfExpressionSyntax node)
-    {
-        VisitOperation(node);
-        base.VisitTypeOfExpression(node);
+        return _visitedOperationRoots.Add(syntax);
     }
 
     public override void VisitAttribute(AttributeSyntax node)
     {
         VisitSymbol(node);
-        VisitOperation(node);
         base.VisitAttribute(node);
     }
 
@@ -72,62 +72,9 @@ public sealed class SemanticSyntaxWalker : CSharpSyntaxWalker
         base.VisitAliasQualifiedName(node);
     }
 
-    public override void VisitMemberAccessExpression(MemberAccessExpressionSyntax node)
-    {
-        VisitOperation(node);
-        base.VisitMemberAccessExpression(node);
-    }
-
-    public override void VisitMemberBindingExpression(MemberBindingExpressionSyntax node)
-    {
-        VisitOperation(node);
-        base.VisitMemberBindingExpression(node);
-    }
-
-    public override void VisitElementAccessExpression(ElementAccessExpressionSyntax node)
-    {
-        VisitOperation(node);
-        base.VisitElementAccessExpression(node);
-    }
-
-    public override void VisitBreakStatement(BreakStatementSyntax node)
-    {
-        VisitOperation(node);
-        base.VisitBreakStatement(node);
-    }
-
-    public override void VisitContinueStatement(ContinueStatementSyntax node)
-    {
-        VisitOperation(node);
-        base.VisitContinueStatement(node);
-    }
-
-    public override void VisitFixedStatement(FixedStatementSyntax node)
-    {
-        VisitOperation(node);
-        base.VisitFixedStatement(node);
-    }
-
-    public override void VisitSizeOfExpression(SizeOfExpressionSyntax node)
-    {
-        VisitOperation(node);
-        base.VisitSizeOfExpression(node);
-    }
-
-#if NET11_0_OR_GREATER
-#pragma warning disable RSEXPERIMENTAL006
-    public override void VisitUnsafeExpression(UnsafeExpressionSyntax node)
-    {
-        VisitOperation(node);
-        base.VisitUnsafeExpression(node);
-    }
-#pragma warning restore RSEXPERIMENTAL006
-#endif
-
     public override void VisitIdentifierName(IdentifierNameSyntax node)
     {
         VisitSymbol(node);
-        VisitOperation(node);
         base.VisitIdentifierName(node);
     }
 
@@ -174,9 +121,4 @@ public sealed class SemanticSyntaxWalker : CSharpSyntaxWalker
         };
     }
 
-    private void VisitOperation(SyntaxNode node)
-    {
-        var operation = _semanticModel.GetOperation(node);
-        _operationWalker.Visit(operation);
-    }
 }

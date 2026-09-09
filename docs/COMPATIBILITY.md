@@ -22,13 +22,16 @@ containing scopes, and the C# 15 declaration shapes exposed by the .NET 11
 Roslyn surface. A future language form that Roslyn exposes but this version
 cannot identify is reported as a recoverable Graphify diagnostic.
 
-## Input projects
+## Input
 
 MSBuild must be able to evaluate the supplied `.sln`, `.slnx`, or `.csproj` on
-the host. Install any SDKs/workloads required by the analyzed repository. For a
-single-target project, `--target-framework` may be omitted and the loader
-records the evaluated target automatically. For a multi-targeted project, pass
-one value so the symbol key cannot silently combine different compilations.
+the host. An SDK file-based `.cs` app is converted by the installed SDK before
+Roslyn loads it; its SDK directives and referenced projects/packages must be
+available locally. Install any SDKs/workloads required by the analyzed
+repository. For a single-target project, `--target-framework` may be omitted
+and the loader records the evaluated target automatically. For a multi-targeted
+project, pass one value so the symbol key cannot silently combine different
+compilations.
 
 ## Graphify output
 
@@ -36,7 +39,12 @@ The emitted document follows Graphify’s v8 extraction shape and adds a
 `graphify_csharp` extractor-metadata block. The C# semantic node IDs are
 lowercase stable SHA-256-derived IDs; the full project/TFM-aware symbol key
 remains in node properties. This avoids overload collisions, but means a
-name-only C# extraction must use an explicit ID join before merging.
+name-only C# extraction must use an explicit ID join before merging. The CLI
+currently emits one complete document. Any future shards must retain the same
+envelope and stable IDs. Graphify’s current `merge-graphs` command prefixes
+each input as an independent graph source, so same-repository shards require a
+dedicated deterministic merger to union nodes by ID, preserve parallel
+relations, validate endpoints, and emit one complete document.
 
 ## Validation matrix
 
@@ -47,7 +55,7 @@ The repository currently validates the following path in CI and local tests:
 | .NET SDK / tool asset | 10.0.x / `net10.0` |
 | C# language features | C# 14 fixture coverage; extension blocks, field-backed properties, partial constructors/events, explicit compound-assignment operators, span/lambda/assignment forms |
 | Roslyn/MSBuild packages | 5.9.0 |
-| Input | C# `.csproj` fixture; loader also accepts `.sln`/`.slnx` extensions |
+| Input | C# `.csproj` and SDK file-based `.cs` fixtures; loader also accepts `.sln`/`.slnx` |
 | Output | Graphify nodes, edges, hyperedges, and C# extractor metadata |
 | Test runner | xUnit on .NET 10 |
 

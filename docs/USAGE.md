@@ -34,11 +34,25 @@ graphify-csharp \
   --output ./graphify-out/csharp.json
 ```
 
-The input may be a solution, solution filter supported by MSBuild, or project
-file. A project input also loads its project references that MSBuildWorkspace
-reports. The TFM selector is optional for single-target projects. For a
-multi-target project, specify one TFM; the tool refuses to silently merge
+The input may be a solution, solution filter supported by MSBuild, project
+file, or SDK file-based `.cs` app. A project input also loads its project
+references that MSBuildWorkspace reports. For a file-based app, the SDK
+conversion honors `#:sdk`, `#:property`, `#:package`, `#:project`, and
+`#:include` directives, then maps generated-document locations back to the
+original source files. The SDK and any referenced packages/projects must be
+available locally. The TFM selector is optional for single-target projects.
+For a multi-target project, specify one TFM; the tool refuses to silently merge
 different compilations.
+
+Example file-based app invocation:
+
+```text
+graphify-csharp \
+  --input ./src/App.cs \
+  --root . \
+  --configuration Release \
+  --output ./graphify-out/csharp.json
+```
 
 To check repeatability, run the local CLI twice and compare the complete output:
 
@@ -65,9 +79,10 @@ Nodes contain stable C# properties:
 
 Edges point from the source declaration to the referenced declaration. Reverse
 the edges in Graphify to obtain callers. `calls`, `references`, `implements`,
-`inherits`, and `overrides` are direct Roslyn evidence; locations on each edge
-explain where the relationship was observed. Compiler-known entry points are
-marked on their node as `is_entry_point=true`.
+`inherits`, and `overrides` are direct Roslyn evidence; invocation and
+constructor arguments also reference their bound source formal parameters.
+Locations on each edge explain where the relationship was observed.
+Compiler-known entry points are marked on their node as `is_entry_point=true`.
 
 The `graphify_csharp.diagnostics` array reports workspace-load issues and
 recoverable declaration-identity issues. An unsupported or otherwise
@@ -110,6 +125,12 @@ scope; merging it with a name-only C# extraction requires an explicit ID-join
 layer. Graphify’s clustered NetworkX view can normalize multiple relationships
 between the same endpoints; retain `csharp.json` when relation-level evidence
 matters.
+The CLI emits one complete document. If a future workflow shards extraction,
+each shard must keep this same envelope and stable IDs. JSON Lines fragments
+are not directly compatible. Graphify’s current `merge-graphs` command is for
+independent graph sources and prefixes each input’s IDs, so a same-repository
+shard workflow needs a deterministic merger that unions stable IDs, preserves
+parallel relations, validates endpoints, and then emits one complete document.
 
 ## Known limitations
 

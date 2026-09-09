@@ -15,7 +15,8 @@ repository-specific questions such as caller and zero-inbound-reference audits.
 
 ## Quick start
 
-Run from a repository containing the solution or project you want to inspect:
+Run from a repository containing the solution, project, or file-based app you
+want to inspect:
 
 ```text
 dotnet tool install --global Graphify.CSharp --framework net10.0
@@ -39,6 +40,21 @@ The install/update `--framework` selects the tool runtime. The command’s
 `--target-framework` option selects the analyzed project compilation and is
 still only needed when that project is multi-targeted or when a particular
 target must be inspected.
+
+An SDK file-based app can be passed directly when there is no `.csproj` yet:
+
+```text
+graphify-csharp \
+  --input ./src/App.cs \
+  --root . \
+  --configuration Release \
+  --output ./graphify-out/csharp.json
+```
+
+The tool asks the installed SDK to convert the file-based app temporarily,
+honors its `#:sdk`, `#:property`, `#:package`, `#:project`, and `#:include`
+directives, and remaps source locations back to the repository. The SDK and
+any referenced packages/projects must be available on the host.
 
 ## Integrate with Graphify
 
@@ -118,6 +134,19 @@ Graphify extraction as a separate graph and merge the two Graphify JSON
 documents with Graphify’s `merge-graphs` command. Do not merge this output
 with a name-only C# extraction without an explicit ID-join policy.
 
+The CLI currently writes one complete Graphify extraction document. Large
+repositories can be sharded later, but every shard must remain a complete
+`nodes`/`edges`/`hyperedges` document with stable IDs. Plain JSON Lines
+fragments are not Graphify extraction files by themselves.
+
+Graphify’s current `merge-graphs` command is intended for independent
+repositories or graph sources: it prefixes each input’s IDs and normalizes the
+merged view. It should not be used as the same-repository shard merger when
+stable C# IDs or parallel relations matter. A future shard mode needs a
+deterministic same-repository merger that unions nodes by ID, preserves the
+multigraph edge identity, validates cross-shard endpoints, and emits the same
+complete Graphify document.
+
 The package is currently built from this repository as version `0.1.0` while
 the API and Graphify integration settle. For local development, replace the
 install command with:
@@ -129,15 +158,18 @@ dotnet run --project src/Graphify.CSharp.Cli --framework net10.0 -- --input ./sr
 `--target-framework` is optional. The loader resolves a single project target
 automatically; pass it when a project targets multiple frameworks. An ambiguous
 multi-target project fails with an actionable message instead of producing a
-mixed graph.
+mixed graph. For a file-based app it is forwarded to the SDK conversion/restore
+step when supplied.
 
 ## Output
 
 The output keeps Graphify’s required `nodes`, `edges`, and `hyperedges` arrays.
 Edges are directed from source/caller to target/contract and use `EXTRACTED` for
 Roslyn-resolved facts. v0.1 emits `calls`, `references`, `inherits`,
-`implements`, and `overrides`; node properties include the full symbol key,
-namespace, project, target framework, and declaration kind. The catalog covers
+`implements`, and `overrides`; compiler-bound call arguments also reference
+their source formal-parameter declarations. Node properties include the full
+symbol key, namespace, project, target framework, and declaration kind. The
+catalog covers
 namespaces, named types, constructors, methods/operators/local functions,
 properties/indexers, fields/enum values, events, parameters, locals, type
 parameters, aliases, labels, and query range variables. `graphify_csharp`
@@ -157,11 +189,15 @@ by the consuming analysis.
 
 Included:
 
-- `.sln`, `.slnx`, and `.csproj` loading through MSBuildWorkspace;
+- `.sln`, `.slnx`, and `.csproj` loading through MSBuildWorkspace, plus SDK
+  file-based `.cs` apps with source-location remapping;
 - overload-aware symbol identity including project and TFM context;
 - direct calls, constructors, method groups, properties, fields, enum values,
-  events, scoped declarations, declaration-header, attribute, generic, and
-  `typeof` references;
+  events, scoped declarations, formal call parameters, declaration-header,
+  attribute, generic, and `typeof` references;
+- compiler-selected members for operators, conversions, deconstruction,
+  foreach/await/using, property/event accessors, patterns, ranges, collection
+  expressions, interpolated string handlers, and fixed/pointer syntax;
 - inheritance, interface implementation, and virtual override relationships;
 - C# 14 extension blocks, field-backed properties, partial constructors/events,
   explicit compound-assignment operators, and newer lambda/assignment forms;

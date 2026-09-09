@@ -61,11 +61,18 @@ public sealed class Counter
 
 public delegate bool TryParse<T>(string text, out T result);
 
+public sealed class GenericNameTarget<T>
+{
+}
+
 public static class ModernFeatures
 {
     public const string UnboundGenericName = nameof(List<>);
+    public const string OwnUnboundGenericName = nameof(GenericNameTarget<>);
 
     public static ReadOnlySpan<char> ToSpan(string text) => text;
+
+    public static int UseExtensions(IEnumerable<int> values) => values.FirstValue();
 
     public static int Parse()
     {

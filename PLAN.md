@@ -2,15 +2,15 @@
 
 ## Goal
 
-Ship a small, reusable, OSS Graphify C# semantic enricher. Given a C# solution
-or project, it deterministically emits:
+Ship a small, reusable, OSS Graphify C# semantic enricher. Given a C# solution,
+project, or SDK file-based `.cs` app, it deterministically emits:
 
 - source declaration nodes for namespaces, named types, type members, enum
   values, local functions, parameters, locals, type parameters, aliases,
   labels, and query range variables with stable, project/TFM-aware symbol
   identity;
-- directed edges for Roslyn-resolved calls, inheritance, and non-call
-  references;
+- directed edges for Roslyn-resolved calls, inheritance, implementation,
+  overrides, formal argument bindings, and non-call references;
 - namespace, project/TFM context, source locations, and compiler-known entry
   point facts as node metadata; and
 - Graphify-compatible JSON with diagnostics and provenance.
@@ -171,13 +171,39 @@ and a repeated package/tool run produces byte-identical output. Missing
 SDK/framework support must produce an actionable diagnostic rather than
 silently selecting the wrong compiler.
 
-Verification: .NET 10 (34 tests) and .NET 11 (37 tests) pass; the C# 15
-fixture produces 89 nodes and 58 edges deterministically; the packed net10 and
+Verification: .NET 10 (39 tests) and .NET 11 (42 tests) pass; the C# 15
+fixture produces 89 nodes and 64 edges deterministically; the packed net10 and
 net11 assets install and execute successfully; the pinned Dapper extraction
-produces 3,656 nodes and 4,616 edges deterministically; and the full
+produces 3,656 nodes and 6,960 edges deterministically; and the full
 `package-smoke` workflow passes under Docker/`act`.
 
 Commit: `feat: cover CSharp15 semantic feature shapes`
+
+### 8. Complete declaration and compiler-pattern surface — complete
+
+Deliver:
+
+- SDK file-based `.cs` app loading, including source remapping and the
+  `#:sdk`, `#:property`, `#:package`, `#:project`, and `#:include` directives;
+- explicit operation edges for local and parameter references, formal
+  parameters of calls/object creation, property/event accessors, operators,
+  conversions, deconstruction, foreach/await/using patterns, interpolated
+  string handlers, ranges, patterns, and function-pointer source references;
+- declaration coverage for all named source symbols and meaningful scoped
+  declarations exposed by Roslyn, with stable diagnostics for unrepresentable
+  identity/operation shapes; and
+- a performance-safe operation-root traversal that avoids repeatedly walking
+  the same Roslyn operation tree.
+
+Gate: focused language-surface and file-based-app tests pass on both supported
+SDK assets, unsupported identity/operation exceptions become Graphify
+diagnostics, repeated extraction remains byte-deterministic, and the pinned
+real-world package e2e remains green.
+
+Verification: the language-surface fixture covers compiler-selected source
+members and formal argument bindings; the file-based fixture covers source
+remapping, SDK directives, package restore, and project references; and the
+real-world gate completes with deterministic Dapper output.
 
 ## Explicit non-goals for v1
 
@@ -194,8 +220,8 @@ Commit: `feat: cover CSharp15 semantic feature shapes`
 ## Definition of done
 
 The tool can be run headlessly from a clean checkout, produces stable Graphify
-JSON for a real C# solution, identifies direct callers by semantic symbol rather
-than method-name text, preserves namespace and compiler-known entry-point facts
-for downstream queries, handles optional versus ambiguous TFM selection
-explicitly, and has enough focused tests to make changes to those contracts
-safe.
+JSON for a real C# solution, project, or file-based app, identifies direct
+callers by semantic symbol rather than method-name text, preserves namespace
+and compiler-known entry-point facts for downstream queries, handles optional
+versus ambiguous TFM selection explicitly, and has enough focused tests to make
+changes to those contracts safe.

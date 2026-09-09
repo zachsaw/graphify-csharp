@@ -47,7 +47,7 @@ public sealed class DeclarationCatalogBuilder
                 {
                     entryPointIdentity = _createIdentity(entryPoint, project.Identity, solution.RepositoryRoot);
                 }
-                catch (ArgumentException exception)
+                catch (Exception exception) when (IsRecoverableIdentityException(exception))
                 {
                     diagnostics.Add(IdentityDiagnostic(entryPoint, exception, locations));
                 }
@@ -218,7 +218,7 @@ public sealed class DeclarationCatalogBuilder
         {
             identity = _createIdentity(declarationSymbol, project, repositoryRoot);
         }
-        catch (ArgumentException exception)
+        catch (Exception exception) when (IsRecoverableIdentityException(exception))
         {
             diagnostics.Add(IdentityDiagnostic(declarationSymbol, exception, locations));
             return;
@@ -253,11 +253,14 @@ public sealed class DeclarationCatalogBuilder
 
     private static string IdentityDiagnostic(
         ISymbol symbol,
-        ArgumentException exception,
+        Exception exception,
         SourceLocationFactory locations)
     {
         return $"Identity: skipped {symbol.Kind} '{symbol.ToDisplayString()}' at {LocationText(symbol, locations)}: {exception.Message}";
     }
+
+    private static bool IsRecoverableIdentityException(Exception exception) =>
+        exception is ArgumentException or NotSupportedException or NotImplementedException;
 
     private static string LocationText(ISymbol symbol, SourceLocationFactory locations)
     {

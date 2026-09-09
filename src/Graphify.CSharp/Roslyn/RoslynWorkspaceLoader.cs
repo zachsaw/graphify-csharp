@@ -25,10 +25,12 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
 
         var workspace = MSBuildWorkspace.Create(workspaceProperties);
         workspace.RegisterWorkspaceFailedHandler(args => diagnostics.Add(new WorkspaceLoadDiagnostic(args.Diagnostic.Kind.ToString(), args.Diagnostic.Message)));
+        WorkspaceOpenResult? opened = null;
 
         try
         {
-            var projects = await OpenProjectsAsync(workspace, request, cancellationToken).ConfigureAwait(false);
+            opened = await OpenProjectsAsync(workspace, request, cancellationToken).ConfigureAwait(false);
+            var projects = opened.Projects;
             var analyzedProjects = new List<AnalyzedProject>(projects.Count);
             var seenProjectKeys = new HashSet<string>(StringComparer.Ordinal);
             foreach (var project in projects.OrderBy(project => project.FilePath ?? project.Name, StringComparer.Ordinal))
@@ -51,7 +53,14 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
                     projectPath,
                     request.Configuration,
                     request.TargetFramework);
-                var identity = Domain.ProjectIdentity.FromPath(projectPath, request.RepositoryRoot, targetFramework);
+                var identityPath = opened.LogicalProjectPath is not null
+                    && string.Equals(
+                        Path.GetFullPath(projectPath),
+                        Path.GetFullPath(opened.PrimaryProjectPath),
+                        StringComparison.Ordinal)
+                    ? opened.LogicalProjectPath
+                    : projectPath;
+                var identity = Domain.ProjectIdentity.FromPath(identityPath, request.RepositoryRoot, targetFramework);
                 if (!seenProjectKeys.Add(identity.Key))
                 {
                     continue;
@@ -65,16 +74,22 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
                 throw new InvalidOperationException($"No C# projects could be loaded from '{request.InputPath}'.");
             }
 
-            return new LoadedSolution(workspace, analyzedProjects, request.RepositoryRoot, diagnostics);
+            return new LoadedSolution(
+                workspace,
+                analyzedProjects,
+                request.RepositoryRoot,
+                diagnostics,
+                opened.Resources);
         }
         catch
         {
             workspace.Dispose();
+            opened?.Resources?.Dispose();
             throw;
         }
     }
 
-    private static async Task<IReadOnlyList<Project>> OpenProjectsAsync(
+    private static async Task<WorkspaceOpenResult> OpenProjectsAsync(
         MSBuildWorkspace workspace,
         ProjectLoadRequest request,
         CancellationToken cancellationToken)
@@ -82,10 +97,47 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
         var extension = Path.GetExtension(request.InputPath);
         return extension.ToLowerInvariant() switch
         {
-            ".sln" or ".slnx" => (await workspace.OpenSolutionAsync(request.InputPath, cancellationToken: cancellationToken).ConfigureAwait(false)).Projects.ToArray(),
-            ".csproj" => await OpenProjectAndReferencesAsync(workspace, request.InputPath, cancellationToken).ConfigureAwait(false),
-            _ => throw new ArgumentException("Input must be a .sln, .slnx, or .csproj file.", nameof(request)),
+            ".sln" or ".slnx" => new WorkspaceOpenResult(
+                (await workspace.OpenSolutionAsync(request.InputPath, cancellationToken: cancellationToken).ConfigureAwait(false)).Projects.ToArray(),
+                request.InputPath,
+                request.InputPath,
+                Resources: null),
+            ".csproj" => new WorkspaceOpenResult(
+                await OpenProjectAndReferencesAsync(workspace, request.InputPath, cancellationToken).ConfigureAwait(false),
+                request.InputPath,
+                request.InputPath,
+                Resources: null),
+            ".cs" => await OpenFileBasedAppAsync(workspace, request, cancellationToken).ConfigureAwait(false),
+            _ => throw new ArgumentException("Input must be a .sln, .slnx, .csproj, or file-based .cs app.", nameof(request)),
         };
+    }
+
+    private static async Task<WorkspaceOpenResult> OpenFileBasedAppAsync(
+        MSBuildWorkspace workspace,
+        ProjectLoadRequest request,
+        CancellationToken cancellationToken)
+    {
+        var generated = await FileBasedAppProject.CreateAsync(
+            request.InputPath,
+            request.TargetFramework,
+            cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await workspace.OpenProjectAsync(generated.ProjectPath, cancellationToken: cancellationToken).ConfigureAwait(false);
+            var remappedSolution = await generated.RemapDocumentsAsync(
+                workspace.CurrentSolution,
+                cancellationToken).ConfigureAwait(false);
+            return new WorkspaceOpenResult(
+                remappedSolution.Projects.ToArray(),
+                generated.ProjectPath,
+                request.InputPath,
+                generated);
+        }
+        catch
+        {
+            generated.Dispose();
+            throw;
+        }
     }
 
     private static async Task<IReadOnlyList<Project>> OpenProjectAndReferencesAsync(
@@ -96,5 +148,11 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
         await workspace.OpenProjectAsync(projectPath, cancellationToken: cancellationToken).ConfigureAwait(false);
         return workspace.CurrentSolution.Projects.ToArray();
     }
+
+    private sealed record WorkspaceOpenResult(
+        IReadOnlyList<Project> Projects,
+        string PrimaryProjectPath,
+        string? LogicalProjectPath,
+        IDisposable? Resources);
 
 }

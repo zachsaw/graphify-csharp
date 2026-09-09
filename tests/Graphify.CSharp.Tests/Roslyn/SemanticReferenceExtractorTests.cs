@@ -103,11 +103,19 @@ public sealed class SemanticReferenceExtractorTests
         var genericInterface = Find(catalog, "ReferenceFixture.Production", "IGenericContract");
         var run = Find(catalog, "ReferenceFixture.Production", "GenericContract", "Run", "T");
         var localFunction = Find(catalog, "ReferenceFixture.Production", "GenericContract", "LocalFunction", "T");
+        var compare = Find(catalog, "ReferenceFixture.Production", "GenericContract", "Compare", "T");
+        var compareTypeParameter = Assert.Single(catalog.Declarations.Where(declaration =>
+            declaration.Identity.Kind == SymbolKind.TypeParameter
+            && declaration.Identity.Name == "T"
+            && Microsoft.CodeAnalysis.SymbolEqualityComparer.Default.Equals(
+                declaration.Symbol.ContainingSymbol,
+                compare.Symbol)));
 
         Assert.Contains(graph.Edges, edge => IsEdge(edge, enumMember, referencedEnumMember, GraphRelation.References));
         Assert.Contains(graph.Edges, edge => IsEdge(edge, genericType, genericBase, GraphRelation.Inherits));
         Assert.Contains(graph.Edges, edge => IsEdge(edge, genericType, genericInterface, GraphRelation.Implements));
         Assert.Contains(graph.Edges, edge => IsEdge(edge, run, localFunction, GraphRelation.Calls));
+        Assert.Contains(graph.Edges, edge => IsEdge(edge, compare, compareTypeParameter, GraphRelation.References));
     }
 
     [Fact]

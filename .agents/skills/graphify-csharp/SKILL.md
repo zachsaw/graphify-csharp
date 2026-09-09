@@ -15,7 +15,8 @@ Its output is the evidence layer, not the repository-specific analysis layer:
   events, parameters, locals, type parameters, aliases, labels, and query
   range variables with stable semantic identity;
 - directed `calls`, `references`, `inherits`, `implements`, and `overrides`
-  edges resolved by Roslyn;
+  edges resolved by Roslyn, including compiler-bound formal parameters for
+  calls and object creation;
 - namespace, project, TFM, source-location, and compiler-known entry-point facts;
 - C# 14 extension-block receivers/members and paired partial declarations,
   represented with stable scope identity and merged source locations;
@@ -23,6 +24,10 @@ Its output is the evidence layer, not the repository-specific analysis layer:
   references, closed hierarchies, extension indexers, labeled jumps, and
   memory-safety syntax when the matching .NET 11 tool asset is selected; and
 - deterministic Graphify-compatible JSON with diagnostics and provenance.
+
+The loader accepts `.sln`, `.slnx`, `.csproj`, and SDK file-based `.cs` apps.
+File-based apps are converted through the installed SDK, with supported SDK
+directives and source-location remapping preserved.
 
 Graphify or another consumer can derive callers by following incoming edges and
 can classify test-only, production, mixed, or zero-inbound-reference symbols
@@ -69,10 +74,11 @@ tree for the declaration catalog, and use targeted syntax queries only for
 declarations that are not exposed as type members, such as local functions,
 locals, aliases, labels, and query range variables.
 Reuse each project’s semantic models and source-location factory; do not reload
-or reparse a project per relationship. Feed observations into a deduplicating
-edge accumulator so overlapping operation and syntax evidence does not create a
-large intermediate list. Keep fallback symbol matching O(1) on a prebuilt key
-index and reject ambiguous matches without broad name scans. Measure the pinned
+or reparse a project per relationship. Walk each Roslyn operation root at most
+once per syntax tree and feed observations into a deduplicating edge accumulator
+so overlapping operation and syntax evidence does not create a large
+intermediate list. Keep fallback symbol matching O(1) on a prebuilt key index
+and reject ambiguous matches without broad name scans. Measure the pinned
 real-world e2e before and after semantic changes; use coarse project-level
 parallelism only when profiling shows it is beneficial and Roslyn/MSBuild
 thread-safety remains clear.
@@ -121,7 +127,8 @@ In v0.1, emit directed edges from source to target:
 - `calls` for a Roslyn-resolved invocation or object creation;
 - `references` for supported non-call symbol uses such as method groups,
   `typeof`, attributes, enum initializers, declaration headers, and
-  type/member references;
+  type/member references, local/parameter uses, generic constraints, and
+  compiler-bound call arguments to source formal parameters;
 - `inherits` for a source type’s Roslyn-resolved base class;
 - `implements` for a source type/member implementing a Roslyn-resolved contract;
   and
@@ -215,7 +222,19 @@ graphify-csharp \
   --output ./graphify-out/csharp.json
 ```
 
+For an SDK file-based app, pass its `.cs` path instead. The enricher invokes the
+SDK conversion path and honors supported `#:` directives before Graphify reads
+the resulting complete extraction document.
+
 Pass the resulting file to Graphify with `--graph`. Preserve the raw C# JSON
 for audits because it retains directed, relation-level edges. This workflow
 does not move repository-specific policy into the enricher; consumers decide
 how to interpret namespaces, callers, and compiler facts.
+
+The CLI currently emits one complete document. If same-repository output
+sharding is added later, each shard must retain the envelope and stable IDs;
+JSONL fragments alone are not Graphify-compatible. Graphify’s current
+`merge-graphs` command is for independent graph sources and prefixes input IDs,
+so same-repository shards need a deterministic merger that unions nodes by ID,
+preserves parallel relations, validates endpoints, and emits one complete
+document.

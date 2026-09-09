@@ -48,6 +48,9 @@ public sealed class CSharp14FeatureTests
             declaration.Identity.Kind == SymbolKind.Field
             && declaration.Identity.Name == "UnboundGenericName");
         Assert.Contains(catalog.Declarations, declaration =>
+            declaration.Identity.Kind == SymbolKind.Field
+            && declaration.Identity.Name == "OwnUnboundGenericName");
+        Assert.Contains(catalog.Declarations, declaration =>
             declaration.Identity.Kind == SymbolKind.Method
             && declaration.Identity.Name == "ToSpan");
         Assert.Contains(catalog.Declarations, declaration =>
@@ -108,6 +111,28 @@ public sealed class CSharp14FeatureTests
         Assert.Contains(graph.Edges, edge => edge.SourceId == firstValue.Node.Id
             && edge.TargetId == receiver.Node.Id
             && edge.Relation == GraphRelation.References);
+
+        var ownGenericName = Find(catalog, SymbolKind.Field, null, "OwnUnboundGenericName");
+        var genericNameTarget = Find(catalog, SymbolKind.Type, null, "GenericNameTarget");
+        Assert.Contains(graph.Edges, edge => edge.SourceId == ownGenericName.Node.Id
+            && edge.TargetId == genericNameTarget.Node.Id
+            && edge.Relation == GraphRelation.References);
+
+        var extensionCaller = Find(catalog, SymbolKind.Method, "ModernFeatures", "UseExtensions");
+        var extensionMethod = Find(catalog, SymbolKind.Method, "GenericExtensions", "FirstValue");
+        Assert.Contains(graph.Edges, edge => edge.SourceId == extensionCaller.Node.Id
+            && edge.TargetId == extensionMethod.Node.Id
+            && edge.Relation == GraphRelation.Calls);
+
+        var counterUse = Find(catalog, SymbolKind.Method, "Counter", "Use");
+        var compoundAssignment = Find(catalog, SymbolKind.Method, "Counter", "op_AdditionAssignment");
+        var increment = Find(catalog, SymbolKind.Method, "Counter", "op_IncrementAssignment");
+        Assert.Contains(graph.Edges, edge => edge.SourceId == counterUse.Node.Id
+            && edge.TargetId == compoundAssignment.Node.Id
+            && edge.Relation == GraphRelation.Calls);
+        Assert.Contains(graph.Edges, edge => edge.SourceId == counterUse.Node.Id
+            && edge.TargetId == increment.Node.Id
+            && edge.Relation == GraphRelation.Calls);
     }
 
     [Fact]

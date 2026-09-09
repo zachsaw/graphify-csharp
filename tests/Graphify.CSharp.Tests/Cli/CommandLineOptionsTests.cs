@@ -36,6 +36,14 @@ public sealed class CommandLineOptionsTests
     }
 
     [Fact]
+    public void Accepts_file_based_app_input()
+    {
+        var options = CommandLineOptions.Parse(["app.cs"]);
+
+        Assert.EndsWith("/app.cs", options.InputPath, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Rejects_unknown_options_and_analysis_policy_options()
     {
         Assert.Throws<CommandLineException>(() => CommandLineOptions.Parse(["--unknown", "value"]));

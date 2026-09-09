@@ -34,10 +34,12 @@ public static class Program
                 options.Configuration,
                 options.TargetFramework));
             var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
-            var graph = await new SemanticReferenceExtractor().ExtractAsync(loaded, catalog);
+            var extractor = new SemanticReferenceExtractor();
+            var graph = await extractor.ExtractAsync(loaded, catalog);
             var diagnostics = loaded.Diagnostics
                 .Select(diagnostic => $"{diagnostic.Kind}: {diagnostic.Message}")
-                .Concat(catalog.Diagnostics);
+                .Concat(catalog.Diagnostics)
+                .Concat(extractor.Diagnostics);
             var json = new GraphifyJsonSerializer().Serialize(
                 graph,
                 new GraphifySerializationOptions(diagnostics));

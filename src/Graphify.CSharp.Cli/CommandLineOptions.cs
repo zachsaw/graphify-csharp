@@ -94,7 +94,7 @@ public sealed class CommandLineOptions
         var input = Single(values, "input") ?? positionalInput;
         if (string.IsNullOrWhiteSpace(input))
         {
-            throw new CommandLineException("An input .sln, .slnx, or .csproj path is required (use --input).");
+            throw new CommandLineException("An input .sln, .slnx, .csproj, or file-based .cs app path is required (use --input).");
         }
 
         var repositoryRoot = FullPath(Single(values, "root") ?? Directory.GetCurrentDirectory(), Directory.GetCurrentDirectory());
@@ -116,9 +116,9 @@ public sealed class CommandLineOptions
             showHelp: false);
     }
 
-    public static string Usage => "Usage: graphify-csharp --input <solution|project> [options]\n\n"
+    public static string Usage => "Usage: graphify-csharp --input <solution|project|file.cs> [options]\n\n"
         + "Options:\n"
-        + "  -i, --input <path>              C# solution/project to extract (required)\n"
+        + "  -i, --input <path>              C# solution/project/file-based app to extract (required)\n"
         + "  -r, --root <path>               Repository root for stable paths\n"
         + "  -o, --output <path>             Graphify JSON output path\n"
         + "  -c, --configuration <name>      MSBuild configuration (default: Debug)\n"

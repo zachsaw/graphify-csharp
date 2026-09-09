@@ -84,4 +84,8 @@ public sealed class GenericContract<T> : GenericBase<T>, IGenericContract<T>
 
         static T LocalFunction(T localValue) => localValue;
     }
+
+    public static int Compare<T>(T value)
+        where T : System.IComparable<T>
+        => value.CompareTo(value);
 }
