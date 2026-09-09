@@ -229,7 +229,7 @@ same-repository public shard format.
 Gate: clean branch baseline, design document linked from usage documentation,
 and no implementation behavior changed by the planning work.
 
-### Phase 1 — deterministic refresh state and cache primitives — next
+### Phase 1 — deterministic refresh state and cache primitives — in progress
 
 Deliver small, Roslyn-independent contracts for:
 
@@ -238,6 +238,10 @@ Deliver small, Roslyn-independent contracts for:
 - event, indexed, published, and session generations;
 - project/TFM contribution envelopes; and
 - atomic, versioned cache read/write with compatibility rejection.
+
+Current progress: the Roslyn-independent contracts, deterministic wire
+envelope, atomic store, and focused tests are implemented. The phase remains
+open until both supported target frameworks and its stated failure cases pass.
 
 The cache format must be domain data rather than serialized Roslyn objects.
 Stable ordering, explicit schema/version checks, and safe handling of corrupt
@@ -303,9 +307,21 @@ Commit target: `feat: add warm incremental refresh session`
 
 Deliver the long-running `--watch` mode using the session from Phase 3. The
 watcher subscribes before its initial cold reconciliation, records filesystem
-events immediately, and maps them to dirty paths/projects. It may process
-dirty projects on a low-priority background queue, but file events do not
-directly publish Graphify JSON.
+events immediately, and maps them to dirty paths/projects. Event callbacks must
+only normalize and enqueue paths on a bounded worker queue; they must never
+load Roslyn or perform extraction. It may process dirty projects on a
+low-priority background queue, but file events do not directly publish
+Graphify JSON.
+
+The watcher combines the .NET `FileSystemWatcher` fast path with a configurable
+backup `PeriodicTimer` reconciliation (initial default: five minutes). The
+backup path enumerates the configured input inventory and compares cheap
+metadata, escalating to content verification or cold reconciliation when the
+inventory is uncertain. Queue overflow, watcher `Error`/buffer overflow,
+missing roots, failed scans, or an uncertain event boundary tear down and
+recreate the watcher and invalidate the session; recovery scans current roots
+and completes a cold reconciliation before readiness. No user files are
+deleted during recovery.
 
 The watcher is trusted only within its healthy session. A new or restarted
 watcher creates a new session and performs cold reconciliation before becoming
@@ -322,9 +338,10 @@ atomic output commit.
 
 Gate: integration tests cover startup, restart, missed-event/error fallback,
 manual refresh while cold or warm work is running, background-to-foreground
-promotion, dirty work coalescing, and output visibility during replacement.
-The watcher must not create a second MSBuild workspace for a foreground
-request.
+promotion, dirty work coalescing, event queue overflow, backup-timer detection,
+watcher recreation, failed reconciliation, and output visibility during
+replacement. The watcher must not create a second MSBuild workspace for a
+foreground request.
 
 Commit target: `feat: add trusted watcher and manual refresh protocol`
 
@@ -339,7 +356,8 @@ Deliver:
 - recovery after process termination and incomplete cache/output swaps;
 - focused and end-to-end tests for the documented command flows; and
 - performance measurements separating workspace load, Roslyn extraction,
-  cache merge, serialization, and foreground wait time.
+  cache merge, metadata reconciliation, serialization, and foreground wait
+  time.
 
 The pinned real-world e2e must exercise a cold start, a warm no-change refresh,
 a changed source refresh, watcher restart, and rebuild-from-scratch. Results

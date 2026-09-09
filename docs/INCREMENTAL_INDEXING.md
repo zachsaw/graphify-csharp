@@ -50,6 +50,48 @@ manual refresh
     -> atomically publish csharp.json
 ```
 
+## Watcher reliability and reconciliation
+
+`FileSystemWatcher` is the low-latency hint source, not a durable change log.
+The .NET implementation documents that its native buffer can overflow and
+that the `Error` event is raised when monitoring cannot continue. It also
+documents duplicate notifications for ordinary operations such as moves and
+writes. The implementation therefore treats event delivery as trustworthy
+only when the surrounding session remains healthy.
+
+The watcher combines four mechanisms:
+
+- `FileSystemWatcher` instances use the narrowest practical `NotifyFilter` and
+  a bounded native buffer. Their callbacks do only path normalization and a
+  non-blocking write to the worker queue.
+- A bounded in-process event queue keeps callbacks off Roslyn and extraction
+  work. If the queue is full, the event is not silently discarded: the session
+  is marked untrusted and schedules a cold reconciliation.
+- A `PeriodicTimer` runs an independent backup reconciliation at a configurable
+  interval (initial default: five minutes). It enumerates the configured input
+  inventory and compares cheap file metadata with the last accepted inventory.
+  Differences become the same dirty-path commands produced by events. The
+  scan runs on a worker and never performs Roslyn work in a watcher callback.
+- The `Error` handler, missing watch root, failed backup scan, or uncertain
+  event boundary tears down the watcher and invalidates the session. The
+  worker scans the current roots, recreates the subscriptions, and performs a
+  cold reconciliation before declaring the session healthy again. No user
+  files are deleted as part of recovery.
+
+The backup scan is deliberately metadata-first so it does not turn every
+healthy refresh into a full content hash or Roslyn pass. A metadata collision,
+unreadable input, inventory enumeration error, or any other uncertainty
+escalates to content verification or a cold full-scope reconciliation. If the
+timer or watcher cannot establish a complete scan boundary, the session loses
+trust rather than claiming that no files changed. This gives the fast path the
+performance of events and gives a live session a bounded recovery interval for
+missed events; a process restart still requires the full cold-start rule above.
+
+There is no need for a third-party watcher wrapper. The reliability comes from
+the queue, explicit error/restart handling, and reconciliation policy around
+the .NET primitive. Time-based coalescing is optional for background work and
+never substitutes for recording an event or completing a reconciliation.
+
 ## Public commands and ownership
 
 The exact command spelling can evolve, but the behavior is:
@@ -145,8 +187,12 @@ immediately and a manual refresh bypasses any waiting period.
 ### Stopping or losing trust
 
 The session becomes invalid if the process stops, the watcher reports an error
-or overflow, a required watch root disappears, or event delivery can no longer
-be trusted. The next session must start with a cold reconciliation.
+or overflow, a required watch root disappears, the event queue overflows, a
+backup scan fails, or event delivery can no longer be trusted. The current
+watcher is torn down and recreated by the worker, but the invalid session must
+complete a cold reconciliation before it becomes healthy again. A process
+restart always creates a new session and follows the same rule. The next
+session must start with a cold reconciliation.
 
 The previous JSON remains a valid last-known snapshot while a replacement is
 being built, but it must not be reported as the result of the new refresh.
@@ -169,6 +215,10 @@ The refresh engine applies these rules:
 - a project that is removed loses its contribution; and
 - an unclassifiable change forces a cold reconciliation rather than risking a
   stale graph.
+
+The backup reconciliation uses the same inventory and invalidation rules as
+event processing. It is a correctness backstop for event loss, not a second
+Roslyn pipeline.
 
 The cache does not need to read every source file during a healthy watcher
 session. Events identify dirty inputs, and the warm workspace reads the files
@@ -278,6 +328,10 @@ real project:
 - events arriving during refresh remain pending for the next generation;
 - watcher shutdown and restart perform a cold reconciliation;
 - watcher errors and event overflow force a cold reconciliation;
+- a full event queue, failed backup scan, or missing watch root invalidates the
+  session and causes watcher recreation plus cold reconciliation;
+- the backup timer detects a source change when no filesystem event is
+  delivered;
 - `--rebuild` ignores valid cached contributions;
 - a failed refresh never leaves truncated or invalid JSON; and
 - repeated equivalent refreshes produce byte-identical complete documents.
