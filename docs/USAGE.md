@@ -1,5 +1,8 @@
 # Usage
 
+The planned incremental indexing, watcher, refresh, and cache-rebuild behavior
+is described in [Incremental indexing and refresh design](INCREMENTAL_INDEXING.md).
+
 ## Install
 
 The release artifact is a .NET global tool:
