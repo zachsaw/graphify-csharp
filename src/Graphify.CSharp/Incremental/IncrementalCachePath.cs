@@ -9,6 +9,7 @@ internal static class IncrementalCachePath
         var fullOutputPath = Path.GetFullPath(outputPath);
         var outputDirectory = Path.GetDirectoryName(fullOutputPath)
             ?? throw new InvalidOperationException($"Output path '{outputPath}' has no parent directory.");
-        return Path.Combine(outputDirectory, ".graphify-csharp", "manifest.json");
+        var outputIdentity = IncrementalHashing.Sha256(IncrementalPaths.CanonicalAbsolutePath(outputPath));
+        return Path.Combine(outputDirectory, ".graphify-csharp", $"manifest-{outputIdentity}.json");
     }
 }

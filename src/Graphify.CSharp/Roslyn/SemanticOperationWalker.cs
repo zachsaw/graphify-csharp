@@ -12,7 +12,8 @@ public sealed class SemanticOperationWalker : OperationWalker
     private readonly SemanticCallerResolver _callerResolver;
     private readonly SemanticModel _semanticModel;
     private readonly SourceLocationFactory _locations;
-    private readonly ICollection<GraphEdge> _edges;
+    private readonly GraphEdgeAccumulator? _edgeAccumulator;
+    private readonly ICollection<GraphEdge>? _legacyEdges;
 
     public SemanticOperationWalker(
         DeclarationCatalog catalog,
@@ -24,7 +25,20 @@ public sealed class SemanticOperationWalker : OperationWalker
         _callerResolver = new SemanticCallerResolver(_catalog);
         _semanticModel = semanticModel ?? throw new ArgumentNullException(nameof(semanticModel));
         _locations = locations ?? throw new ArgumentNullException(nameof(locations));
-        _edges = edges ?? throw new ArgumentNullException(nameof(edges));
+        _legacyEdges = edges ?? throw new ArgumentNullException(nameof(edges));
+    }
+
+    internal SemanticOperationWalker(
+        DeclarationCatalog catalog,
+        SemanticModel semanticModel,
+        SourceLocationFactory locations,
+        GraphEdgeAccumulator edges)
+    {
+        _catalog = catalog ?? throw new ArgumentNullException(nameof(catalog));
+        _callerResolver = new SemanticCallerResolver(_catalog);
+        _semanticModel = semanticModel ?? throw new ArgumentNullException(nameof(semanticModel));
+        _locations = locations ?? throw new ArgumentNullException(nameof(locations));
+        _edgeAccumulator = edges ?? throw new ArgumentNullException(nameof(edges));
     }
 
     public override void Visit(IOperation? operation)
@@ -379,13 +393,13 @@ public sealed class SemanticOperationWalker : OperationWalker
             return;
         }
 
-        _edges.Add(new GraphEdge(
+        AddEdge(
             caller.Node.Id,
             target.Node.Id,
             relation,
             EvidenceKind.Extracted,
             confidence: 1.0,
-            [sourceLocation]));
+            sourceLocation);
     }
 
     private SymbolDeclaration? ResolveCaller(ISymbol symbol)
@@ -434,12 +448,35 @@ public sealed class SemanticOperationWalker : OperationWalker
             return;
         }
 
-        _edges.Add(new GraphEdge(
+        AddEdge(
             caller.Node.Id,
             targetDeclaration.Node.Id,
             relation,
             EvidenceKind.Extracted,
             confidence: 1.0,
+            location);
+    }
+
+    private void AddEdge(
+        string sourceId,
+        string targetId,
+        GraphRelation relation,
+        EvidenceKind evidence,
+        double confidence,
+        SourceLocation location)
+    {
+        if (_edgeAccumulator is { } accumulator)
+        {
+            accumulator.Add(sourceId, targetId, relation, evidence, confidence, location);
+            return;
+        }
+
+        _legacyEdges!.Add(new GraphEdge(
+            sourceId,
+            targetId,
+            relation,
+            evidence,
+            confidence,
             [location]));
     }
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.5
 
 - Multi-target the global tool for .NET 10 and .NET 11, with C# 15
   collection-expression argument calls, union/case relationships, closed
@@ -12,6 +12,11 @@
   source locations.
 - Preserve the remaining graph and emit diagnostics when a declaration shape
   cannot be assigned a stable identity.
+- Add warm incremental indexing with resilient file-watcher recovery and
+  foreground refresh barriers.
+- Parallelize coarse semantic extraction while preserving deterministic output.
+- Route watcher refreshes by both analysis configuration and output path so a
+  request cannot be reported as writing another file.
 
 ## 0.1.0
 

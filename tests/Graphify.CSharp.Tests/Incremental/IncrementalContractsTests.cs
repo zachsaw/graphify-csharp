@@ -32,6 +32,35 @@ public sealed class IncrementalContractsTests
     }
 
     [Fact]
+    public void Watcher_endpoint_identity_includes_output_path_and_canonicalizes_aliases()
+    {
+        var request = new RefreshRequestIdentity(
+            "./tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj",
+            ".",
+            "Release",
+            "net10.0");
+        var relativeOutput = Path.Combine(".", "graphify-out", "csharp.json");
+        var absoluteOutput = Path.GetFullPath(relativeOutput);
+        var alternateOutput = Path.Combine(".", "graphify-out", "alternate.json");
+
+        Assert.Equal(
+            IncrementalRefreshControlChannel.ForRequest(request, relativeOutput),
+            IncrementalRefreshControlChannel.ForRequest(request, absoluteOutput));
+        Assert.Equal(
+            IncrementalRefreshControlChannel.OutputPathIdentity(relativeOutput),
+            IncrementalRefreshControlChannel.OutputPathIdentity(absoluteOutput));
+        Assert.NotEqual(
+            IncrementalRefreshControlChannel.ForRequest(request, relativeOutput),
+            IncrementalRefreshControlChannel.ForRequest(request, alternateOutput));
+        Assert.NotEqual(
+            IncrementalCachePath.ForOutput(relativeOutput),
+            IncrementalCachePath.ForOutput(alternateOutput));
+        Assert.NotEqual(
+            WatcherLease.ForOutput(relativeOutput, request),
+            WatcherLease.ForOutput(alternateOutput, request));
+    }
+
+    [Fact]
     public void Fingerprints_distinguish_content_when_hashes_are_available_and_report_metadata_only_otherwise()
     {
         var firstHash = IncrementalHashing.Sha256("first");

@@ -26,7 +26,9 @@ public sealed class SemanticSyntaxWalker : CSharpSyntaxWalker
             return;
         }
 
-        var operation = _semanticModel.GetOperation(node);
+        var operation = !HasVisitedOperationRoot(node)
+            ? _semanticModel.GetOperation(node)
+            : null;
         if (operation is not null && ShouldVisitOperationRoot(operation.Syntax))
         {
             _operationWalker.Visit(operation);
@@ -46,6 +48,19 @@ public sealed class SemanticSyntaxWalker : CSharpSyntaxWalker
         }
 
         return _visitedOperationRoots.Add(syntax);
+    }
+
+    private bool HasVisitedOperationRoot(SyntaxNode node)
+    {
+        for (var current = node; current is not null; current = current.Parent)
+        {
+            if (_visitedOperationRoots.Contains(current))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public override void VisitAttribute(AttributeSyntax node)

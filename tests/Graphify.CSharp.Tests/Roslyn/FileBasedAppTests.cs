@@ -52,6 +52,24 @@ public sealed class FileBasedAppTests
     }
 
     [Fact]
+    public async Task Multi_project_file_based_extraction_is_byte_deterministic()
+    {
+        using var firstLoaded = await LoadDirectiveFixtureAsync();
+        Assert.True(firstLoaded.Projects.Length > 1);
+        var firstCatalog = await new DeclarationCatalogBuilder().BuildAsync(firstLoaded);
+        var firstGraph = await new SemanticReferenceExtractor().ExtractAsync(firstLoaded, firstCatalog);
+
+        using var secondLoaded = await LoadDirectiveFixtureAsync();
+        var secondCatalog = await new DeclarationCatalogBuilder().BuildAsync(secondLoaded);
+        var secondGraph = await new SemanticReferenceExtractor().ExtractAsync(secondLoaded, secondCatalog);
+
+        var serializer = new GraphifyJsonSerializer();
+        Assert.Equal(
+            serializer.Serialize(firstGraph, new GraphifySerializationOptions(firstCatalog.Diagnostics)),
+            serializer.Serialize(secondGraph, new GraphifySerializationOptions(secondCatalog.Diagnostics)));
+    }
+
+    [Fact]
     public async Task Loads_file_based_app_sdk_directives_and_project_references()
     {
         using var loaded = await LoadDirectiveFixtureAsync();
@@ -90,7 +108,7 @@ public sealed class FileBasedAppTests
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
         while (directory is not null)
         {
-            if (File.Exists(Path.Combine(directory.FullName, "PLAN.md")))
+            if (File.Exists(Path.Combine(directory.FullName, "Graphify.CSharp.sln")))
             {
                 return directory.FullName;
             }

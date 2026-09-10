@@ -27,10 +27,11 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
     private Task? _startTask;
     private Task? _backupTask;
     private Task? _recoveryTask;
+    private Task? _disposeTask;
     private bool _recoveryPending;
     private bool _recoverySignalQueued;
     private string _recoveryReason = "The watcher requires recovery.";
-    private bool _disposed;
+    private int _disposed;
 
     public IncrementalWatcherHost(
         ProjectLoadRequest request,
@@ -67,18 +68,33 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
 
     public IncrementalIndexSession Session => _session;
 
-    public string PipeName => IncrementalRefreshControlChannel.ForRequest(_requestIdentity);
+    public string PipeName => IncrementalRefreshControlChannel.ForRequest(_requestIdentity, _outputPath);
 
     public string LeasePath => WatcherLease.ForOutput(_outputPath, _requestIdentity);
 
-    public bool IsReady => _healthy.Task.IsCompletedSuccessfully;
+    public bool IsReady
+    {
+        get
+        {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                return false;
+            }
+
+            lock (_healthGate)
+            {
+                return Volatile.Read(ref _disposed) == 0
+                    && _healthy.Task.IsCompletedSuccessfully;
+            }
+        }
+    }
 
     public Task StartAsync(CancellationToken cancellationToken = default)
     {
         Task start;
         lock (_lifecycleGate)
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
+            ThrowIfDisposedLocked();
             _startTask ??= StartCoreAsync();
             start = _startTask;
         }
@@ -103,25 +119,36 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
             ? _shutdown.Task.WaitAsync(cancellationToken)
             : _shutdown.Task;
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
+    {
+        Task disposeTask;
+        lock (_lifecycleGate)
+        {
+            if (_disposeTask is null)
+            {
+                Volatile.Write(ref _disposed, 1);
+                _disposeTask = DisposeCoreAsync();
+            }
+
+            disposeTask = _disposeTask;
+        }
+
+        return new ValueTask(disposeTask);
+    }
+
+    private async Task DisposeCoreAsync()
     {
         Task? start;
-        Task? backup;
-        Task? recovery;
         IncrementalRefreshControlServer? controlServer;
         lock (_lifecycleGate)
         {
-            if (_disposed)
-            {
-                return;
-            }
-
-            _disposed = true;
             start = _startTask;
-            backup = _backupTask;
-            recovery = _recoveryTask;
-            controlServer = _controlServer;
+            controlServer = TakeControlServerLocked();
             _stop.Cancel();
+        }
+
+        lock (_healthGate)
+        {
             _healthy.TrySetCanceled(_stop.Token);
         }
 
@@ -129,16 +156,49 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
         TryReleaseRecoverySignal();
         if (controlServer is not null)
         {
-            await controlServer.DisposeAsync().ConfigureAwait(false);
+            await AwaitIgnoringCancellation(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false);
         }
 
         await AwaitIgnoringCancellation(start).ConfigureAwait(false);
+
+        Task? backup;
+        Task? recovery;
+        lock (_lifecycleGate)
+        {
+            backup = _backupTask;
+            recovery = _recoveryTask;
+            controlServer = TakeControlServerLocked();
+        }
+
+        if (controlServer is not null)
+        {
+            await AwaitIgnoringCancellation(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false);
+        }
+
         await AwaitIgnoringCancellation(backup).ConfigureAwait(false);
         await AwaitIgnoringCancellation(recovery).ConfigureAwait(false);
-        await _session.DisposeAsync().ConfigureAwait(false);
 
-        _lease?.Dispose();
-        _lease = null;
+        // Recovery can be between creating and publishing a watcher set when
+        // shutdown starts. All producer tasks are stopped now, so this final
+        // pass closes anything that was published after the first pass.
+        DisposeWatchers();
+
+        WatcherLease? lease;
+        lock (_lifecycleGate)
+        {
+            controlServer = TakeControlServerLocked();
+            lease = _lease;
+            _lease = null;
+        }
+
+        if (controlServer is not null)
+        {
+            await AwaitIgnoringCancellation(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false);
+        }
+
+        lease?.Dispose();
+        await AwaitIgnoringCancellation(_session.DisposeAsync().AsTask()).ConfigureAwait(false);
+
         _recoverySignal.Dispose();
         _stop.Dispose();
         _shutdown.TrySetResult(true);
@@ -148,26 +208,90 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
     {
         try
         {
-            _lease = WatcherLease.Acquire(_outputPath, _requestIdentity);
+            var lease = WatcherLease.Acquire(_outputPath, _requestIdentity);
+            lock (_lifecycleGate)
+            {
+                if (Volatile.Read(ref _disposed) != 0)
+                {
+                    lease.Dispose();
+                    return;
+                }
+
+                _lease = lease;
+            }
+
             CreateAndStartWatchers();
             SetInventory(await ScanInventoryAsync(includeContentHashes: false, _stop.Token).ConfigureAwait(false));
 
             // Start recovery and backup loops before Roslyn initialization so
             // failures during the cold start are not lost.
-            _recoveryTask = Task.Run(() => RecoveryLoopAsync(_stop.Token));
-            _backupTask = Task.Run(() => BackupScanLoopAsync(_stop.Token));
+            lock (_lifecycleGate)
+            {
+                if (Volatile.Read(ref _disposed) != 0)
+                {
+                    return;
+                }
+
+                _recoveryTask = Task.Run(() => RecoveryLoopAsync(_stop.Token));
+                _backupTask = Task.Run(() => BackupScanLoopAsync(_stop.Token));
+            }
+
             await _session.StartAsync(_stop.Token).ConfigureAwait(false);
 
-            _controlServer = new IncrementalRefreshControlServer(
+            var controlServer = new IncrementalRefreshControlServer(
                 PipeName,
+                _requestIdentity,
+                _outputPath,
                 (rebuild, cancellationToken) => RefreshAsync(rebuild, cancellationToken));
-            _controlServer.Start();
+            var installed = false;
+            lock (_lifecycleGate)
+            {
+                if (Volatile.Read(ref _disposed) == 0)
+                {
+                    _controlServer = controlServer;
+                    controlServer.Start();
+                    installed = true;
+                }
+            }
+
+            if (!installed)
+            {
+                await AwaitIgnoringCancellation(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false);
+                return;
+            }
+
             MarkHealthy();
         }
         catch (Exception exception)
         {
-            _healthy.TrySetException(exception);
+            lock (_healthGate)
+            {
+                if (Volatile.Read(ref _disposed) == 0)
+                {
+                    _healthy.TrySetException(exception);
+                }
+            }
+
+            IncrementalRefreshControlServer? controlServer;
+            lock (_lifecycleGate)
+            {
+                controlServer = TakeControlServerLocked();
+            }
+
+            if (controlServer is not null)
+            {
+                await AwaitIgnoringCancellation(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false);
+            }
+
+            WatcherLease? lease;
+            lock (_lifecycleGate)
+            {
+                lease = _lease;
+                _lease = null;
+            }
+
             DisposeWatchers();
+            lease?.Dispose();
             _stop.Cancel();
             TryReleaseRecoverySignal();
             throw;
@@ -264,6 +388,11 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
 
     private async Task RecoverWatcherAsync(string reason, CancellationToken cancellationToken)
     {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            return;
+        }
+
         DisposeWatchers();
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -292,50 +421,53 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
 
     private void CreateAndStartWatchers()
     {
-        DisposeWatchers();
-        var created = new List<IFileChangeWatcher>(_watchRoots.Count);
-        try
+        lock (_lifecycleGate)
         {
-            foreach (var root in _watchRoots)
+            ThrowIfDisposedLocked();
+            DisposeWatchersLocked();
+            var created = new List<IFileChangeWatcher>(_watchRoots.Count);
+            try
             {
-                var watcher = _watcherFactory.Create(root);
-                watcher.PathChanged += OnWatcherPathChanged;
-                watcher.Failed += OnWatcherFailed;
-                created.Add(watcher);
-            }
+                foreach (var root in _watchRoots)
+                {
+                    var watcher = _watcherFactory.Create(root);
+                    watcher.PathChanged += OnWatcherPathChanged;
+                    watcher.Failed += OnWatcherFailed;
+                    created.Add(watcher);
+                }
 
-            foreach (var watcher in created)
-            {
-                watcher.Start();
-            }
+                foreach (var watcher in created)
+                {
+                    watcher.Start();
+                }
 
-            lock (_lifecycleGate)
-            {
                 _watchers = created;
             }
-        }
-        catch
-        {
-            foreach (var watcher in created)
+            catch
             {
-                watcher.PathChanged -= OnWatcherPathChanged;
-                watcher.Failed -= OnWatcherFailed;
-                watcher.Dispose();
+                DisposeWatcherList(created);
+                throw;
             }
-
-            throw;
         }
     }
 
     private void DisposeWatchers()
     {
-        List<IFileChangeWatcher> watchers;
         lock (_lifecycleGate)
         {
-            watchers = _watchers;
-            _watchers = [];
+            DisposeWatchersLocked();
         }
+    }
 
+    private void DisposeWatchersLocked()
+    {
+        var watchers = _watchers;
+        _watchers = [];
+        DisposeWatcherList(watchers);
+    }
+
+    private void DisposeWatcherList(IEnumerable<IFileChangeWatcher> watchers)
+    {
         foreach (var watcher in watchers)
         {
             watcher.PathChanged -= OnWatcherPathChanged;
@@ -376,7 +508,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
         var releaseSignal = false;
         lock (_recoveryGate)
         {
-            if (_disposed)
+            if (Volatile.Read(ref _disposed) != 0)
             {
                 return;
             }
@@ -418,6 +550,11 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
     {
         lock (_healthGate)
         {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                return;
+            }
+
             if (_healthy.Task.IsCompletedSuccessfully)
             {
                 _healthy = NewHealthSource();
@@ -429,6 +566,11 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
     {
         lock (_healthGate)
         {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                return;
+            }
+
             _healthy.TrySetResult(true);
         }
     }
@@ -437,6 +579,11 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
     {
         while (true)
         {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                throw new ObjectDisposedException(nameof(IncrementalWatcherHost));
+            }
+
             Task healthy;
             lock (_healthGate)
             {
@@ -444,9 +591,17 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
             }
 
             await healthy.WaitAsync(cancellationToken).ConfigureAwait(false);
-            if (IsReady)
+            lock (_healthGate)
             {
-                return;
+                if (Volatile.Read(ref _disposed) != 0)
+                {
+                    throw new ObjectDisposedException(nameof(IncrementalWatcherHost));
+                }
+
+                if (_healthy.Task.IsCompletedSuccessfully)
+                {
+                    return;
+                }
             }
         }
     }
@@ -467,6 +622,21 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
     }
 
     private bool WatchRootsExist() => _watchRoots.All(Directory.Exists);
+
+    private void ThrowIfDisposedLocked()
+    {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            throw new ObjectDisposedException(nameof(IncrementalWatcherHost));
+        }
+    }
+
+    private IncrementalRefreshControlServer? TakeControlServerLocked()
+    {
+        var controlServer = _controlServer;
+        _controlServer = null;
+        return controlServer;
+    }
 
     private static IReadOnlyList<string> GetWatchRoots(ProjectLoadRequest request)
     {
@@ -528,6 +698,12 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
         }
         catch (ObjectDisposedException)
         {
+        }
+        catch (Exception)
+        {
+            // Disposal must continue releasing resources when a producer
+            // task has already faulted. Its original caller observes the
+            // startup/refresh failure; cleanup should not strand the host.
         }
     }
 }

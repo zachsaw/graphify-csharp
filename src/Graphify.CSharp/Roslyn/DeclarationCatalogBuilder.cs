@@ -6,11 +6,13 @@ namespace Graphify.CSharp.Roslyn;
 public sealed class DeclarationCatalogBuilder
 {
     private readonly Func<ISymbol, ProjectIdentity, string?, SymbolIdentity> _createIdentity;
+    private readonly ExtractionParallelismOptions _parallelism;
 
     public DeclarationCatalogBuilder(RoslynSymbolIdentityFactory? identityFactory = null)
     {
         var factory = identityFactory ?? new RoslynSymbolIdentityFactory();
         _createIdentity = factory.Create;
+        _parallelism = ExtractionParallelismOptions.Default;
     }
 
     internal static DeclarationCatalogBuilder ForTesting(
@@ -20,70 +22,155 @@ public sealed class DeclarationCatalogBuilder
     private DeclarationCatalogBuilder(Func<ISymbol, ProjectIdentity, string?, SymbolIdentity> createIdentity)
     {
         _createIdentity = createIdentity ?? throw new ArgumentNullException(nameof(createIdentity));
+        _parallelism = ExtractionParallelismOptions.Default;
     }
 
     public async Task<DeclarationCatalog> BuildAsync(LoadedSolution solution, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(solution);
 
+        var projects = solution.Projects
+            .OrderBy(project => project.Identity.Key, StringComparer.Ordinal)
+            .ToArray();
+        var locations = new SourceLocationFactory(solution.RepositoryRoot);
+        var projectResults = new ProjectCatalogResult[projects.Length];
+        if (projects.Length == 0)
+        {
+            return new DeclarationCatalog([], []);
+        }
+
+        var collectorParallelism = projects.Length == 1
+            ? _parallelism
+            : new ExtractionParallelismOptions(
+                1,
+                _parallelism.TargetBatchesPerWorker,
+                _parallelism.MinimumDocumentsPerBatch);
+        var work = projects
+            .Select((project, index) => new ProjectWork(project, index))
+            .ToArray();
+        if (projects.Length == 1)
+        {
+            projectResults[0] = await BuildProjectAsync(
+                    projects[0],
+                    solution.RepositoryRoot,
+                    locations,
+                    collectorParallelism,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        else
+        {
+            await Parallel.ForEachAsync(
+                    work,
+                    new ParallelOptions
+                    {
+                        CancellationToken = cancellationToken,
+                        MaxDegreeOfParallelism = _parallelism.MaxDegreeOfParallelism,
+                    },
+                    async (item, token) =>
+                    {
+                        projectResults[item.Index] = await BuildProjectAsync(
+                                item.Project,
+                                solution.RepositoryRoot,
+                                locations,
+                                collectorParallelism,
+                                token)
+                            .ConfigureAwait(false);
+                    })
+                .ConfigureAwait(false);
+        }
+
         var declarations = new List<SymbolDeclaration>();
         var diagnostics = new List<string>();
         var seenSymbols = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
         var seenIdentities = new HashSet<string>(StringComparer.Ordinal);
-        var locations = new SourceLocationFactory(solution.RepositoryRoot);
-        foreach (var project in solution.Projects.OrderBy(project => project.Identity.Key, StringComparer.Ordinal))
+        foreach (var result in projectResults)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var sourcePaths = project.Project.Documents
-                .Select(document => document.FilePath)
-                .OfType<string>()
-                .Select(Path.GetFullPath)
-                .ToHashSet(StringComparer.Ordinal);
-            var entryPoint = project.Compilation.GetEntryPoint(cancellationToken);
-            SymbolIdentity? entryPointIdentity = null;
-            if (entryPoint is not null)
+            diagnostics.AddRange(result.Diagnostics);
+            foreach (var declaration in result.Declarations)
             {
-                try
+                if (!seenSymbols.Add(declaration.Symbol))
                 {
-                    entryPointIdentity = _createIdentity(entryPoint, project.Identity, solution.RepositoryRoot);
+                    continue;
                 }
-                catch (Exception exception) when (IsRecoverableIdentityException(exception))
-                {
-                    diagnostics.Add(IdentityDiagnostic(entryPoint, exception, locations));
-                }
-            }
 
-            if (entryPoint is { IsImplicitlyDeclared: true }
-                && IsSourceDeclaration(entryPoint, sourcePaths, allowImplicit: true))
+                if (!seenIdentities.Add(declaration.Identity.CanonicalKey))
+                {
+                    diagnostics.Add(
+                        $"Identity: skipped duplicate {declaration.Symbol.Kind} '{declaration.Symbol.ToDisplayString()}' at {LocationText(declaration.Symbol, locations)}.");
+                    continue;
+                }
+
+                declarations.Add(declaration);
+            }
+        }
+
+        return new DeclarationCatalog(declarations, diagnostics);
+    }
+
+    private async Task<ProjectCatalogResult> BuildProjectAsync(
+        AnalyzedProject project,
+        string repositoryRoot,
+        SourceLocationFactory locations,
+        ExtractionParallelismOptions collectorParallelism,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var sourcePaths = project.Project.Documents
+            .Select(document => document.FilePath)
+            .OfType<string>()
+            .Select(Path.GetFullPath)
+            .ToHashSet(StringComparer.Ordinal);
+        var entryPoint = project.Compilation.GetEntryPoint(cancellationToken);
+        SymbolIdentity? entryPointIdentity = null;
+        var diagnostics = new List<string>();
+        if (entryPoint is not null)
+        {
+            try
             {
-                Add(
-                    entryPoint,
-                    project.Identity,
-                    solution.RepositoryRoot,
-                    locations,
-                    entryPointIdentity,
-                    declarations,
-                    seenSymbols,
-                    seenIdentities,
-                    diagnostics);
+                entryPointIdentity = _createIdentity(entryPoint, project.Identity, repositoryRoot);
             }
+            catch (Exception exception) when (IsRecoverableIdentityException(exception))
+            {
+                diagnostics.Add(IdentityDiagnostic(entryPoint, exception, locations));
+            }
+        }
 
-            VisitNamespace(
-                project.Compilation.GlobalNamespace,
+        var declarations = new List<SymbolDeclaration>();
+        var seenSymbols = new HashSet<ISymbol>(SymbolEqualityComparer.Default);
+        var seenIdentities = new HashSet<string>(StringComparer.Ordinal);
+        if (entryPoint is { IsImplicitlyDeclared: true }
+            && IsSourceDeclaration(entryPoint, sourcePaths, allowImplicit: true))
+        {
+            Add(
+                entryPoint,
                 project.Identity,
-                solution.RepositoryRoot,
+                repositoryRoot,
                 locations,
-                sourcePaths,
                 entryPointIdentity,
                 declarations,
                 seenSymbols,
                 seenIdentities,
-                diagnostics,
-                cancellationToken);
+                diagnostics);
+        }
 
-            await AddSyntaxDeclarationsAsync(
+        VisitNamespace(
+            project.Compilation.GlobalNamespace,
+            project.Identity,
+            repositoryRoot,
+            locations,
+            sourcePaths,
+            entryPointIdentity,
+            declarations,
+            seenSymbols,
+            seenIdentities,
+            diagnostics,
+            cancellationToken);
+
+        await AddSyntaxDeclarationsAsync(
                 project,
-                solution.RepositoryRoot,
+                repositoryRoot,
                 locations,
                 sourcePaths,
                 entryPoint,
@@ -92,10 +179,11 @@ public sealed class DeclarationCatalogBuilder
                 seenSymbols,
                 seenIdentities,
                 diagnostics,
-                cancellationToken).ConfigureAwait(false);
-        }
+                collectorParallelism,
+                cancellationToken)
+            .ConfigureAwait(false);
 
-        return new DeclarationCatalog(declarations, diagnostics);
+        return new ProjectCatalogResult(declarations, diagnostics);
     }
 
     private void VisitNamespace(
@@ -175,9 +263,10 @@ public sealed class DeclarationCatalogBuilder
         ISet<ISymbol> seenSymbols,
         ISet<string> seenIdentities,
         ICollection<string> diagnostics,
+        ExtractionParallelismOptions collectorParallelism,
         CancellationToken cancellationToken)
     {
-        var syntaxDeclarations = await new SourceDeclarationCollector()
+        var syntaxDeclarations = await new SourceDeclarationCollector(collectorParallelism)
             .CollectAsync(project, cancellationToken)
             .ConfigureAwait(false);
         foreach (var symbol in syntaxDeclarations)
@@ -244,10 +333,23 @@ public sealed class DeclarationCatalogBuilder
         }
 
         var node = GraphNode.ForSymbol(identity, locations.CreateMany(PartialSymbolHelper.Parts(declarationSymbol).SelectMany(part => part.Locations)), properties);
-        var referenceKey = SymbolReferenceKey.TryCreate(declarationSymbol, out var projectIndependentKey)
-            ? projectIndependentKey
+        var referenceKey = SymbolReferenceKey.CanCreate(declarationSymbol)
+            ? CreateReferenceKey(identity, declarationSymbol)
             : null;
         declarations.Add(new SymbolDeclaration(declarationSymbol, identity, node, referenceKey));
+    }
+
+    private static string? CreateReferenceKey(SymbolIdentity identity, ISymbol symbol)
+    {
+        if (identity.DeclarationDiscriminator is null
+            && identity.ContainingTypes.All(type => type.DeclarationDiscriminator is null))
+        {
+            return identity.ReferenceKey;
+        }
+
+        return SymbolReferenceKey.TryCreate(symbol, out var referenceKey)
+            ? referenceKey
+            : null;
     }
 
 
@@ -320,4 +422,10 @@ public sealed class DeclarationCatalogBuilder
         IPropertySymbol property when property.ContainingType?.IsAnonymousType == true => true,
         _ => false,
     };
+
+    private sealed record ProjectWork(AnalyzedProject Project, int Index);
+
+    private sealed record ProjectCatalogResult(
+        IReadOnlyList<SymbolDeclaration> Declarations,
+        IReadOnlyList<string> Diagnostics);
 }

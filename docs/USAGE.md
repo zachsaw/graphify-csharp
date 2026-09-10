@@ -72,8 +72,9 @@ The watcher subscribes before its cold startup, keeps the loaded Roslyn
 workspace alive, and queues file-system paths without doing extraction in an
 OS callback. It may index dirty projects in the background, but ordinary file
 changes do not publish a new JSON document. Run the normal command when a
-consumer needs a fresh snapshot; it connects to the matching local watcher and
-waits until the complete document is atomically published:
+consumer needs a fresh snapshot; it connects only to a watcher with the
+matching analysis configuration and exact output path, then waits until the
+complete document is atomically published:
 
 ```text
 graphify-csharp \
@@ -84,15 +85,19 @@ graphify-csharp \
 ```
 
 If there is no live matching watcher, the normal command performs a cold
-one-shot refresh. `--rebuild` forces a full cache-invalidating extraction in
-either mode. The watcher keeps an OS file watcher for low latency and runs an
-independent metadata inventory scan every five minutes by default. Change the
-interval at startup with `--watch-scan-interval 00:02:00`. Watcher errors,
-native-buffer overflow, bounded-queue overflow, missing roots, or an incomplete
-backup scan invalidate the session; subscriptions are recreated and a cold
-reconciliation completes before the watcher becomes healthy again. The
-previous complete JSON remains readable while recovery runs, and recovery does
-not delete user files. Stop the watcher with Ctrl-C.
+one-shot refresh. This includes the case where a watcher is warm for the same
+project but was started with a different output path: the request is never
+silently redirected to that watcher's file. Separate output files have
+output-specific cache and lease state, so they can be refreshed independently.
+`--rebuild` forces a full cache-invalidating extraction in either mode. The
+watcher keeps an OS file watcher for low latency and runs an independent
+metadata inventory scan every five minutes by default. Change the interval at
+startup with `--watch-scan-interval 00:02:00`. Watcher errors, native-buffer
+overflow, bounded-queue overflow, missing roots, or an incomplete backup scan
+invalidate the session; subscriptions are recreated and a cold reconciliation
+completes before the watcher becomes healthy again. The previous complete JSON
+remains readable while recovery runs, and recovery does not delete user files.
+Stop the watcher with Ctrl-C.
 
 To exercise the packaged tool rather than the solution test doubles, run the
 repeatable watcher lifecycle check from the repository root:

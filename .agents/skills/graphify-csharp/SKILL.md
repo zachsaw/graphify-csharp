@@ -36,7 +36,8 @@ to this enricher.
 
 ## Working method
 
-Read `PLAN.md` before changing architecture. Work in small vertical slices:
+Read the relevant design documents under `docs/` before changing architecture.
+Work in small vertical slices:
 
 1. define or preserve a narrow contract;
 2. implement the smallest independently testable unit;
@@ -79,9 +80,13 @@ once per syntax tree and feed observations into a deduplicating edge accumulator
 so overlapping operation and syntax evidence does not create a large
 intermediate list. Keep fallback symbol matching O(1) on a prebuilt key index
 and reject ambiguous matches without broad name scans. Measure the pinned
-real-world e2e before and after semantic changes; use coarse project-level
-parallelism only when profiling shows it is beneficial and Roslyn/MSBuild
-thread-safety remains clear.
+real-world e2e before and after semantic changes. Keep the project/target-
+framework compilation as the semantic boundary, but use a bounded scheduler
+with coarse, deterministic batches of source files when profiling shows
+parallel extraction is beneficial and Roslyn/MSBuild thread-safety remains
+clear. A source file is the smallest scheduling unit; never create work items
+per class, declaration, syntax node, or edge, and do not split a syntax tree
+merely to increase task count.
 
 ## Design rules
 

@@ -58,9 +58,11 @@ graphify-csharp \
 
 The watcher keeps Roslyn state in memory, queues file-system hints, performs
 background indexing, and does not rewrite JSON for ordinary file changes. A
-normal invocation in another shell connects to that watcher and waits for the
-complete JSON publication barrier; if no matching watcher is running, it falls
-back to a cold one-shot refresh:
+normal invocation in another shell connects only when the analysis settings
+and exact output path match, then waits for the complete JSON publication
+barrier. If no matching watcher is running—including when another watcher uses
+the same project with a different output path—it falls back to a cold one-shot
+refresh:
 
 ```text
 graphify-csharp \
@@ -183,7 +185,7 @@ deterministic same-repository merger that unions nodes by ID, preserves the
 multigraph edge identity, validates cross-shard endpoints, and emits the same
 complete Graphify document.
 
-The package is currently built from this repository as version `0.1.0` while
+The package is currently built from this repository as version `0.1.5` while
 the API and Graphify integration settle. For local development, replace the
 install command with:
 
@@ -290,7 +292,8 @@ dotnet test Graphify.CSharp.sln --configuration Release \
 ```
 
 The packaged watcher lifecycle test exercises the real tool process, local
-refresh client, backup scan, restart, rebuild, and Graphify JSON validation:
+refresh client, alternate-output routing, backup scan, restart, rebuild, and
+Graphify JSON validation:
 
 ```text
 ./scripts/run-watcher-e2e.sh
@@ -301,7 +304,7 @@ long backup interval so the source-change portion also verifies the real
 `FileSystemWatcher` event path. To check a package locally in the same mode:
 
 ```text
-GRAPHIFY_CSHARP_WATCH_E2E_PACKAGE_PATH=artifacts/Graphify.CSharp.0.1.0.nupkg \
+GRAPHIFY_CSHARP_WATCH_E2E_PACKAGE_PATH=artifacts/Graphify.CSharp.0.1.5.nupkg \
 GRAPHIFY_CSHARP_WATCH_E2E_FRAMEWORK=net10.0 \
 GRAPHIFY_CSHARP_WATCH_E2E_TARGET_FRAMEWORK=net10.0 \
 GRAPHIFY_CSHARP_WATCH_E2E_SCAN_INTERVAL=01:00:00 \
@@ -318,8 +321,7 @@ fixture URL, commit, TFM, configuration, or local package version with the
 `GRAPHIFY_CSHARP_E2E_*` environment variables when testing another pinned
 fixture.
 
-The implementation slices and acceptance gates are in [PLAN.md](PLAN.md). The
-repository’s reusable development contract is in
+The repository’s reusable development contract is in
 [.agents/skills/graphify-csharp/SKILL.md](.agents/skills/graphify-csharp/SKILL.md).
 See [docs/USAGE.md](docs/USAGE.md) for output details and
 [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for the supported v0.1 path, and

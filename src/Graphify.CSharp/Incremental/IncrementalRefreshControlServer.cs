@@ -12,19 +12,28 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
     private readonly string _pipeName;
+    private readonly string _requestDigest;
+    private readonly string _outputPathIdentity;
     private readonly Func<bool, CancellationToken, Task<IncrementalRefreshResult>> _refresh;
     private readonly CancellationTokenSource _stop = new();
     private readonly object _gate = new();
     private Task? _serverTask;
+    private Task? _disposeTask;
     private NamedPipeServerStream? _activeServer;
     private bool _disposed;
 
     public IncrementalRefreshControlServer(
         string pipeName,
+        RefreshRequestIdentity requestIdentity,
+        string outputPath,
         Func<bool, CancellationToken, Task<IncrementalRefreshResult>> refresh)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(pipeName);
+        ArgumentNullException.ThrowIfNull(requestIdentity);
+        ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
         _pipeName = pipeName;
+        _requestDigest = requestIdentity.Digest;
+        _outputPathIdentity = IncrementalRefreshControlChannel.OutputPathIdentity(outputPath);
         _refresh = refresh ?? throw new ArgumentNullException(nameof(refresh));
     }
 
@@ -37,34 +46,47 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
+    {
+        Task disposeTask;
+        lock (_gate)
+        {
+            if (_disposeTask is null)
+            {
+                _disposeTask = DisposeCoreAsync();
+            }
+
+            disposeTask = _disposeTask;
+        }
+
+        return new ValueTask(disposeTask);
+    }
+
+    private async Task DisposeCoreAsync()
     {
         Task? serverTask;
         lock (_gate)
         {
-            if (_disposed)
-            {
-                return;
-            }
-
             _disposed = true;
             _stop.Cancel();
             _activeServer?.Dispose();
             serverTask = _serverTask;
         }
 
-        if (serverTask is not null)
+        try
         {
-            try
+            if (serverTask is not null)
             {
                 await serverTask.ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (_stop.IsCancellationRequested)
-            {
-            }
         }
-
-        _stop.Dispose();
+        catch (OperationCanceledException) when (_stop.IsCancellationRequested)
+        {
+        }
+        finally
+        {
+            _stop.Dispose();
+        }
     }
 
     private async Task RunAsync(CancellationToken cancellationToken)
@@ -154,7 +176,7 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
         {
             await WriteResponseAsync(
                 writer,
-                ControlResponse.Error("The refresh request was empty or too large."),
+                ControlResponse.Error("invalid_request", "The refresh request was empty or too large."),
                 cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -168,7 +190,7 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
         {
             await WriteResponseAsync(
                 writer,
-                ControlResponse.Error($"The refresh request was invalid: {exception.Message}"),
+                ControlResponse.Error("invalid_request", $"The refresh request was invalid: {exception.Message}"),
                 cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -178,7 +200,29 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
         {
             await WriteResponseAsync(
                 writer,
-                ControlResponse.Error("The refresh command must be 'refresh' or 'rebuild'."),
+                ControlResponse.Error("invalid_request", "The refresh command must be 'refresh' or 'rebuild'."),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (!string.Equals(request?.RequestDigest, _requestDigest, StringComparison.Ordinal))
+        {
+            await WriteResponseAsync(
+                writer,
+                ControlResponse.Error(
+                    "configuration_mismatch",
+                    "The refresh request does not match the watcher's analysis configuration."),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (!string.Equals(request?.OutputPathIdentity, _outputPathIdentity, StringComparison.Ordinal))
+        {
+            await WriteResponseAsync(
+                writer,
+                ControlResponse.Error(
+                    "output_mismatch",
+                    "The refresh request does not match the watcher's output path."),
                 cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -188,7 +232,7 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
             var result = await _refresh(command == "rebuild", cancellationToken).ConfigureAwait(false);
             await WriteResponseAsync(
                 writer,
-                ControlResponse.FromResult(result),
+                ControlResponse.FromResult(result, _requestDigest, _outputPathIdentity),
                 cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -215,7 +259,7 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
         {
             await WriteResponseAsync(
                     writer,
-                    ControlResponse.Error(message),
+                    ControlResponse.Error("refresh_failed", message),
                     cancellationToken)
                 .ConfigureAwait(false);
         }
@@ -239,11 +283,16 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
     }
 
     private sealed record ControlRequest(
-        [property: JsonPropertyName("command")] string? Command);
+        [property: JsonPropertyName("command")] string? Command,
+        [property: JsonPropertyName("request_digest")] string? RequestDigest,
+        [property: JsonPropertyName("output_path_identity")] string? OutputPathIdentity);
 
     internal sealed record ControlResponse(
         [property: JsonPropertyName("success")] bool Success,
         [property: JsonPropertyName("message")] string? Message,
+        [property: JsonPropertyName("error_code")] string? ErrorCode,
+        [property: JsonPropertyName("request_digest")] string? RequestDigest,
+        [property: JsonPropertyName("output_path_identity")] string? OutputPathIdentity,
         [property: JsonPropertyName("output_digest")] string? OutputDigest,
         [property: JsonPropertyName("nodes")] int? NodeCount,
         [property: JsonPropertyName("edges")] int? EdgeCount,
@@ -254,24 +303,50 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
         [property: JsonPropertyName("indexed_generation")] long? IndexedGeneration,
         [property: JsonPropertyName("published_generation")] long? PublishedGeneration)
     {
-        public static ControlResponse FromResult(IncrementalRefreshResult result)
+        public static ControlResponse FromResult(
+            IncrementalRefreshResult result,
+            string requestDigest,
+            string outputPathIdentity)
         {
             ArgumentNullException.ThrowIfNull(result);
+            ArgumentException.ThrowIfNullOrWhiteSpace(requestDigest);
+            ArgumentException.ThrowIfNullOrWhiteSpace(outputPathIdentity);
             return new ControlResponse(
-                true,
-                null,
-                result.OutputDigest,
-                result.Graph.Nodes.Length,
-                result.Graph.Edges.Length,
-                result.ExtractedProjectCount,
-                result.ReusedProjectCount,
-                result.OutputRepublished,
-                result.Generation?.EventGeneration,
-                result.Generation?.IndexedGeneration,
-                result.Generation?.PublishedGeneration);
+                Success: true,
+                Message: null,
+                ErrorCode: null,
+                RequestDigest: requestDigest,
+                OutputPathIdentity: outputPathIdentity,
+                OutputDigest: result.OutputDigest,
+                NodeCount: result.Graph.Nodes.Length,
+                EdgeCount: result.Graph.Edges.Length,
+                ExtractedProjectCount: result.ExtractedProjectCount,
+                ReusedProjectCount: result.ReusedProjectCount,
+                OutputRepublished: result.OutputRepublished,
+                EventGeneration: result.Generation?.EventGeneration,
+                IndexedGeneration: result.Generation?.IndexedGeneration,
+                PublishedGeneration: result.Generation?.PublishedGeneration);
         }
 
-        public static ControlResponse Error(string message) =>
-            new(false, message, null, null, null, null, null, null, null, null, null);
+        public static ControlResponse Error(string errorCode, string message)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(errorCode);
+            ArgumentException.ThrowIfNullOrWhiteSpace(message);
+            return new ControlResponse(
+                Success: false,
+                Message: message,
+                ErrorCode: errorCode,
+                RequestDigest: null,
+                OutputPathIdentity: null,
+                OutputDigest: null,
+                NodeCount: null,
+                EdgeCount: null,
+                ExtractedProjectCount: null,
+                ReusedProjectCount: null,
+                OutputRepublished: null,
+                EventGeneration: null,
+                IndexedGeneration: null,
+                PublishedGeneration: null);
+        }
     }
 }

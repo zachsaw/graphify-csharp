@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Graphify.CSharp.Domain;
 using Microsoft.CodeAnalysis;
 
@@ -6,6 +7,7 @@ namespace Graphify.CSharp.Roslyn;
 public sealed class SourceLocationFactory
 {
     private readonly string _repositoryRoot;
+    private readonly ConcurrentDictionary<string, string> _relativePathCache = new(StringComparer.Ordinal);
 
     public SourceLocationFactory(string repositoryRoot)
     {
@@ -27,7 +29,10 @@ public sealed class SourceLocationFactory
             return null;
         }
 
-        var relativePath = ProjectIdentity.FromPath(lineSpan.Path, _repositoryRoot).RelativePath;
+        var relativePath = _relativePathCache.GetOrAdd(
+            lineSpan.Path,
+            static (path, repositoryRoot) => ProjectIdentity.FromPath(path, repositoryRoot).RelativePath,
+            _repositoryRoot);
         return new SourceLocation(
             relativePath,
             lineSpan.StartLinePosition.Line + 1,

@@ -193,7 +193,7 @@ public sealed class CSharp14FeatureTests
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
         while (directory is not null)
         {
-            if (File.Exists(Path.Combine(directory.FullName, "PLAN.md")))
+            if (File.Exists(Path.Combine(directory.FullName, "Graphify.CSharp.sln")))
             {
                 return directory.FullName;
             }

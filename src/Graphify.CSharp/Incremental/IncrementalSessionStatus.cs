@@ -7,5 +7,6 @@ internal enum IncrementalSessionStatus
     Ready,
     Refreshing,
     Failed,
+    Stopping,
     Stopped,
 }
