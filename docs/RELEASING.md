@@ -15,11 +15,12 @@ package-smoke, and determinism gates used by CI.
    environment `nuget`. The policy must match the workflow that performs the
    publish.
 3. In the repository settings, create a GitHub Actions environment named
-   `nuget` and add an environment or repository variable/secret named
-   `NUGET_USER` containing the NuGet profile name, not the account email. The
-   workflow passes this value to `NuGet/login@v1`; it is required even when the
-   GitHub and NuGet names happen to match. A protected environment with a
-   required reviewer is recommended before the first public release.
+   `nuget`. If the NuGet profile name differs from the GitHub repository owner,
+   add an environment or repository variable/secret named `NUGET_USER` with
+   the NuGet profile name, not the account email. When the names match, the
+   workflow defaults to the repository owner and no variable is needed. A
+   protected environment with a required reviewer is recommended before the
+   first public release.
 4. Confirm that `origin` points at the repository that contains this workflow.
 
 The workflow requests the `id-token: write` permission and uses

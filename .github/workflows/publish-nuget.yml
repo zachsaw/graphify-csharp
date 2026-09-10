@@ -169,12 +169,12 @@ jobs:
 
       - name: Validate NuGet Trusted Publishing configuration
         env:
-          NUGET_USER: ${{ secrets.NUGET_USER || vars.NUGET_USER }}
+          NUGET_USER: ${{ secrets.NUGET_USER || vars.NUGET_USER || github.repository_owner }}
         shell: bash
         run: |
           set -euo pipefail
           test -n "$NUGET_USER" || {
-            echo 'NUGET_USER must be configured as a NuGet environment or repository secret/variable.' >&2
+            echo 'NuGet user could not be resolved; configure NUGET_USER when the NuGet profile differs from the GitHub repository owner.' >&2
             exit 1
           }
 
@@ -182,7 +182,7 @@ jobs:
         id: login
         uses: NuGet/login@v1
         with:
-          user: ${{ secrets.NUGET_USER || vars.NUGET_USER }}
+          user: ${{ secrets.NUGET_USER || vars.NUGET_USER || github.repository_owner }}
 
       - name: Publish to NuGet.org
         env:
