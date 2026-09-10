@@ -151,6 +151,22 @@ jobs:
       - name: Verify deterministic fixture extraction
         run: ./scripts/check-deterministic-extraction.sh --input tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj --root . --configuration Release
 
+      - name: Verify packaged watcher lifecycle (net10 event path)
+        env:
+          GRAPHIFY_CSHARP_WATCH_E2E_FRAMEWORK: net10.0
+          GRAPHIFY_CSHARP_WATCH_E2E_TARGET_FRAMEWORK: net10.0
+          GRAPHIFY_CSHARP_WATCH_E2E_SCAN_INTERVAL: '01:00:00'
+          GRAPHIFY_CSHARP_WATCH_E2E_PACKAGE_PATH: ${{ steps.package.outputs.path }}
+        run: ./scripts/run-watcher-e2e.sh
+
+      - name: Verify packaged watcher lifecycle (net11 event path)
+        env:
+          GRAPHIFY_CSHARP_WATCH_E2E_FRAMEWORK: net11.0
+          GRAPHIFY_CSHARP_WATCH_E2E_TARGET_FRAMEWORK: net10.0
+          GRAPHIFY_CSHARP_WATCH_E2E_SCAN_INTERVAL: '01:00:00'
+          GRAPHIFY_CSHARP_WATCH_E2E_PACKAGE_PATH: ${{ steps.package.outputs.path }}
+        run: ./scripts/run-watcher-e2e.sh
+
       - name: Validate NuGet Trusted Publishing configuration
         env:
           NUGET_USER: ${{ secrets.NUGET_USER || vars.NUGET_USER }}

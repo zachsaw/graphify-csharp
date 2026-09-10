@@ -3,8 +3,11 @@ set -euo pipefail
 
 repository_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 tool_framework="${GRAPHIFY_CSHARP_WATCH_E2E_FRAMEWORK:-net10.0}"
+target_framework="${GRAPHIFY_CSHARP_WATCH_E2E_TARGET_FRAMEWORK:-net10.0}"
 configuration="${GRAPHIFY_CSHARP_WATCH_E2E_CONFIGURATION:-Release}"
 package_version="${GRAPHIFY_CSHARP_WATCH_E2E_PACKAGE_VERSION:-0.1.0-watcher-e2e}"
+package_path="${GRAPHIFY_CSHARP_WATCH_E2E_PACKAGE_PATH:-}"
+watch_scan_interval="${GRAPHIFY_CSHARP_WATCH_E2E_SCAN_INTERVAL:-00:00:01}"
 
 temporary_base="${TMPDIR:-/tmp}"
 temporary_base="${temporary_base%/}"
@@ -32,19 +35,41 @@ cp -R "$repository_root/tests/Fixtures/ReferenceFixture/." "$fixture_root/"
 # build output from another test run.
 rm -rf "$fixture_root/bin" "$fixture_root/obj"
 
-dotnet restore "$repository_root/Graphify.CSharp.sln"
 dotnet restore "$fixture_root/ReferenceFixture.csproj"
-dotnet build "$repository_root/src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj" \
-  --configuration "$configuration" \
-  --framework "$tool_framework"
-dotnet pack "$repository_root/src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj" \
-  --configuration "$configuration" \
-  --output "$feed_directory" \
-  -p:Version="$package_version" \
-  -p:PackageVersion="$package_version"
 
-package_path="$feed_directory/Graphify.CSharp.${package_version}.nupkg"
-test -f "$package_path"
+if [[ -n "$package_path" ]]; then
+  if [[ "$package_path" != /* ]]; then
+    package_path="$repository_root/$package_path"
+  fi
+  package_path="$(cd -- "$(dirname -- "$package_path")" && pwd)/$(basename -- "$package_path")"
+  test -f "$package_path"
+  package_file="${package_path##*/}"
+  case "$package_file" in
+    Graphify.CSharp.*.nupkg)
+      package_version="${package_file#Graphify.CSharp.}"
+      package_version="${package_version%.nupkg}"
+      ;;
+    *)
+      echo "Expected a Graphify.CSharp package path, got '$package_path'." >&2
+      exit 1
+      ;;
+  esac
+  cp -- "$package_path" "$feed_directory/"
+else
+  dotnet restore "$repository_root/Graphify.CSharp.sln"
+  dotnet build "$repository_root/src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj" \
+    --configuration "$configuration" \
+    --framework "$tool_framework"
+  dotnet pack "$repository_root/src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj" \
+    --configuration "$configuration" \
+    --output "$feed_directory" \
+    -p:Version="$package_version" \
+    -p:PackageVersion="$package_version"
+
+  package_path="$feed_directory/Graphify.CSharp.${package_version}.nupkg"
+  test -f "$package_path"
+fi
+
 dotnet tool install \
   --tool-path "$tool_directory" \
   --add-source "$feed_directory" \
@@ -59,7 +84,7 @@ run_tool() {
     --input "$fixture_root/ReferenceFixture.csproj" \
     --root "$fixture_root" \
     --configuration "$configuration" \
-    --target-framework "$tool_framework" \
+    --target-framework "$target_framework" \
     --output "$output_path" \
     "$@"
 }
@@ -70,10 +95,10 @@ start_watcher() {
     --input "$fixture_root/ReferenceFixture.csproj" \
     --root "$fixture_root" \
     --configuration "$configuration" \
-    --target-framework "$tool_framework" \
+    --target-framework "$target_framework" \
     --output "$output_path" \
     --watch \
-    --watch-scan-interval 00:00:01 > "$watcher_log" 2>&1 &
+    --watch-scan-interval "$watch_scan_interval" > "$watcher_log" 2>&1 &
   watcher_pid=$!
   for _ in {1..120}; do
     if [[ -s "$output_path" ]] && grep -Fq 'Watching ' "$watcher_log"; then

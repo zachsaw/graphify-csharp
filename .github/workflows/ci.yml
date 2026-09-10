@@ -120,6 +120,7 @@ jobs:
           package_file="${package_path##*/}"
           package_version="${package_file#Graphify.CSharp.}"
           package_version="${package_version%.nupkg}"
+          echo "path=$package_path" >> "$GITHUB_OUTPUT"
           echo "value=$package_version" >> "$GITHUB_OUTPUT"
           echo "Packed Graphify.CSharp $package_version"
 
@@ -141,5 +142,18 @@ jobs:
       - name: Verify pinned real-world semantic extraction
         run: ./scripts/run-real-world-e2e.sh
 
-      - name: Verify packaged watcher lifecycle
+      - name: Verify packaged watcher lifecycle (net10 event path)
+        env:
+          GRAPHIFY_CSHARP_WATCH_E2E_FRAMEWORK: net10.0
+          GRAPHIFY_CSHARP_WATCH_E2E_TARGET_FRAMEWORK: net10.0
+          GRAPHIFY_CSHARP_WATCH_E2E_SCAN_INTERVAL: '01:00:00'
+          GRAPHIFY_CSHARP_WATCH_E2E_PACKAGE_PATH: ${{ steps.package.outputs.path }}
+        run: ./scripts/run-watcher-e2e.sh
+
+      - name: Verify packaged watcher lifecycle (net11 event path)
+        env:
+          GRAPHIFY_CSHARP_WATCH_E2E_FRAMEWORK: net11.0
+          GRAPHIFY_CSHARP_WATCH_E2E_TARGET_FRAMEWORK: net10.0
+          GRAPHIFY_CSHARP_WATCH_E2E_SCAN_INTERVAL: '01:00:00'
+          GRAPHIFY_CSHARP_WATCH_E2E_PACKAGE_PATH: ${{ steps.package.outputs.path }}
         run: ./scripts/run-watcher-e2e.sh

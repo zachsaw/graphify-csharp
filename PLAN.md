@@ -414,6 +414,14 @@ the `actions/setup-dotnet` post-cache hook after the action removed `node` from
 
 Gate: full .NET 10 and .NET 11 test suites, Release builds, package/tool smoke
 tests, real-world determinism, watcher lifecycle tests, and `git diff --check`.
+
+The release gate runs the packaged watcher E2E against the exact package
+artifact twice: once through the net10.0 asset and once through the net11.0
+asset. Both runs use a long backup interval for the source-change assertion,
+so the real `FileSystemWatcher` event path is exercised rather than allowing
+the backup scan to explain the result. The same gate runs in CI and immediately
+before NuGet Trusted Publishing.
+
 Stop optimization once the obvious workspace-reuse and work-coalescing gains
 are demonstrated and further changes show diminishing returns.
 

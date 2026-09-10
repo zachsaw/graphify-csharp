@@ -296,6 +296,22 @@ refresh client, backup scan, restart, rebuild, and Graphify JSON validation:
 ./scripts/run-watcher-e2e.sh
 ```
 
+CI and the release workflow pass an existing package to this script and set a
+long backup interval so the source-change portion also verifies the real
+`FileSystemWatcher` event path. To check a package locally in the same mode:
+
+```text
+GRAPHIFY_CSHARP_WATCH_E2E_PACKAGE_PATH=artifacts/Graphify.CSharp.0.1.0.nupkg \
+GRAPHIFY_CSHARP_WATCH_E2E_FRAMEWORK=net10.0 \
+GRAPHIFY_CSHARP_WATCH_E2E_TARGET_FRAMEWORK=net10.0 \
+GRAPHIFY_CSHARP_WATCH_E2E_SCAN_INTERVAL=01:00:00 \
+./scripts/run-watcher-e2e.sh
+```
+
+Set `GRAPHIFY_CSHARP_WATCH_E2E_FRAMEWORK=net11.0` to exercise the .NET 11
+tool asset. The fixture remains net10.0 because the tool runtime and the
+analyzed project target are independent.
+
 The temporary feed and tool directory are removed on exit; the pinned source
 checkout and Graphify output remain under `.e2e/` for inspection. Override the
 fixture URL, commit, TFM, configuration, or local package version with the
