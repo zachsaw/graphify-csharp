@@ -231,6 +231,27 @@ for audits because it retains directed, relation-level edges. This workflow
 does not move repository-specific policy into the enricher; consumers decide
 how to interpret namespaces, callers, and compiler facts.
 
+For repeated agent queries, a consuming repository can keep the enricher warm:
+
+```text
+graphify-csharp \
+  --input ./src/MyProduct.sln \
+  --root . \
+  --configuration Release \
+  --output ./graphify-out/csharp.json \
+  --watch
+```
+
+The agent should continue to invoke the ordinary `graphify-csharp` command
+before a Graphify query or export. That command uses the matching local watcher
+when available and waits for its foreground publication barrier; without one it
+performs a cold refresh. `--rebuild` explicitly invalidates the cache. The
+watcher uses `FileSystemWatcher` only as a low-latency hint source, keeps its
+callbacks to bounded path enqueueing, and backs them with a metadata inventory
+timer. Overflow, watcher errors, missing roots, or an uncertain inventory force
+watcher recreation and cold reconciliation. Do not make an agent assume that a
+file event alone means the public JSON has already changed.
+
 The CLI currently emits one complete document. If same-repository output
 sharding is added later, each shard must retain the envelope and stable IDs;
 JSONL fragments alone are not Graphify-compatible. Graphify’s current

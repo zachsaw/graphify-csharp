@@ -49,7 +49,10 @@ Publishing the release starts `Publish NuGet package`. It checks out the
 release tag, validates the version, runs the build/test/vulnerability gates,
 packs with that exact version, installs the local package into a temporary tool
 path, runs the fixture smoke test, checks repeatability, obtains a short-lived
-Trusted Publishing credential, and then pushes the package to NuGet.org. The
+Trusted Publishing credential, and then pushes the package to NuGet.org. Before
+the credential step it also runs the packaged watcher lifecycle against the
+exact release `.nupkg` through both the net10.0 and net11.0 tool assets, with
+the backup scan interval extended so the event-driven path is exercised. The
 package artifact is retained on the workflow run for inspection.
 
 NuGet package versions are immutable. If a publish needs to be retried, rerun

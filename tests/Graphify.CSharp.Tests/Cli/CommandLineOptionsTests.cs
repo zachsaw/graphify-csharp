@@ -21,6 +21,8 @@ public sealed class CommandLineOptionsTests
         Assert.Equal("/repo/out/graph.json", options.OutputPath);
         Assert.Equal("Release", options.Configuration);
         Assert.Equal("net10.0", options.TargetFramework);
+        Assert.False(options.Rebuild);
+        Assert.False(options.Watch);
     }
 
     [Fact]
@@ -32,7 +34,36 @@ public sealed class CommandLineOptionsTests
         Assert.EndsWith("/project.csproj", positional.InputPath, StringComparison.Ordinal);
         Assert.False(positional.ShowHelp);
         Assert.Null(positional.TargetFramework);
+        Assert.False(positional.Rebuild);
+        Assert.False(positional.Watch);
         Assert.True(help.ShowHelp);
+    }
+
+    [Fact]
+    public void Parses_the_explicit_rebuild_switch()
+    {
+        var options = CommandLineOptions.Parse(["--input", "project.csproj", "--rebuild"]);
+
+        Assert.True(options.Rebuild);
+        Assert.Throws<CommandLineException>(() => CommandLineOptions.Parse(["--input", "project.csproj", "--rebuild", "--rebuild"]));
+    }
+
+    [Fact]
+    public void Parses_watch_and_its_backup_scan_interval()
+    {
+        var options = CommandLineOptions.Parse(
+        [
+            "--input", "project.csproj",
+            "--watch",
+            "--watch-scan-interval", "00:00:02",
+        ]);
+
+        Assert.True(options.Watch);
+        Assert.Equal(TimeSpan.FromSeconds(2), options.WatchScanInterval);
+        Assert.Throws<CommandLineException>(() => CommandLineOptions.Parse(
+            ["--input", "project.csproj", "--watch-scan-interval", "00:00:02"]));
+        Assert.Throws<CommandLineException>(() => CommandLineOptions.Parse(
+            ["--input", "project.csproj", "--watch", "--watch-scan-interval", "0"]));
     }
 
     [Fact]

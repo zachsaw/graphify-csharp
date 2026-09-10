@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace Graphify.CSharp.Cli;
 
 public sealed class CommandLineOptions
@@ -8,6 +10,9 @@ public sealed class CommandLineOptions
         string outputPath,
         string configuration,
         string? targetFramework,
+        bool rebuild,
+        bool watch,
+        TimeSpan watchScanInterval,
         bool showHelp)
     {
         InputPath = inputPath;
@@ -15,6 +20,9 @@ public sealed class CommandLineOptions
         OutputPath = outputPath;
         Configuration = configuration;
         TargetFramework = targetFramework;
+        Rebuild = rebuild;
+        Watch = watch;
+        WatchScanInterval = watchScanInterval;
         ShowHelp = showHelp;
     }
 
@@ -28,6 +36,12 @@ public sealed class CommandLineOptions
 
     public string? TargetFramework { get; }
 
+    public bool Rebuild { get; }
+
+    public bool Watch { get; }
+
+    public TimeSpan WatchScanInterval { get; }
+
     public bool ShowHelp { get; }
 
     public static CommandLineOptions Parse(IReadOnlyList<string> args)
@@ -37,12 +51,36 @@ public sealed class CommandLineOptions
         var values = new Dictionary<string, List<string>>(StringComparer.Ordinal);
         var positionalInput = (string?)null;
         var showHelp = false;
+        var rebuild = false;
+        var watch = false;
         for (var index = 0; index < args.Count; index++)
         {
             var argument = args[index];
             if (argument is "--help" or "-h")
             {
                 showHelp = true;
+                continue;
+            }
+
+            if (argument == "--rebuild")
+            {
+                if (rebuild)
+                {
+                    throw new CommandLineException("Option '--rebuild' may only be supplied once.");
+                }
+
+                rebuild = true;
+                continue;
+            }
+
+            if (argument == "--watch")
+            {
+                if (watch)
+                {
+                    throw new CommandLineException("Option '--watch' may only be supplied once.");
+                }
+
+                watch = true;
                 continue;
             }
 
@@ -64,6 +102,7 @@ public sealed class CommandLineOptions
                 "--output" or "-o" => "output",
                 "--configuration" or "-c" => "configuration",
                 "--target-framework" or "-f" => "target-framework",
+                "--watch-scan-interval" => "watch-scan-interval",
                 _ => throw new CommandLineException($"Unknown option '{argument}'."),
             };
             if (++index >= args.Count || args[index].StartsWith("-", StringComparison.Ordinal))
@@ -88,6 +127,9 @@ public sealed class CommandLineOptions
                 outputPath: string.Empty,
                 configuration: "Debug",
                 targetFramework: null,
+                rebuild: false,
+                watch: false,
+                watchScanInterval: TimeSpan.FromMinutes(5),
                 showHelp: true);
         }
 
@@ -107,12 +149,35 @@ public sealed class CommandLineOptions
             throw new CommandLineException("Configuration cannot be empty.");
         }
 
+        var watchScanInterval = TimeSpan.FromMinutes(5);
+        var intervalValue = Single(values, "watch-scan-interval");
+        if (intervalValue is not null)
+        {
+            if (!watch)
+            {
+                throw new CommandLineException("Option '--watch-scan-interval' requires '--watch'.");
+            }
+
+            if (!TimeSpan.TryParse(
+                    intervalValue,
+                    CultureInfo.InvariantCulture,
+                    out watchScanInterval)
+                || watchScanInterval <= TimeSpan.Zero)
+            {
+                throw new CommandLineException(
+                    "Watch scan interval must be a positive TimeSpan such as '00:05:00'.");
+            }
+        }
+
         return new CommandLineOptions(
             inputPath,
             repositoryRoot,
             outputPath,
             configuration.Trim(),
             Single(values, "target-framework"),
+            rebuild,
+            watch,
+            watchScanInterval,
             showHelp: false);
     }
 
@@ -123,6 +188,9 @@ public sealed class CommandLineOptions
         + "  -o, --output <path>             Graphify JSON output path\n"
         + "  -c, --configuration <name>      MSBuild configuration (default: Debug)\n"
         + "  -f, --target-framework <tfm>    Select one TFM when target selection is ambiguous\n"
+        + "      --rebuild                  Ignore incremental cache and rebuild all projects\n"
+        + "      --watch                    Keep a warm indexer and serve local refresh requests\n"
+        + "      --watch-scan-interval <t>   Backup inventory interval (default: 00:05:00)\n"
         + "  -h, --help                      Show this help";
 
     private static string? Single(IReadOnlyDictionary<string, List<string>> values, string key)

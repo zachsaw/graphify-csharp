@@ -205,7 +205,229 @@ members and formal argument bindings; the file-based fixture covers source
 remapping, SDK directives, package restore, and project references; and the
 real-world gate completes with deterministic Dapper output.
 
-## Explicit non-goals for v1
+## Incremental indexing implementation plan
+
+This feature is implemented on the `feature/incremental-indexing` branch. The
+public Graphify contract remains one complete `graphify-out/csharp.json`; the
+incremental index, watcher state, and project contributions are internal
+implementation data. Each phase below must pass its stated gate and be
+committed before the next phase begins.
+
+### Phase 0 — branch and design baseline — complete
+
+Deliver:
+
+- the `feature/incremental-indexing` branch;
+- [the incremental indexing design](docs/INCREMENTAL_INDEXING.md); and
+- this phased implementation plan.
+
+The design establishes a warm watcher/indexer, manual refresh barriers,
+generation tracking, cold reconciliation after restart, `--rebuild`, logical
+foreground/background priority, atomic complete-JSON publication, and no
+same-repository public shard format.
+
+Gate: clean branch baseline, design document linked from usage documentation,
+and no implementation behavior changed by the planning work.
+
+### Phase 1 — deterministic refresh state and cache primitives — complete
+
+Deliver small, Roslyn-independent contracts for:
+
+- canonical refresh identity (input, root, configuration, TFM, tool/schema);
+- source/project fingerprints and manifest entries;
+- event, indexed, published, and session generations;
+- project/TFM contribution envelopes; and
+- atomic, versioned cache read/write with compatibility rejection.
+
+Completed: the Roslyn-independent contracts, deterministic wire envelope,
+atomic store, and focused tests are implemented. The focused gate passes on
+both `net10.0` and `net11.0`, including schema/request incompatibility,
+corrupt/incomplete state, deterministic round trips, generation ordering, and
+atomic failure retention.
+
+The cache format must be domain data rather than serialized Roslyn objects.
+Stable ordering, explicit schema/version checks, and safe handling of corrupt
+or incomplete state are required.
+
+Gate: focused unit tests cover identity, fingerprint comparison, generation
+ordering, cache compatibility, corruption, deterministic serialization, and
+atomic-failure behavior. No MSBuild or watcher dependency is introduced in
+this phase.
+
+Commit target: `feat: add incremental refresh state and cache contracts`
+
+### Phase 2 — contribution extraction and cold reconciliation — complete
+
+Deliver:
+
+- deterministic project/TFM graph contributions containing declarations,
+  semantic edges, diagnostics, and provenance;
+- persistence and reuse of unchanged contributions;
+- cold reconciliation of the complete configured scope;
+- project/TFM invalidation for changed, added, and deleted source inputs;
+- reverse project-reference invalidation for dependent compilations; and
+- atomic reconstruction of the complete Graphify JSON document.
+
+Completed: per-project contribution extraction, complete-scope reconciliation,
+cache reuse, reverse dependency invalidation, atomic output, output validation,
+and the CLI `--rebuild` switch. Added/deleted sources invalidate their owning
+project; changed projects invalidate reverse project-reference dependents.
+The full supported-framework suite passes (`51` tests on `net10.0`, `54` on
+`net11.0`), and the pinned package/fixture e2e remains deterministic.
+
+Normal one-shot refresh must avoid content reads and Roslyn extraction for
+verified unchanged projects where possible. A missing, incompatible, corrupt,
+or uncertain cache must fall back safely. `--rebuild` must ignore persisted
+contributions and extract every project/TFM in the selected scope.
+
+Gate: existing full tests remain green; focused tests cover changed/unchanged/
+deleted projects, dependency invalidation, output completeness, failure
+retention of the last valid JSON, and repeated-run byte determinism. A real
+fixture must demonstrate that a cold refresh can reconstruct the same output as
+a clean full extraction.
+
+Commit target: `feat: add deterministic cold incremental refresh`
+
+### Phase 3 — warm indexer session and manual refresh barrier — complete
+
+Deliver a single worker-owned session that keeps the loaded solution, project
+graph, Roslyn state where safe, contribution cache, dirty set, and generation
+state in memory. A manual refresh request must:
+
+- wait while the initial cold reconciliation is running;
+- coalesce with an existing refresh instead of starting duplicate work;
+- promote required work over background work;
+- wait until the requested generation is indexed and serialized;
+- validate and atomically publish `csharp.json`; and
+- return only after publication succeeds.
+
+Completed: the single-worker request coordinator owns the loaded workspace and
+contribution state. It reuses the warm Roslyn solution for source-only changes,
+coalesces refresh requests, tracks dirty event generations, and publishes the
+complete JSON only after a foreground request reaches its barrier. Project and
+build-input changes take the safe cold path. A bounded event queue marks
+delivery untrusted instead of silently dropping events, and an optional
+trust-loss callback is available for the watcher recovery layer. Explicit
+rebuild requests share the same foreground barrier without changing the public
+Graphify document.
+
+Clean requests return the current published generation without loading Roslyn
+or rewriting JSON. Events arriving after a request’s target generation remain
+pending for the next refresh.
+
+Gate: a controllable test session proves that a request arriving during a slow
+cold load waits without duplicate extraction, warm clean requests are cheap,
+multiple callers share one generation, and a failed refresh never publishes a
+partial document. The focused session tests and complete suite pass on both
+supported frameworks (56 tests on `net10.0`, 59 on `net11.0`).
+
+Commit target: `feat: add warm incremental refresh session`
+
+### Phase 4 — trusted file watcher and background indexing — complete
+
+Deliver the long-running `--watch` mode using the session from Phase 3. The
+watcher subscribes before its initial cold reconciliation, records filesystem
+events immediately, and maps them to dirty paths/projects. Event callbacks must
+only normalize and enqueue paths on a bounded worker queue; they must never
+load Roslyn or perform extraction. It may process dirty projects on a
+low-priority background queue, but file events do not directly publish
+Graphify JSON.
+
+The watcher combines the .NET `FileSystemWatcher` fast path with a configurable
+backup `PeriodicTimer` reconciliation (initial default: five minutes). The
+backup path enumerates the configured input inventory and compares cheap
+metadata. If the inventory cannot establish a complete scan boundary, it
+invalidates the session and takes the cold reconciliation path. Queue
+overflow, watcher `Error`/buffer overflow,
+missing roots, failed scans, or an uncertain event boundary tear down and
+recreate the watcher and invalidate the session; recovery scans current roots
+and completes a cold reconciliation before readiness. No user files are
+deleted during recovery.
+
+The watcher is trusted only within its healthy session. A new or restarted
+watcher creates a new session and performs cold reconciliation before becoming
+ready. Watcher errors, event-buffer overflow, lost roots, or an uncertain
+event boundary invalidate the session and force cold reconciliation. Event
+capture has no correctness dependency on time-based debounce; background work
+may coalesce project requests and a manual refresh bypasses any delay.
+
+The normal foreground CLI invocation connects to a matching healthy watcher
+through a local control channel. If no watcher is available, it performs the
+cold reconciliation itself rather than silently using an unverified
+incremental state. The watcher owns extraction, JSON serialization, and the
+atomic output commit.
+
+Gate: integration tests cover startup, restart, missed-event/error fallback,
+manual refresh while cold or warm work is running, background-to-foreground
+promotion, dirty work coalescing, event queue overflow, backup-timer detection,
+watcher recreation, failed reconciliation, and output visibility during
+replacement. The watcher must not create a second MSBuild workspace for a
+foreground request. The focused watcher suite and complete solution suite pass
+on both supported frameworks (61 tests on `net10.0`, 64 on `net11.0`), and a
+real CLI watcher/client smoke run completed successfully.
+
+Commit: `feat: add trusted watcher and manual refresh protocol`
+
+### Phase 5 — release hardening and performance validation — complete
+
+Deliver:
+
+- the explicit cache-invalidating `--rebuild` path through both standalone and
+  watcher refreshes;
+- internal generation and session-status data for starting, ready, refreshing,
+  and failed sessions;
+- recovery after process termination and incomplete cache/output swaps;
+- focused and end-to-end tests for the documented command flows; and
+- performance measurements comparing cold startup with warm indexing,
+  metadata reconciliation, serialization, and foreground wait time.
+
+The watcher reliability defaults are now implemented: built-in
+`FileSystemWatcher` fast-path callbacks only enqueue paths, the bounded queue
+cannot silently overflow, and the five-minute metadata inventory backstop
+reuses the same invalidation path. This phase adds the final repeatable
+watch/restart/rebuild e2e script, package smoke coverage, and measured
+performance notes before release. The metadata backstop intentionally does not
+hash every file; exact same-size/same-timestamp rewrites require `--rebuild`.
+
+The pinned real-world e2e must exercise a cold start, a warm no-change refresh,
+a changed source refresh, watcher restart, and rebuild-from-scratch. Results
+must remain deterministic and Graphify-compatible.
+
+Completed: background indexing and local control-channel failures now mark the
+warm boundary untrusted and enter the same cold watcher recovery path as an OS
+watcher error. Backup inventory failures have an explicit regression test.
+The repeatable `scripts/run-watcher-e2e.sh` check packs and installs the tool
+into an isolated path, validates cold startup, warm refresh, delayed
+publication, restart, rebuild, and Graphify JSON on both supported assets.
+
+Verification: full .NET 10 and .NET 11 suites pass (63 and 66 tests), the
+real-world Dapper gate remains deterministic at 3,656 nodes and 6,960 edges,
+the watcher package E2E passes with 159 nodes and 130 edges on net10 and net11,
+and a clean Dapper cold rebuild took 4.69 seconds versus 0.15 seconds for a
+warm clean refresh through the local watcher. `dotnet-trace` was also tried;
+its macOS/.NET-preview child-process trace stayed dominated by runtime waits
+and did not produce an actionable hot path, so no speculative optimization was
+added. `act -n` validates the complete workflow graph; a live `act` run passed
+the build, tests, and vulnerability checks, but its medium image failed only in
+the `actions/setup-dotnet` post-cache hook after the action removed `node` from
+`PATH` (the hosted GitHub runner is unaffected).
+
+Gate: full .NET 10 and .NET 11 test suites, Release builds, package/tool smoke
+tests, real-world determinism, watcher lifecycle tests, and `git diff --check`.
+
+The release gate runs the packaged watcher E2E against the exact package
+artifact twice: once through the net10.0 asset and once through the net11.0
+asset. Both runs use a long backup interval for the source-change assertion,
+so the real `FileSystemWatcher` event path is exercised rather than allowing
+the backup scan to explain the result. The same gate runs in CI and immediately
+before NuGet Trusted Publishing.
+
+Stop optimization once the obvious workspace-reuse and work-coalescing gains
+are demonstrated and further changes show diminishing returns.
+
+Commit target: `test: harden incremental indexing and refresh lifecycle`
+
+## Explicit non-goals for the initial release
 
 - proving runtime reachability in the presence of reflection or arbitrary
   dependency injection;
