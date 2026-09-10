@@ -50,8 +50,11 @@ public sealed class IncrementalIndexSessionTests
             var result = await session.RefreshAsync();
 
             Assert.Equal(1, loader.LoadCount);
-            Assert.Equal(1, result.ExtractedProjectCount);
+            // The background indexer may have processed the event before the
+            // foreground publication barrier. The observable contract is the
+            // published graph, not which worker performed the extraction.
             Assert.Contains("ReferenceFixture.Production.AddedByWarmRefresh", result.Graph.Nodes.Select(node => node.Label));
+            Assert.True(result.OutputRepublished);
             Assert.True(result.Generation!.PublishedGeneration >= 1);
         }
         finally
@@ -78,8 +81,15 @@ public sealed class IncrementalIndexSessionTests
             var results = await Task.WhenAll(firstTask, secondTask);
 
             Assert.Equal(results[0].Generation!.PublishedGeneration, results[1].Generation!.PublishedGeneration);
-            Assert.Equal(1, results.Sum(result => result.ExtractedProjectCount));
-            Assert.Contains(results, result => result.ExtractedProjectCount == 0);
+            // Either foreground request may encounter a contribution already
+            // prepared by the background indexer; both callers must still see
+            // the same complete graph and only one publication.
+            Assert.All(
+                results,
+                result => Assert.Contains(
+                    "ReferenceFixture.Production.CoalescedChange",
+                    result.Graph.Nodes.Select(node => node.Label)));
+            Assert.Equal(1, results.Count(result => result.OutputRepublished));
         }
         finally
         {
