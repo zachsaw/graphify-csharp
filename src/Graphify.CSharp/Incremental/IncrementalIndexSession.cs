@@ -348,8 +348,12 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                             publishOutput: true,
                             cancellationToken)
                         .ConfigureAwait(false);
-                    refresh.Completion.TrySetResult(result);
                     _status = (int)IncrementalSessionStatus.Ready;
+                    // A completed refresh is the foreground readiness barrier.
+                    // Publish the state before completing the task so callers
+                    // cannot observe a completed refresh while the session
+                    // still reports itself as Refreshing.
+                    refresh.Completion.TrySetResult(result);
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
