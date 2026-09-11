@@ -34,6 +34,26 @@ public sealed class IncrementalIndexSessionTests
     }
 
     [Fact]
+    public async Task Refresh_after_startup_failure_fails_instead_of_waiting()
+    {
+        var fixture = await CreateFixtureAsync();
+        try
+        {
+            await using var session = new IncrementalIndexSession(
+                fixture.Request,
+                fixture.OutputPath,
+                new FailingLoader());
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() => session.StartAsync());
+            await Assert.ThrowsAsync<InvalidOperationException>(() => session.RefreshAsync());
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
     public async Task A_source_event_refreshes_the_project_without_loading_a_second_workspace()
     {
         var fixture = await CreateFixtureAsync();
@@ -56,6 +76,38 @@ public sealed class IncrementalIndexSessionTests
             Assert.Contains("ReferenceFixture.Production.AddedByWarmRefresh", result.Graph.Nodes.Select(node => node.Label));
             Assert.True(result.OutputRepublished);
             Assert.True(result.Generation!.PublishedGeneration >= 1);
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task A_large_multi_file_project_refreshes_through_coarse_batches()
+    {
+        var fixture = await CreateLargeFixtureAsync();
+        try
+        {
+            var loader = new CountingLoader(new RoslynWorkspaceLoader());
+            await using var session = new IncrementalIndexSession(fixture.Request, fixture.OutputPath, loader);
+            await session.StartAsync();
+
+            await File.AppendAllTextAsync(
+                fixture.SourcePath,
+                "\npublic static class AddedAfterBatchRefresh { public static int Value => 42; }\n");
+            session.ReportFileChanged(fixture.SourcePath);
+            var result = await session.RefreshAsync();
+
+            Assert.Equal(1, loader.LoadCount);
+            Assert.Contains(
+                "BatchFixture.AddedAfterBatchRefresh",
+                result.Graph.Nodes.Select(node => node.Label));
+            Assert.Contains(
+                result.Graph.Nodes,
+                node => node.Properties.TryGetValue("declaration_kind", out var kind)
+                    && kind == "class"
+                    && node.Label == "BatchFixture.Type063");
         }
         finally
         {
@@ -93,6 +145,41 @@ public sealed class IncrementalIndexSessionTests
         }
         finally
         {
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task Disposing_session_cancels_active_refresh_and_shares_disposal_completion()
+    {
+        var fixture = await CreateFixtureAsync();
+        var committer = new BlockingCommitter();
+        var session = new IncrementalIndexSession(
+            fixture.Request,
+            fixture.OutputPath,
+            outputPublisher: new IncrementalOutputPublisher(committer: committer));
+        try
+        {
+            await session.StartAsync();
+
+            var refresh = session.RebuildAsync();
+            await committer.SecondCommitStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var firstDispose = session.DisposeAsync().AsTask();
+            var secondDispose = session.DisposeAsync().AsTask();
+
+            Assert.Same(firstDispose, secondDispose);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => refresh.WaitAsync(TimeSpan.FromSeconds(5)));
+
+            committer.ReleaseSecondCommit();
+            await firstDispose;
+        }
+        finally
+        {
+            committer.ReleaseSecondCommit();
+            await session.DisposeAsync();
+            committer.Dispose();
             DeleteTemporaryDirectory(fixture.Root);
         }
     }
@@ -199,12 +286,52 @@ public sealed class IncrementalIndexSessionTests
             new ProjectLoadRequest(projectPath, root, configuration: "Release", targetFramework: "net10.0"));
     }
 
+    private static async Task<Fixture> CreateLargeFixtureAsync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "graphify-csharp-batch-session-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+#if NET11_0_OR_GREATER
+        const string targetFramework = "net11.0";
+#else
+        const string targetFramework = "net10.0";
+#endif
+        var projectPath = Path.Combine(root, "BatchFixture.csproj");
+        await File.WriteAllTextAsync(
+            projectPath,
+            $"""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>{targetFramework}</TargetFramework>
+                <ImplicitUsings>enable</ImplicitUsings>
+                <Nullable>enable</Nullable>
+              </PropertyGroup>
+            </Project>
+            """);
+
+        string? firstSourcePath = null;
+        for (var index = 0; index < 64; index++)
+        {
+            var sourcePath = Path.Combine(root, $"Type{index:D3}.cs");
+            await File.WriteAllTextAsync(
+                sourcePath,
+                $"namespace BatchFixture; public static class Type{index:D3} {{ public static int Value => {index}; }}\n");
+            firstSourcePath ??= sourcePath;
+        }
+
+        return new Fixture(
+            root,
+            projectPath,
+            firstSourcePath!,
+            Path.Combine(root, "graphify-out", "csharp.json"),
+            new ProjectLoadRequest(projectPath, root, configuration: "Release", targetFramework: targetFramework));
+    }
+
     private static string RepositoryRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
         while (directory is not null)
         {
-            if (File.Exists(Path.Combine(directory.FullName, "PLAN.md")))
+            if (File.Exists(Path.Combine(directory.FullName, "Graphify.CSharp.sln")))
             {
                 return directory.FullName;
             }
@@ -255,6 +382,15 @@ public sealed class IncrementalIndexSessionTests
         }
     }
 
+    private sealed class FailingLoader : IProjectLoader
+    {
+        public Task<LoadedSolution> LoadAsync(
+            ProjectLoadRequest request,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<LoadedSolution>(
+                new InvalidOperationException("Synthetic startup failure."));
+    }
+
     private sealed class FailOnSecondCommitter : IAtomicCacheCommitter
     {
         private int _commitCount;
@@ -268,5 +404,29 @@ public sealed class IncrementalIndexSessionTests
 
             File.Move(temporaryPath, destinationPath, overwrite: true);
         }
+    }
+
+    private sealed class BlockingCommitter : IAtomicCacheCommitter, IDisposable
+    {
+        private readonly ManualResetEventSlim _releaseSecondCommit = new(false);
+        private int _commitCount;
+
+        public TaskCompletionSource<bool> SecondCommitStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Commit(string temporaryPath, string destinationPath)
+        {
+            if (Interlocked.Increment(ref _commitCount) == 2)
+            {
+                SecondCommitStarted.TrySetResult(true);
+                _releaseSecondCommit.Wait();
+            }
+
+            File.Move(temporaryPath, destinationPath, overwrite: true);
+        }
+
+        public void ReleaseSecondCommit() => _releaseSecondCommit.Set();
+
+        public void Dispose() => _releaseSecondCommit.Dispose();
     }
 }

@@ -11,7 +11,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>graphify-csharp</ToolCommandName>
     <PackageId>Graphify.CSharp</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.1.5</Version>
     <Authors>Zach Saw</Authors>
     <Description>Roslyn-backed semantic C# caller and reference enricher for Graphify.</Description>
     <PackageTags>graphify;csharp;roslyn;static-analysis;call-graph</PackageTags>

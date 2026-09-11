@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections.Immutable;
 using Graphify.CSharp.Domain;
 using Microsoft.CodeAnalysis;
@@ -9,6 +10,8 @@ public sealed class DeclarationCatalog
     private readonly ImmutableDictionary<string, ImmutableArray<SymbolDeclaration>> _byReferenceKey;
     private readonly ImmutableDictionary<string, ImmutableArray<SymbolDeclaration>> _bySourceLocation;
     private readonly Dictionary<ISymbol, SymbolDeclaration> _bySymbol;
+    private readonly ConcurrentDictionary<ISymbol, ReferenceLookupResult> _referenceLookupCache =
+        new(SymbolEqualityComparer.Default);
 
     public DeclarationCatalog(
         IEnumerable<SymbolDeclaration> declarations,
@@ -92,19 +95,26 @@ public sealed class DeclarationCatalog
     {
         ArgumentNullException.ThrowIfNull(symbol);
 
+        if (_referenceLookupCache.TryGetValue(symbol, out var cached))
+        {
+            declaration = cached.Declaration!;
+            return cached.Declaration is not null;
+        }
+
+        SymbolDeclaration? resolved = null;
         try
         {
             if (!symbol.Locations.Any(location => location.IsInSource)
                 || !SymbolReferenceKey.TryCreate(symbol, out var referenceKey))
             {
+                _referenceLookupCache.TryAdd(symbol, new ReferenceLookupResult(null));
                 declaration = null!;
                 return false;
             }
 
             if (_byReferenceKey.TryGetValue(referenceKey, out var matches) && matches.Length == 1)
             {
-                declaration = matches[0];
-                return true;
+                resolved = matches[0];
             }
         }
         catch (NotSupportedException)
@@ -113,8 +123,9 @@ public sealed class DeclarationCatalog
             // locations or containing symbols. They cannot be reference keys.
         }
 
-        declaration = null!;
-        return false;
+        _referenceLookupCache.TryAdd(symbol, new ReferenceLookupResult(resolved));
+        declaration = resolved!;
+        return resolved is not null;
     }
 
     private bool TryGetBySourceLocation(ISymbol symbol, out SymbolDeclaration declaration)
@@ -130,5 +141,7 @@ public sealed class DeclarationCatalog
         declaration = null!;
         return false;
     }
+
+    private readonly record struct ReferenceLookupResult(SymbolDeclaration? Declaration);
 
 }

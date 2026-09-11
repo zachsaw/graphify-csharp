@@ -16,6 +16,7 @@ fixture_root="$temporary_root/fixture"
 feed_directory="$temporary_root/feed"
 tool_directory="$temporary_root/tool"
 output_path="$fixture_root/graphify-out/csharp.json"
+alternate_output_path="$fixture_root/graphify-out/alternate.json"
 watcher_log="$temporary_root/watcher.log"
 client_log="$temporary_root/client.log"
 watcher_pid=""
@@ -79,14 +80,20 @@ dotnet tool install \
   Graphify.CSharp \
   --version "$package_version"
 
-run_tool() {
+run_tool_at_output() {
+  local requested_output_path="$1"
+  shift
   "$tool_directory/graphify-csharp" \
     --input "$fixture_root/ReferenceFixture.csproj" \
     --root "$fixture_root" \
     --configuration "$configuration" \
     --target-framework "$target_framework" \
-    --output "$output_path" \
+    --output "$requested_output_path" \
     "$@"
+}
+
+run_tool() {
+  run_tool_at_output "$output_path" "$@"
 }
 
 start_watcher() {
@@ -134,6 +141,14 @@ jq -e '.nodes | length > 0' "$output_path" >/dev/null
 jq -e '.edges | length > 0' "$output_path" >/dev/null
 
 cp "$output_path" "$temporary_root/before-change.json"
+run_tool_at_output "$alternate_output_path" > "$client_log"
+if grep -Fq '(watcher,' "$client_log"; then
+  echo 'An alternate output request incorrectly attached to the canonical watcher.' >&2
+  exit 1
+fi
+test -s "$alternate_output_path"
+cmp -s "$temporary_root/before-change.json" "$output_path"
+
 printf '\npublic sealed class BackupAndWarmRefreshChange { }\n' >> "$fixture_root/ReferenceTypes.cs"
 sleep 2
 cmp -s "$temporary_root/before-change.json" "$output_path"

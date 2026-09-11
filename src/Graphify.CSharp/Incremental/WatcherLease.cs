@@ -55,7 +55,7 @@ internal sealed class WatcherLease : IDisposable
         return System.IO.Path.Combine(
             System.IO.Path.GetDirectoryName(IncrementalCachePath.ForOutput(outputPath))
                 ?? throw new InvalidOperationException("The output path has no cache directory."),
-            $"watch-{request.Digest}.lock");
+            $"watch-{request.Digest}-{IncrementalRefreshControlChannel.OutputPathIdentity(outputPath)}.lock");
     }
 
     public static bool IsHeld(string path)

@@ -1,4 +1,5 @@
 using Graphify.CSharp.Domain;
+using Graphify.CSharp.Graphify;
 using Graphify.CSharp.Roslyn;
 
 namespace Graphify.CSharp.Tests.Roslyn;
@@ -220,6 +221,76 @@ public sealed class SemanticReferenceExtractorTests
         Assert.Contains(graph.Edges, edge => IsEdge(edge, main, resultGraph, GraphRelation.Calls));
     }
 
+    [Fact]
+    public async Task Coarse_parallel_batches_match_serial_extraction()
+    {
+        using var loaded = await LoadFixtureAsync();
+        var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
+        var serial = await new SemanticReferenceExtractor(
+                new ExtractionParallelismOptions(
+                    maxDegreeOfParallelism: 1,
+                    minimumDocumentsPerBatch: 2))
+            .ExtractAsync(loaded, catalog);
+        var parallel = await new SemanticReferenceExtractor(
+                new ExtractionParallelismOptions(
+                    maxDegreeOfParallelism: 2,
+                    targetBatchesPerWorker: 2,
+                    minimumDocumentsPerBatch: 2))
+            .ExtractAsync(loaded, catalog);
+
+        Assert.Equal(
+            new GraphifyJsonSerializer().Serialize(serial),
+            new GraphifyJsonSerializer().Serialize(parallel));
+    }
+
+    [Fact]
+    public async Task A_shared_extractor_can_run_concurrently()
+    {
+        using var loaded = await LoadFixtureAsync();
+        var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
+        var extractor = new SemanticReferenceExtractor();
+
+        var graphs = await Task.WhenAll(
+            extractor.ExtractAsync(loaded, catalog),
+            extractor.ExtractAsync(loaded, catalog));
+
+        var serializer = new GraphifyJsonSerializer();
+        Assert.Equal(serializer.Serialize(graphs[0]), serializer.Serialize(graphs[1]));
+        Assert.False(extractor.Diagnostics.IsDefault);
+    }
+
+    [Fact]
+    public async Task Solution_wide_batches_match_serial_extraction()
+    {
+        var root = RepositoryRoot();
+#if NET11_0_OR_GREATER
+        const string targetFramework = "net11.0";
+#else
+        const string targetFramework = "net10.0";
+#endif
+        using var loaded = await new RoslynWorkspaceLoader().LoadAsync(new ProjectLoadRequest(
+            Path.Combine(root, "Graphify.CSharp.sln"),
+            root,
+            configuration: "Release",
+            targetFramework: targetFramework));
+        var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
+        var serial = await new SemanticReferenceExtractor(
+                new ExtractionParallelismOptions(
+                    maxDegreeOfParallelism: 1,
+                    minimumDocumentsPerBatch: 2))
+            .ExtractAsync(loaded, catalog);
+        var parallel = await new SemanticReferenceExtractor(
+                new ExtractionParallelismOptions(
+                    maxDegreeOfParallelism: 2,
+                    targetBatchesPerWorker: 2,
+                    minimumDocumentsPerBatch: 2))
+            .ExtractAsync(loaded, catalog);
+
+        Assert.Equal(
+            new GraphifyJsonSerializer().Serialize(serial),
+            new GraphifyJsonSerializer().Serialize(parallel));
+    }
+
     private static async Task<LoadedSolution> LoadFixtureAsync()
     {
         var root = RepositoryRoot();
@@ -283,7 +354,7 @@ public sealed class SemanticReferenceExtractorTests
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
         while (directory is not null)
         {
-            if (File.Exists(Path.Combine(directory.FullName, "PLAN.md")))
+            if (File.Exists(Path.Combine(directory.FullName, "Graphify.CSharp.sln")))
             {
                 return directory.FullName;
             }

@@ -3,6 +3,7 @@
 .idea/
 .vs/
 TestResults/
+artifacts/
 graphify-out/
 .e2e/
 *.user

@@ -25,6 +25,7 @@ internal sealed class FileSystemChangeWatcher : IFileChangeWatcher
 {
     private const int MaximumNativeBufferSize = 64 * 1024;
     private readonly FileSystemWatcher _watcher;
+    private readonly object _lifecycleGate = new();
     private int _disposed;
 
     public FileSystemChangeWatcher(string root)
@@ -60,24 +61,30 @@ internal sealed class FileSystemChangeWatcher : IFileChangeWatcher
 
     public void Start()
     {
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-        _watcher.EnableRaisingEvents = true;
+        lock (_lifecycleGate)
+        {
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+            _watcher.EnableRaisingEvents = true;
+        }
     }
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        lock (_lifecycleGate)
         {
-            return;
-        }
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
 
-        _watcher.EnableRaisingEvents = false;
-        _watcher.Changed -= OnChanged;
-        _watcher.Created -= OnChanged;
-        _watcher.Deleted -= OnChanged;
-        _watcher.Renamed -= OnRenamed;
-        _watcher.Error -= OnError;
-        _watcher.Dispose();
+            _watcher.EnableRaisingEvents = false;
+            _watcher.Changed -= OnChanged;
+            _watcher.Created -= OnChanged;
+            _watcher.Deleted -= OnChanged;
+            _watcher.Renamed -= OnRenamed;
+            _watcher.Error -= OnError;
+            _watcher.Dispose();
+        }
     }
 
     private void OnChanged(object sender, FileSystemEventArgs args)

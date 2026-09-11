@@ -1,8 +1,8 @@
 # Release and publishing
 
 The package is published as the `Graphify.CSharp` .NET global tool. Releases
-are driven by a published GitHub release: a release whose tag is `v0.1.0`
-publishes package version `0.1.0` after the same build, test, vulnerability,
+are driven by a published GitHub release: a release whose tag is `v0.1.5`
+publishes package version `0.1.5` after the same build, test, vulnerability,
 package-smoke, and determinism gates used by CI.
 
 ## One-time setup
@@ -41,9 +41,9 @@ dotnet test Graphify.CSharp.sln --configuration Release
 
 Create a release with:
 
-- a tag in the form `v0.1.0` (create the tag from the intended commit if it
+- a tag in the form `v0.1.5` (create the tag from the intended commit if it
   does not already exist);
-- the matching release title, such as `v0.1.0`; and
+- the matching release title, such as `v0.1.5`; and
 - the release published immediately, or publish the draft when ready.
 
 Publishing the release starts `Publish NuGet package`. It checks out the
@@ -65,8 +65,8 @@ a new version tag.
 ```text
 dotnet pack src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj \
   --configuration Release \
-  -p:Version=0.1.0 \
-  -p:PackageVersion=0.1.0 \
+  -p:Version=0.1.5 \
+  -p:PackageVersion=0.1.5 \
   --output artifacts
 ```
 
@@ -77,7 +77,7 @@ Install a local package explicitly for either runtime asset:
 
 ```text
 dotnet tool install --tool-path .tool-net10 --add-source artifacts \
-  --framework net10.0 Graphify.CSharp --version 0.1.0
+  --framework net10.0 Graphify.CSharp --version 0.1.5
 dotnet tool install --tool-path .tool-net11 --add-source artifacts \
-  --framework net11.0 Graphify.CSharp --version 0.1.0
+  --framework net11.0 Graphify.CSharp --version 0.1.5
 ```

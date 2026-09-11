@@ -18,8 +18,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     private readonly IProjectLoader _projectLoader;
     private readonly IncrementalCacheStore _cacheStore;
     private readonly IncrementalOutputPublisher _outputPublisher;
-    private readonly Func<Guid> _sessionIdFactory;
     private readonly Action<string>? _trustLostCallback;
+    private readonly Guid _sessionId;
     private readonly Channel<SessionCommand> _commands = Channel.CreateUnbounded<SessionCommand>(
         new UnboundedChannelOptions
         {
@@ -42,9 +42,12 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     private int _queuedEventCount;
     private int _backgroundIndexRequested;
     private int _eventDeliveryUntrusted;
+    private int _disposeRequested;
     private int _status = (int)IncrementalSessionStatus.Created;
     private Exception? _failure;
     private Task? _workerTask;
+    private Task? _disposeTask;
+    private TaskCompletionSource<IncrementalRefreshResult>? _activeRefreshCompletion;
     private LoadedSolution? _loadedSolution;
     private Solution? _currentRoslynSolution;
     private DeclarationCatalog? _catalog;
@@ -55,7 +58,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     private ImmutableArray<string> _globalDiagnostics = ImmutableArray<string>.Empty;
     private RefreshGeneration _generation;
     private string? _publishedOutputDigest;
-    private bool _requiresColdReconciliation;
+    private int _requiresColdReconciliation;
 
     public IncrementalIndexSession(
         ProjectLoadRequest request,
@@ -78,15 +81,15 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         _projectLoader = projectLoader ?? new RoslynWorkspaceLoader();
         _cacheStore = cacheStore ?? new IncrementalCacheStore();
         _outputPublisher = outputPublisher ?? new IncrementalOutputPublisher();
-        _sessionIdFactory = sessionIdFactory ?? Guid.NewGuid;
         _trustLostCallback = trustLostCallback;
-        _generation = new RefreshGeneration(_sessionIdFactory());
+        _sessionId = (sessionIdFactory ?? Guid.NewGuid)();
+        _generation = new RefreshGeneration(_sessionId);
     }
 
     public IncrementalSessionStatus Status =>
         (IncrementalSessionStatus)Volatile.Read(ref _status);
 
-    public Guid SessionId => _generation.SessionId;
+    public Guid SessionId => _sessionId;
 
     public long EventGeneration => Volatile.Read(ref _eventClock);
 
@@ -108,15 +111,22 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     {
         EnsureWorkerStarted();
         var target = new RefreshTarget(
-            _generation.SessionId,
+            _sessionId,
             Volatile.Read(ref _eventClock));
         var completion = new TaskCompletionSource<IncrementalRefreshResult>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!_commands.Writer.TryWrite(new RefreshCommand(target, rebuild, completion)))
+        lock (_lifecycleGate)
         {
-            completion.TrySetException(new InvalidOperationException("The incremental session is not accepting refresh requests."));
+            ThrowIfSessionUnavailableLocked();
+            if (!_commands.Writer.TryWrite(new RefreshCommand(target, rebuild, completion)))
+            {
+                completion.TrySetException(new InvalidOperationException("The incremental session is not accepting refresh requests."));
+            }
+            else
+            {
+                _workSignal.Release();
+            }
         }
 
-        _workSignal.Release();
         return cancellationToken.CanBeCanceled
             ? completion.Task.WaitAsync(cancellationToken)
             : completion.Task;
@@ -125,14 +135,27 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     public void ReportFileChanged(string path)
     {
         EnsureWorkerStarted();
-        var generation = Interlocked.Increment(ref _eventClock);
-        var queued = Interlocked.Increment(ref _queuedEventCount);
-        var accepted = !string.IsNullOrWhiteSpace(path)
-            && queued <= EventQueueCapacity
-            && _fileEvents.Writer.TryWrite(new FileChangeCommand(path, generation));
+        bool accepted;
+        lock (_lifecycleGate)
+        {
+            ThrowIfSessionUnavailableLocked();
+            var generation = Interlocked.Increment(ref _eventClock);
+            var queued = Interlocked.Increment(ref _queuedEventCount);
+            accepted = !string.IsNullOrWhiteSpace(path)
+                && queued <= EventQueueCapacity
+                && _fileEvents.Writer.TryWrite(new FileChangeCommand(path, generation));
+            if (!accepted)
+            {
+                Interlocked.Decrement(ref _queuedEventCount);
+            }
+            else
+            {
+                _workSignal.Release();
+            }
+        }
+
         if (!accepted)
         {
-            Interlocked.Decrement(ref _queuedEventCount);
             MarkEventDeliveryUntrusted("The file-system event queue is full or received an invalid path.");
         }
         else if (Volatile.Read(ref _eventDeliveryUntrusted) == 0
@@ -141,25 +164,24 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             // The event signal below wakes the worker; this flag causes the
             // worker to index after it has drained the event queue.
         }
-
-        if (accepted)
-        {
-            _workSignal.Release();
-        }
     }
 
     public void RequestBackgroundIndex()
     {
         EnsureWorkerStarted();
-        if (Volatile.Read(ref _eventDeliveryUntrusted) != 0
-            || _requiresColdReconciliation)
+        lock (_lifecycleGate)
         {
-            return;
-        }
+            ThrowIfSessionUnavailableLocked();
+            if (Volatile.Read(ref _eventDeliveryUntrusted) != 0
+                || Volatile.Read(ref _requiresColdReconciliation) != 0)
+            {
+                return;
+            }
 
-        if (Interlocked.Exchange(ref _backgroundIndexRequested, 1) == 0)
-        {
-            _workSignal.Release();
+            if (Interlocked.Exchange(ref _backgroundIndexRequested, 1) == 0)
+            {
+                _workSignal.Release();
+            }
         }
     }
 
@@ -167,30 +189,68 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(reason);
         MarkEventDeliveryUntrusted(reason);
-        if (_commands.Writer.TryWrite(new WatcherInvalidatedCommand(reason)))
+        lock (_lifecycleGate)
         {
-            _workSignal.Release();
+            if (Volatile.Read(ref _disposeRequested) != 0)
+            {
+                return;
+            }
+
+            if (Status == IncrementalSessionStatus.Failed)
+            {
+                return;
+            }
+
+            if (_commands.Writer.TryWrite(new WatcherInvalidatedCommand(reason)))
+            {
+                _workSignal.Release();
+            }
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
+    {
+        Task disposeTask;
+        lock (_lifecycleGate)
+        {
+            if (_disposeTask is null)
+            {
+                Volatile.Write(ref _disposeRequested, 1);
+                _disposeTask = DisposeCoreAsync();
+            }
+
+            disposeTask = _disposeTask;
+        }
+
+        return new ValueTask(disposeTask);
+    }
+
+    private async Task DisposeCoreAsync()
     {
         Task? worker;
         lock (_lifecycleGate)
         {
             worker = _workerTask;
-            if (worker is null)
-            {
-                _status = (int)IncrementalSessionStatus.Stopped;
-                _stop.Dispose();
-                _workSignal.Dispose();
-                return;
-            }
-
+            Volatile.Write(ref _status, (int)IncrementalSessionStatus.Stopping);
             _stop.Cancel();
             _commands.Writer.TryComplete();
             _fileEvents.Writer.TryComplete();
-            _workSignal.Release();
+            CancelPendingCommandsLocked();
+            if (worker is null)
+            {
+                Volatile.Write(ref _status, (int)IncrementalSessionStatus.Stopped);
+            }
+            else
+            {
+                _workSignal.Release();
+            }
+        }
+
+        if (worker is null)
+        {
+            _stop.Dispose();
+            _workSignal.Dispose();
+            return;
         }
 
         try
@@ -202,7 +262,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         }
         finally
         {
-            _status = (int)IncrementalSessionStatus.Stopped;
+            Volatile.Write(ref _status, (int)IncrementalSessionStatus.Stopped);
             _stop.Dispose();
             _workSignal.Dispose();
         }
@@ -212,23 +272,46 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     {
         lock (_lifecycleGate)
         {
-            if (Status == IncrementalSessionStatus.Stopped)
-            {
-                throw new ObjectDisposedException(nameof(IncrementalIndexSession));
-            }
+            EnsureWorkerStartedLocked();
+        }
+    }
 
-            if (Status == IncrementalSessionStatus.Failed)
-            {
-                throw new InvalidOperationException("The incremental session failed during startup.", _failure);
-            }
+    private void EnsureWorkerStartedLocked()
+    {
+        ThrowIfDisposeRequestedLocked();
+        if (Status == IncrementalSessionStatus.Failed)
+        {
+            throw new InvalidOperationException(
+                "The incremental session failed during startup.",
+                Volatile.Read(ref _failure));
+        }
 
-            if (_workerTask is not null)
-            {
-                return;
-            }
+        if (_workerTask is not null)
+        {
+            return;
+        }
 
-            _status = (int)IncrementalSessionStatus.Starting;
-            _workerTask = Task.Run(RunAsync);
+        Volatile.Write(ref _status, (int)IncrementalSessionStatus.Starting);
+        _workerTask = Task.Run(RunAsync);
+    }
+
+    private void ThrowIfDisposeRequestedLocked()
+    {
+        if (Volatile.Read(ref _disposeRequested) != 0
+            || Status is IncrementalSessionStatus.Stopping or IncrementalSessionStatus.Stopped)
+        {
+            throw new ObjectDisposedException(nameof(IncrementalIndexSession));
+        }
+    }
+
+    private void ThrowIfSessionUnavailableLocked()
+    {
+        ThrowIfDisposeRequestedLocked();
+        if (Status == IncrementalSessionStatus.Failed)
+        {
+            throw new InvalidOperationException(
+                "The incremental session failed during startup.",
+                Volatile.Read(ref _failure));
         }
     }
 
@@ -237,7 +320,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         try
         {
             await InitializeAsync(_stop.Token).ConfigureAwait(false);
-            _status = (int)IncrementalSessionStatus.Ready;
+            TrySetStatusIfActive(IncrementalSessionStatus.Ready);
             _ready.TrySetResult(true);
 
             while (!_stop.IsCancellationRequested)
@@ -263,7 +346,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 
                 if (Interlocked.Exchange(ref _backgroundIndexRequested, 0) != 0)
                 {
-                    _status = (int)IncrementalSessionStatus.Refreshing;
+                    TrySetStatusIfActive(IncrementalSessionStatus.Refreshing);
                     try
                     {
                         await IndexBackgroundAsync(_stop.Token).ConfigureAwait(false);
@@ -276,31 +359,42 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                         // perform a trusted cold recovery. A standalone session
                         // will take the same cold path on its next foreground
                         // refresh.
-                        _requiresColdReconciliation = true;
+                        Volatile.Write(ref _requiresColdReconciliation, 1);
                         MarkEventDeliveryUntrusted(
                             $"Background indexing failed and requires cold recovery: {exception.Message}");
                     }
                     finally
                     {
-                        if (Status != IncrementalSessionStatus.Failed)
-                        {
-                            _status = (int)IncrementalSessionStatus.Ready;
-                        }
+                        TrySetStatusIfActive(IncrementalSessionStatus.Ready);
                     }
                 }
             }
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested)
         {
-            _ready.TrySetCanceled(_stop.Token);
-            FailPendingCommands(new OperationCanceledException(_stop.Token));
+            lock (_lifecycleGate)
+            {
+                CancelPendingCommandsLocked();
+            }
         }
         catch (Exception exception)
         {
-            _failure = exception;
-            _status = (int)IncrementalSessionStatus.Failed;
-            _ready.TrySetException(exception);
-            FailPendingCommands(exception);
+            lock (_lifecycleGate)
+            {
+                if (Volatile.Read(ref _disposeRequested) != 0)
+                {
+                    CancelPendingCommandsLocked();
+                }
+                else
+                {
+                    Volatile.Write(ref _failure, exception);
+                    Volatile.Write(ref _status, (int)IncrementalSessionStatus.Failed);
+                    _commands.Writer.TryComplete(exception);
+                    _fileEvents.Writer.TryComplete(exception);
+                    _ready.TrySetException(exception);
+                    FailPendingCommands(exception);
+                }
+            }
         }
         finally
         {
@@ -313,7 +407,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     {
         await LoadAndExtractAllAsync(cancellationToken).ConfigureAwait(false);
         DrainFileEvents();
-        var target = new RefreshTarget(_generation.SessionId, Volatile.Read(ref _eventClock));
+        var target = new RefreshTarget(_sessionId, Volatile.Read(ref _eventClock));
         var duePaths = DueDirtyPaths(target.EventGeneration);
         if (Volatile.Read(ref _eventDeliveryUntrusted) != 0 || duePaths.Count > 0)
         {
@@ -339,31 +433,45 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         switch (command)
         {
             case RefreshCommand refresh:
+                if (!TryBeginRefresh(refresh))
+                {
+                    break;
+                }
+
                 try
                 {
-                    _status = (int)IncrementalSessionStatus.Refreshing;
+                    TrySetStatusIfActive(IncrementalSessionStatus.Refreshing);
                     var result = await ReconcileAsync(
                             refresh.Target,
                             forceCold: refresh.Rebuild,
                             publishOutput: true,
                             cancellationToken)
                         .ConfigureAwait(false);
-                    _status = (int)IncrementalSessionStatus.Ready;
+                    TrySetStatusIfActive(IncrementalSessionStatus.Ready);
                     // A completed refresh is the foreground readiness barrier.
                     // Publish the state before completing the task so callers
                     // cannot observe a completed refresh while the session
                     // still reports itself as Refreshing.
                     refresh.Completion.TrySetResult(result);
                 }
+                catch (OperationCanceledException)
+                {
+                    refresh.Completion.TrySetCanceled(cancellationToken);
+                    throw;
+                }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
-                    _status = (int)IncrementalSessionStatus.Ready;
+                    TrySetStatusIfActive(IncrementalSessionStatus.Ready);
                     refresh.Completion.TrySetException(exception);
+                }
+                finally
+                {
+                    EndRefresh(refresh.Completion);
                 }
 
                 break;
             case WatcherInvalidatedCommand:
-                _requiresColdReconciliation = true;
+                Volatile.Write(ref _requiresColdReconciliation, 1);
                 break;
         }
     }
@@ -376,12 +484,13 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     {
         ValidateTarget(target);
         DrainFileEvents();
-        forceCold |= Volatile.Read(ref _eventDeliveryUntrusted) != 0 || _requiresColdReconciliation;
+        forceCold |= Volatile.Read(ref _eventDeliveryUntrusted) != 0
+            || Volatile.Read(ref _requiresColdReconciliation) != 0;
         var duePaths = DueDirtyPaths(target.EventGeneration);
         var dirtyProjectKeys = forceCold
             ? _fingerprints.Keys.ToHashSet(StringComparer.Ordinal)
             : ResolveDirtyProjects(duePaths);
-        forceCold |= _requiresColdReconciliation;
+        forceCold |= Volatile.Read(ref _requiresColdReconciliation) != 0;
         if (forceCold)
         {
             dirtyProjectKeys = _fingerprints.Keys.ToHashSet(StringComparer.Ordinal);
@@ -418,14 +527,14 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             var trustVersionAtStart = Volatile.Read(ref _eventTrustVersion);
             await LoadAndExtractAllAsync(cancellationToken).ConfigureAwait(false);
             extractedProjectCount = _contributions.Count;
-            _requiresColdReconciliation = false;
+            Volatile.Write(ref _requiresColdReconciliation, 0);
             if (Volatile.Read(ref _eventTrustVersion) == trustVersionAtStart)
             {
                 Interlocked.Exchange(ref _eventDeliveryUntrusted, 0);
             }
             else
             {
-                _requiresColdReconciliation = true;
+                Volatile.Write(ref _requiresColdReconciliation, 1);
             }
         }
         else
@@ -435,7 +544,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             {
                 await LoadAndExtractAllAsync(cancellationToken).ConfigureAwait(false);
                 extractedProjectCount = _contributions.Count;
-                _requiresColdReconciliation = false;
+                Volatile.Write(ref _requiresColdReconciliation, 0);
             }
             else
             {
@@ -522,7 +631,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         }
 
         DrainFileEvents();
-        var target = new RefreshTarget(_generation.SessionId, Volatile.Read(ref _eventClock));
+        var target = new RefreshTarget(_sessionId, Volatile.Read(ref _eventClock));
         await ReconcileAsync(
                 target,
                 forceCold: false,
@@ -624,7 +733,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 
     private async Task LoadAndExtractAllAsync(CancellationToken cancellationToken)
     {
-        _requiresColdReconciliation = true;
+        Volatile.Write(ref _requiresColdReconciliation, 1);
         _loadedSolution?.Dispose();
         _loadedSolution = null;
         _loadedSolution = await _projectLoader.LoadAsync(_request, cancellationToken).ConfigureAwait(false);
@@ -648,7 +757,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             .Distinct(StringComparer.Ordinal)
             .OrderBy(diagnostic => diagnostic, StringComparer.Ordinal)
             .ToImmutableArray();
-        _requiresColdReconciliation = false;
+        Volatile.Write(ref _requiresColdReconciliation, 0);
     }
 
     private async Task<Solution?> ApplySourceChangesAsync(
@@ -766,7 +875,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         }
         catch (ArgumentException)
         {
-            _requiresColdReconciliation = true;
+            Volatile.Write(ref _requiresColdReconciliation, 1);
             MarkEventDeliveryUntrusted("An invalid file-system event path was received.");
         }
     }
@@ -795,7 +904,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         {
             if (IsBuildInput(path))
             {
-                _requiresColdReconciliation = true;
+                Volatile.Write(ref _requiresColdReconciliation, 1);
                 return _fingerprints.Keys.ToHashSet(StringComparer.Ordinal);
             }
 
@@ -808,7 +917,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 
             if (path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
             {
-                _requiresColdReconciliation = true;
+                Volatile.Write(ref _requiresColdReconciliation, 1);
                 return _fingerprints.Keys.ToHashSet(StringComparer.Ordinal);
             }
         }
@@ -941,7 +1050,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     private void ValidateTarget(RefreshTarget target)
     {
         ArgumentNullException.ThrowIfNull(target);
-        if (target.SessionId != _generation.SessionId)
+        if (target.SessionId != _sessionId)
         {
             throw new InvalidOperationException("The refresh target belongs to a different incremental session.");
         }
@@ -953,9 +1062,69 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         {
             if (command is RefreshCommand refresh)
             {
-                refresh.Completion.TrySetException(exception);
+                if (exception is OperationCanceledException)
+                {
+                    refresh.Completion.TrySetCanceled();
+                }
+                else
+                {
+                    refresh.Completion.TrySetException(exception);
+                }
             }
         }
+    }
+
+    private bool TryBeginRefresh(RefreshCommand refresh)
+    {
+        lock (_lifecycleGate)
+        {
+            if (Volatile.Read(ref _disposeRequested) != 0)
+            {
+                refresh.Completion.TrySetCanceled(_stop.Token);
+                return false;
+            }
+
+            if (Status == IncrementalSessionStatus.Failed)
+            {
+                refresh.Completion.TrySetException(
+                    new InvalidOperationException(
+                        "The incremental session failed during startup.",
+                        Volatile.Read(ref _failure)));
+                return false;
+            }
+
+            _activeRefreshCompletion = refresh.Completion;
+            return true;
+        }
+    }
+
+    private void EndRefresh(TaskCompletionSource<IncrementalRefreshResult> completion)
+    {
+        lock (_lifecycleGate)
+        {
+            if (ReferenceEquals(_activeRefreshCompletion, completion))
+            {
+                _activeRefreshCompletion = null;
+            }
+        }
+    }
+
+    private void TrySetStatusIfActive(IncrementalSessionStatus status)
+    {
+        lock (_lifecycleGate)
+        {
+            if (Volatile.Read(ref _disposeRequested) == 0)
+            {
+                Volatile.Write(ref _status, (int)status);
+            }
+        }
+    }
+
+    private void CancelPendingCommandsLocked()
+    {
+        _activeRefreshCompletion?.TrySetCanceled(_stop.Token);
+        _ready.TrySetCanceled(_stop.Token);
+        FailPendingCommands(new OperationCanceledException(_stop.Token));
     }
 
     private static GraphSnapshot MergeContributions(IEnumerable<ProjectContributionEnvelope> contributions) =>

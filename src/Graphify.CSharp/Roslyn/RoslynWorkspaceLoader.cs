@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using Microsoft.Build.Locator;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.MSBuild;
@@ -11,7 +12,7 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
         ArgumentNullException.ThrowIfNull(request);
         MsBuildEnvironment.EnsureRegistered();
 
-        var diagnostics = new List<WorkspaceLoadDiagnostic>();
+        var diagnostics = new ConcurrentQueue<WorkspaceLoadDiagnostic>();
         var workspaceProperties = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["Configuration"] = request.Configuration,
@@ -24,7 +25,7 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
         }
 
         var workspace = MSBuildWorkspace.Create(workspaceProperties);
-        workspace.RegisterWorkspaceFailedHandler(args => diagnostics.Add(new WorkspaceLoadDiagnostic(args.Diagnostic.Kind.ToString(), args.Diagnostic.Message)));
+        workspace.RegisterWorkspaceFailedHandler(args => diagnostics.Enqueue(new WorkspaceLoadDiagnostic(args.Diagnostic.Kind.ToString(), args.Diagnostic.Message)));
         WorkspaceOpenResult? opened = null;
 
         try
@@ -44,7 +45,7 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
                 var compilation = await project.GetCompilationAsync(cancellationToken).ConfigureAwait(false);
                 if (compilation is null)
                 {
-                    diagnostics.Add(new WorkspaceLoadDiagnostic("Compilation", $"Roslyn did not produce a compilation for '{project.Name}'."));
+                    diagnostics.Enqueue(new WorkspaceLoadDiagnostic("Compilation", $"Roslyn did not produce a compilation for '{project.Name}'."));
                     continue;
                 }
 

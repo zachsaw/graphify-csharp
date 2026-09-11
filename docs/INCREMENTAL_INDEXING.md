@@ -109,11 +109,22 @@ one exists. It waits for that watcher rather than opening a second MSBuild
 workspace. If no matching watcher exists, it performs the cold reconciliation
 itself and waits for completion.
 
-There is one watcher per canonical input identity. That identity includes the
-input path, repository root, configuration, selected target framework, tool
-and schema versions, and any other option that changes the compilation. A
-local control channel such as a named pipe or Unix-domain socket is preferred
-to a network endpoint.
+There is one watcher per canonical analysis-and-output identity. The analysis
+identity includes the input path, repository root, configuration, selected
+target framework, tool and schema versions, and any other option that changes
+the compilation. The output identity is the canonical absolute publication
+path. A local control channel such as a named pipe or Unix-domain socket is
+keyed by both identities and is preferred to a network endpoint.
+
+The output path is therefore part of watcher ownership even though it is not
+part of the semantic cache request. A refresh request for the same analysis
+with a different output path does not attach to the existing watcher; it falls
+back to a standalone refresh (or can use a separately started watcher). The
+watcher also validates the request and output identities in the control
+message before doing any work. This prevents a successful response from being
+reported for a file that the watcher did not write. Cache and lease paths are
+output-specific as well, so distinct output files in one directory do not
+race through shared incremental state.
 
 Only the watcher or a standalone refresh holding the refresh lock may update
 the cache and output. Readers can continue to read the previous complete
@@ -131,7 +142,7 @@ The watcher may use ignored internal state alongside it:
 
 ```text
 graphify-out/.graphify-csharp/
-    manifest.json
+    manifest-<output-path-identity>.json
     projects/<stable-project-key>.json
     session.json
 ```

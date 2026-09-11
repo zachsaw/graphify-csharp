@@ -80,6 +80,73 @@ public sealed class IncrementalWatcherHostTests
     }
 
     [Fact]
+    public async Task Disposing_while_watcher_starts_does_not_leave_an_unowned_watcher()
+    {
+        var fixture = await CreateFixtureAsync();
+        var factory = new BlockingWatcherFactory();
+        var host = new IncrementalWatcherHost(
+            fixture.Request,
+            fixture.OutputPath,
+            new IncrementalWatcherOptions(backupScanInterval: TimeSpan.FromHours(1)),
+            watcherFactory: factory);
+        try
+        {
+            var start = Task.Run(() => host.StartAsync());
+            await factory.StartEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var dispose = Task.Run(() => host.DisposeAsync().AsTask());
+            Assert.False(dispose.IsCompleted);
+
+            factory.ReleaseStart();
+            try
+            {
+                await start;
+            }
+            catch (OperationCanceledException)
+            {
+                // Disposal may cancel the cold start after the watcher has
+                // been published. The ownership invariant is what matters.
+            }
+
+            await dispose;
+            Assert.True(factory.Current.IsDisposed);
+        }
+        finally
+        {
+            factory.ReleaseStart();
+            await host.DisposeAsync();
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task Concurrent_host_disposals_share_one_completion()
+    {
+        var fixture = await CreateFixtureAsync();
+        var host = new IncrementalWatcherHost(
+            fixture.Request,
+            fixture.OutputPath,
+            new IncrementalWatcherOptions(backupScanInterval: TimeSpan.FromHours(1)),
+            watcherFactory: new FakeWatcherFactory());
+        try
+        {
+            await host.StartAsync();
+
+            var firstDispose = host.DisposeAsync().AsTask();
+            var secondDispose = host.DisposeAsync().AsTask();
+
+            Assert.Same(firstDispose, secondDispose);
+            await Task.WhenAll(firstDispose, secondDispose);
+            Assert.False(host.IsReady);
+        }
+        finally
+        {
+            await host.DisposeAsync();
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
     public async Task Failed_backup_scan_invalidates_the_session_and_recovers()
     {
         var fixture = await CreateFixtureAsync();
@@ -175,9 +242,48 @@ public sealed class IncrementalWatcherHostTests
 
             Assert.NotNull(response);
             Assert.True(response!.Success);
+            Assert.Equal(identity.Digest, response.RequestDigest);
+            Assert.Equal(
+                IncrementalRefreshControlChannel.OutputPathIdentity(fixture.OutputPath),
+                response.OutputPathIdentity);
             Assert.Equal(0, response.ExtractedProjectCount);
             Assert.NotNull(response.NodeCount);
             Assert.True(response.NodeCount!.Value > 0);
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task Different_output_path_falls_back_instead_of_using_the_watcher()
+    {
+        var fixture = await CreateFixtureAsync();
+        var alternateOutputPath = Path.Combine(fixture.Root, "graphify-out", "alternate.json");
+        try
+        {
+            await using var host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(
+                    backupScanInterval: TimeSpan.FromHours(1)),
+                watcherFactory: new FakeWatcherFactory());
+            await host.StartAsync();
+            var canonicalBefore = await File.ReadAllTextAsync(fixture.OutputPath);
+
+            var exitCode = await global::Graphify.CSharp.Cli.Program.Main(
+            [
+                "--input", fixture.ProjectPath,
+                "--root", fixture.Root,
+                "--configuration", fixture.Request.Configuration,
+                "--target-framework", fixture.Request.TargetFramework!,
+                "--output", alternateOutputPath,
+            ]);
+
+            Assert.Equal(0, exitCode);
+            Assert.True(File.Exists(alternateOutputPath));
+            Assert.Equal(canonicalBefore, await File.ReadAllTextAsync(fixture.OutputPath));
         }
         finally
         {
@@ -211,7 +317,7 @@ public sealed class IncrementalWatcherHostTests
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
         while (directory is not null)
         {
-            if (File.Exists(Path.Combine(directory.FullName, "PLAN.md")))
+            if (File.Exists(Path.Combine(directory.FullName, "Graphify.CSharp.sln")))
             {
                 return directory.FullName;
             }
@@ -304,6 +410,66 @@ public sealed class IncrementalWatcherHostTests
             CreateCount++;
             Current = new FakeWatcher(root);
             return Current;
+        }
+    }
+
+    private sealed class BlockingWatcherFactory : IFileChangeWatcherFactory
+    {
+        public BlockingWatcher Current { get; private set; } = null!;
+
+        public TaskCompletionSource<bool> StartEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void ReleaseStart() => Current?.ReleaseStart();
+
+        public IFileChangeWatcher Create(string root)
+        {
+            Current = new BlockingWatcher(root, StartEntered);
+            return Current;
+        }
+    }
+
+    private sealed class BlockingWatcher : IFileChangeWatcher
+    {
+        private readonly TaskCompletionSource<bool> _startEntered;
+        private readonly TaskCompletionSource<bool> _releaseStart =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _disposed;
+
+        public BlockingWatcher(string root, TaskCompletionSource<bool> startEntered)
+        {
+            Root = root;
+            _startEntered = startEntered;
+        }
+
+        public event Action<string>? PathChanged
+        {
+            add { }
+            remove { }
+        }
+
+        public event Action<Exception>? Failed
+        {
+            add { }
+            remove { }
+        }
+
+        public string Root { get; }
+
+        public bool IsDisposed => Volatile.Read(ref _disposed) != 0;
+
+        public void Start()
+        {
+            _startEntered.TrySetResult(true);
+            _releaseStart.Task.GetAwaiter().GetResult();
+            ObjectDisposedException.ThrowIf(IsDisposed, this);
+        }
+
+        public void ReleaseStart() => _releaseStart.TrySetResult(true);
+
+        public void Dispose()
+        {
+            Interlocked.Exchange(ref _disposed, 1);
         }
     }
 
