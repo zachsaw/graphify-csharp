@@ -51,9 +51,11 @@ graphify-csharp \
   --rebuild
 ```
 
-The cache is an implementation detail and is safe to delete. A missing,
-incompatible, corrupt, or incomplete cache causes a cold extraction; it is
-never treated as evidence for a partial graph.
+The cache contents are an implementation detail and are safe to discard. Stop
+the watcher before deleting its `.graphify-csharp/` directory because that
+directory also contains live lease files; alternatively use `--rebuild`. A
+missing, incompatible, corrupt, or incomplete cache causes a cold extraction;
+it is never treated as evidence for a partial graph.
 
 ## Keep a warm watcher
 
@@ -89,6 +91,11 @@ one-shot refresh. This includes the case where a watcher is warm for the same
 project but was started with a different output path: the request is never
 silently redirected to that watcher's file. Separate output files have
 output-specific cache and lease state, so they can be refreshed independently.
+The canonical output destination is still exclusive: if a live watcher owns
+that exact output with a different input, configuration, or target framework,
+the command fails with an ownership conflict instead of overwriting the
+watcher's graph. Use another output path or stop the watcher. A standalone
+refresh holds the same destination lease for its complete operation.
 `--rebuild` forces a full cache-invalidating extraction in either mode. The
 watcher keeps an OS file watcher for low latency and runs an independent
 metadata inventory scan every five minutes by default. Change the interval at
@@ -98,6 +105,54 @@ invalidate the session; subscriptions are recreated and a cold reconciliation
 completes before the watcher becomes healthy again. The previous complete JSON
 remains readable while recovery runs, and recovery does not delete user files.
 Stop the watcher with Ctrl-C.
+
+### What the watcher watches
+
+The project and Roslyn workspace are authoritative for input membership; the
+watcher does not read `.gitignore` and does not guess that every file beneath a
+project directory belongs to the compilation. Evaluated source documents,
+additional files, analyzer configuration, project/solution files, evaluated
+imports, references, and other discovered inputs are kept as exact paths.
+
+For performance, ordinary traversal prunes conventional noise directories such
+as `obj/`, `bin/`, `.git/`, `TestResults/`, and `artifacts/`. An exact evaluated
+input wins over that pruning, so a physical generated file explicitly included
+from `obj/` still refreshes correctly while unrelated generated files beside it
+are ignored. The same policy is used by the native watcher and the backup
+inventory scan. Exact non-source inputs outside the repository are scanned by
+path; only source/additional-input roots that need live coverage add external
+watch roots, avoiding a recursive watch over SDK or package installation
+trees.
+
+Evaluated wildcard inputs are also retained as candidate rules. A new file with
+an arbitrary extension that matches an existing `Compile` or `AdditionalFiles`
+    glob is therefore considered by both the native watcher and the backup scan;
+    the project is re-evaluated before the change is published. A default glob does
+    not reopen conventional noise directories, but an evaluated candidate rule
+    whose include/exclude semantics admit a path there does. This includes broad
+    custom globs; the rule does not need to spell out the excluded directory name.
+
+Content edits to an existing evaluated source document use the warm Roslyn
+path. A created, deleted, or renamed source, a project-membership change, or
+any project/build/dependency input change goes through a complete MSBuild
+workspace reload so `Compile`, `Remove`, conditions, linked files, and disabled
+default globs remain authoritative. The reload may be broader than the one
+file that changed; that is the deliberate correctness boundary.
+
+During a cold reload, the watcher briefly enters a conservative transition
+state. It retains known viable coverage and treats uncertain in-scope events as
+requiring cold recovery. Once MSBuild/Roslyn has evaluated the new inputs, the
+new immutable snapshot is published before extraction continues, and watcher
+coverage is extended or replaced from that snapshot. Scans captured against an
+old or transitional snapshot are discarded; existing inventory changes,
+including newly discovered exact inputs, are reconciled before a post-load
+baseline is accepted. This closes the edit window around project membership
+changes without resurrecting deleted external roots.
+
+If auxiliary MSBuild input discovery is incomplete, the watcher reports a
+diagnostic and treats the warm view as untrusted for foreground refreshes. The
+next refresh performs a cold load and retries discovery; it does not silently
+return the incomplete warm graph as current.
 
 To exercise the packaged tool rather than the solution test doubles, run the
 repeatable watcher lifecycle check from the repository root:
@@ -133,6 +188,19 @@ To check repeatability, run the local CLI twice and compare the complete output:
   --input ./src/Product/Product.sln \
   --root . \
   --configuration Release
+```
+
+For watcher changes, use the focused tests while iterating and the packaged
+end-to-end script before a release boundary:
+
+```text
+dotnet test tests/Graphify.CSharp.Tests/Graphify.CSharp.Tests.csproj \
+  --configuration Release --framework net10.0 \
+  --filter 'FullyQualifiedName~Incremental'
+GRAPHIFY_CSHARP_WATCH_E2E_FRAMEWORK=net10.0 ./scripts/run-watcher-e2e.sh
+GRAPHIFY_CSHARP_WATCH_E2E_FRAMEWORK=net11.0 \
+  GRAPHIFY_CSHARP_WATCH_E2E_TARGET_FRAMEWORK=net10.0 \
+  ./scripts/run-watcher-e2e.sh
 ```
 
 ## Read the graph

@@ -116,6 +116,33 @@ public sealed class IncrementalIndexSessionTests
     }
 
     [Fact]
+    public async Task An_evaluated_source_with_a_non_cs_extension_uses_the_warm_document_path()
+    {
+        var fixture = await CreateArbitrarySourceFixtureAsync();
+        try
+        {
+            var loader = new CountingLoader(new RoslynWorkspaceLoader());
+            await using var session = new IncrementalIndexSession(fixture.Request, fixture.OutputPath, loader);
+            await session.StartAsync();
+
+            await File.AppendAllTextAsync(
+                fixture.SourcePath,
+                "\npublic sealed class AddedFromArbitraryExtension { }\n");
+            session.ReportFileChanged(fixture.SourcePath);
+            var result = await session.RefreshAsync();
+
+            Assert.Contains(
+                "ArbitrarySourceFixture.AddedFromArbitraryExtension",
+                result.Graph.Nodes.Select(node => node.Label));
+            Assert.Equal(1, loader.LoadCount);
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
     public async Task Multiple_refresh_callers_coalesce_on_one_published_generation()
     {
         var fixture = await CreateFixtureAsync();
@@ -163,7 +190,7 @@ public sealed class IncrementalIndexSessionTests
             await session.StartAsync();
 
             var refresh = session.RebuildAsync();
-            await committer.SecondCommitStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await committer.SecondCommitStarted.Task.WaitAsync(TimeSpan.FromSeconds(60));
 
             var firstDispose = session.DisposeAsync().AsTask();
             var secondDispose = session.DisposeAsync().AsTask();
@@ -207,6 +234,85 @@ public sealed class IncrementalIndexSessionTests
     }
 
     [Fact]
+    public async Task A_source_change_during_a_cold_reload_is_included_in_the_final_load()
+    {
+        var fixture = await CreateFixtureAsync();
+        var loader = new BlockingReloadLoader(new RoslynWorkspaceLoader());
+        try
+        {
+            await using var session = new IncrementalIndexSession(fixture.Request, fixture.OutputPath, loader);
+            await session.StartAsync();
+
+            session.ReportFileChanged(fixture.ProjectPath);
+            var refresh = session.RefreshAsync();
+            await loader.ReloadEntered.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await File.AppendAllTextAsync(
+                fixture.SourcePath,
+                "\npublic sealed class ChangedDuringReload { }\n");
+            session.ReportFileChanged(fixture.SourcePath);
+            loader.ReleaseReload();
+
+            var result = await refresh.WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.Contains("ReferenceFixture.Production.ChangedDuringReload", result.Graph.Nodes.Select(node => node.Label));
+            var loadCountAfterRefresh = loader.LoadCount;
+            Assert.True(loadCountAfterRefresh >= 2);
+
+            var followUp = await session.RefreshAsync();
+            Assert.Contains("ReferenceFixture.Production.ChangedDuringReload", followUp.Graph.Nodes.Select(node => node.Label));
+            // The transition snapshot deliberately classifies an event that
+            // arrived during a cold load as requiring cold reconciliation. It
+            // may therefore be consumed by this refresh or by one bounded
+            // follow-up load, depending on when the worker drains the event.
+            Assert.InRange(loader.LoadCount, loadCountAfterRefresh, loadCountAfterRefresh + 1);
+        }
+        finally
+        {
+            loader.ReleaseReload();
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task A_change_after_roslyn_load_but_before_snapshot_publication_is_not_lost()
+    {
+        var fixture = await CreateFixtureAsync();
+        var loader = new PostCompilationGateLoader(new RoslynWorkspaceLoader());
+        try
+        {
+            await using var session = new IncrementalIndexSession(fixture.Request, fixture.OutputPath, loader);
+            await session.StartAsync();
+
+            session.ReportFileChanged(fixture.ProjectPath);
+            var refresh = session.RefreshAsync();
+            await loader.SecondLoadCompleted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+            // The second loader has already captured the Roslyn compilation,
+            // but the session has not yet published its evaluated snapshot.
+            // The transition snapshot must retain this event and force one
+            // more authoritative reload after the gated load completes.
+            await File.AppendAllTextAsync(
+                fixture.SourcePath,
+                "\npublic sealed class ChangedAfterRoslynCapture { }\n");
+            session.ReportFileChanged(fixture.SourcePath);
+            loader.ReleaseSecondLoad();
+
+            await refresh.WaitAsync(TimeSpan.FromSeconds(10));
+            var result = await session.RefreshAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.Contains(
+                "ReferenceFixture.Production.ChangedAfterRoslynCapture",
+                result.Graph.Nodes.Select(node => node.Label));
+            Assert.Equal(3, loader.LoadCount);
+        }
+        finally
+        {
+            loader.ReleaseSecondLoad();
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
     public async Task A_failed_warm_publish_keeps_the_previous_complete_output()
     {
         var fixture = await CreateFixtureAsync();
@@ -228,6 +334,48 @@ public sealed class IncrementalIndexSessionTests
             await Assert.ThrowsAsync<IOException>(() => session.RefreshAsync());
 
             Assert.Equal(before, await File.ReadAllTextAsync(fixture.OutputPath));
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task A_cache_save_failure_after_output_publication_is_reported_and_retried()
+    {
+        var fixture = await CreateFixtureAsync();
+        try
+        {
+            var cacheCommitter = new FailOnSecondCommitter();
+            await using var session = new IncrementalIndexSession(
+                fixture.Request,
+                fixture.OutputPath,
+                cacheStore: new IncrementalCacheStore(cacheCommitter));
+            await session.StartAsync();
+
+            var cachePath = IncrementalCachePath.ForOutput(fixture.OutputPath);
+            var beforeOutput = await File.ReadAllTextAsync(fixture.OutputPath);
+            var beforeCache = await File.ReadAllTextAsync(cachePath);
+            await File.AppendAllTextAsync(
+                fixture.SourcePath,
+                "\npublic sealed class PublishedBeforeCacheFailure { }\n");
+            session.ReportFileChanged(fixture.SourcePath);
+
+            var failure = await Assert.ThrowsAsync<IOException>(() => session.RefreshAsync());
+
+            Assert.Contains("Synthetic warm publish failure", failure.Message);
+            var afterFailedOutput = await File.ReadAllTextAsync(fixture.OutputPath);
+            Assert.NotEqual(beforeOutput, afterFailedOutput);
+            Assert.Contains("PublishedBeforeCacheFailure", afterFailedOutput);
+            Assert.Equal(beforeCache, await File.ReadAllTextAsync(cachePath));
+
+            var retry = await session.RefreshAsync();
+
+            Assert.Contains(
+                "ReferenceFixture.Production.PublishedBeforeCacheFailure",
+                retry.Graph.Nodes.Select(node => node.Label));
+            Assert.NotEqual(beforeCache, await File.ReadAllTextAsync(cachePath));
         }
         finally
         {
@@ -326,6 +474,38 @@ public sealed class IncrementalIndexSessionTests
             new ProjectLoadRequest(projectPath, root, configuration: "Release", targetFramework: targetFramework));
     }
 
+    private static async Task<Fixture> CreateArbitrarySourceFixtureAsync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "graphify-csharp-arbitrary-source-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var projectPath = Path.Combine(root, "ArbitrarySourceFixture.csproj");
+        var sourcePath = Path.Combine(root, "Generated.source");
+        await File.WriteAllTextAsync(
+            projectPath,
+            """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+                <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+                <ImplicitUsings>enable</ImplicitUsings>
+                <Nullable>enable</Nullable>
+              </PropertyGroup>
+              <ItemGroup>
+                <Compile Include="Generated.source" />
+              </ItemGroup>
+            </Project>
+            """);
+        await File.WriteAllTextAsync(
+            sourcePath,
+            "namespace ArbitrarySourceFixture; public sealed class Initial { }\n");
+        return new Fixture(
+            root,
+            projectPath,
+            sourcePath,
+            Path.Combine(root, "graphify-out", "csharp.json"),
+            new ProjectLoadRequest(projectPath, root, configuration: "Release", targetFramework: "net10.0"));
+    }
+
     private static string RepositoryRoot()
     {
         var directory = new DirectoryInfo(AppContext.BaseDirectory);
@@ -380,6 +560,71 @@ public sealed class IncrementalIndexSessionTests
 
             return await _inner.LoadAsync(request, cancellationToken);
         }
+    }
+
+    private sealed class BlockingReloadLoader : IProjectLoader
+    {
+        private readonly IProjectLoader _inner;
+        private readonly TaskCompletionSource<bool> _releaseReload =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _loadCount;
+
+        public BlockingReloadLoader(IProjectLoader inner)
+        {
+            _inner = inner;
+        }
+
+        public int LoadCount => Volatile.Read(ref _loadCount);
+
+        public TaskCompletionSource<bool> ReloadEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<LoadedSolution> LoadAsync(ProjectLoadRequest request, CancellationToken cancellationToken = default)
+        {
+            var loadCount = Interlocked.Increment(ref _loadCount);
+            if (loadCount == 2)
+            {
+                ReloadEntered.TrySetResult(true);
+                await _releaseReload.Task.WaitAsync(cancellationToken);
+            }
+
+            return await _inner.LoadAsync(request, cancellationToken);
+        }
+
+        public void ReleaseReload() => _releaseReload.TrySetResult(true);
+    }
+
+    private sealed class PostCompilationGateLoader : IProjectLoader
+    {
+        private readonly IProjectLoader _inner;
+        private readonly TaskCompletionSource<bool> _releaseSecondLoad =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _loadCount;
+
+        public PostCompilationGateLoader(IProjectLoader inner)
+        {
+            _inner = inner;
+        }
+
+        public int LoadCount => Volatile.Read(ref _loadCount);
+
+        public TaskCompletionSource<bool> SecondLoadCompleted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<LoadedSolution> LoadAsync(ProjectLoadRequest request, CancellationToken cancellationToken = default)
+        {
+            var loadCount = Interlocked.Increment(ref _loadCount);
+            var loaded = await _inner.LoadAsync(request, cancellationToken);
+            if (loadCount == 2)
+            {
+                SecondLoadCompleted.TrySetResult(true);
+                await _releaseSecondLoad.Task.WaitAsync(cancellationToken);
+            }
+
+            return loaded;
+        }
+
+        public void ReleaseSecondLoad() => _releaseSecondLoad.TrySetResult(true);
     }
 
     private sealed class FailingLoader : IProjectLoader

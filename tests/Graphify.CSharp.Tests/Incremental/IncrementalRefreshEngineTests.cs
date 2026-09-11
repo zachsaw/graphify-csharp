@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Graphify.CSharp.Graphify;
 using Graphify.CSharp.Incremental;
@@ -79,6 +80,34 @@ public sealed class IncrementalRefreshEngineTests
     }
 
     [Fact]
+    public async Task A_changed_evaluated_import_invalidates_persisted_project_reuse()
+    {
+        var fixture = await CreateImportedConfigurationFixtureAsync();
+        try
+        {
+            var outputPath = Path.Combine(fixture.Root, "graphify-out", "csharp.json");
+            var engine = new IncrementalRefreshEngine();
+            var first = await engine.RefreshAsync(fixture.Request, outputPath);
+
+            await File.WriteAllTextAsync(
+                fixture.ImportPath,
+                "<Project><PropertyGroup><DefineConstants>$(DefineConstants);ENABLED_BY_IMPORT</DefineConstants></PropertyGroup></Project>");
+            var refreshed = await engine.RefreshAsync(fixture.Request, outputPath);
+
+            Assert.Equal(1, first.ExtractedProjectCount);
+            Assert.Equal(1, refreshed.ExtractedProjectCount);
+            Assert.Equal(0, refreshed.ReusedProjectCount);
+            Assert.Contains(
+                "ImportedConfigurationFixture.EnabledByImport",
+                refreshed.Graph.Nodes.Select(node => node.Label));
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
     public async Task Added_and_deleted_sources_invalidate_the_owning_project()
     {
         var fixture = await CreateFixtureAsync();
@@ -126,6 +155,52 @@ public sealed class IncrementalRefreshEngineTests
             await Assert.ThrowsAsync<IOException>(() => failingEngine.RefreshAsync(fixture.Request, outputPath));
 
             Assert.Equal(before, await File.ReadAllTextAsync(outputPath));
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task Removing_an_unreferenced_solution_project_publishes_the_reduced_graph()
+    {
+        var fixture = await CreateIndependentSolutionFixtureAsync();
+        try
+        {
+            var outputPath = Path.Combine(fixture.Root, "graphify-out", "csharp.json");
+            var engine = new IncrementalRefreshEngine();
+            var first = await engine.RefreshAsync(fixture.Request, outputPath, rebuild: true);
+
+            Assert.Contains("B.OnlyInB", first.Graph.Nodes.Select(node => node.Label));
+            Assert.Contains("B.OnlyInB", await File.ReadAllTextAsync(outputPath), StringComparison.Ordinal);
+
+            await File.WriteAllTextAsync(
+                fixture.SolutionPath,
+                "<Solution><Project Path=\"A/A.csproj\" /></Solution>");
+            var removed = await engine.RefreshAsync(fixture.Request, outputPath);
+
+            Assert.DoesNotContain("B.OnlyInB", removed.Graph.Nodes.Select(node => node.Label));
+            Assert.True(removed.OutputRepublished);
+            Assert.DoesNotContain("B.OnlyInB", await File.ReadAllTextAsync(outputPath), StringComparison.Ordinal);
+            Assert.Equal(removed.OutputDigest, IncrementalHashing.Sha256File(outputPath));
+
+            var cache = await new IncrementalCacheStore().LoadAsync(
+                IncrementalCachePath.ForOutput(outputPath),
+                new RefreshRequestIdentity(
+                    fixture.Request.InputPath,
+                    fixture.Request.RepositoryRoot,
+                    fixture.Request.Configuration,
+                    fixture.Request.TargetFramework));
+            Assert.NotNull(cache.State);
+            Assert.DoesNotContain(cache.State!.Manifest, entry => entry.Project.Key.Contains("B/B.csproj", StringComparison.Ordinal));
+
+            var clean = await engine.RefreshAsync(fixture.Request, outputPath);
+            Assert.DoesNotContain("B.OnlyInB", clean.Graph.Nodes.Select(node => node.Label));
+            Assert.DoesNotContain("B.OnlyInB", await File.ReadAllTextAsync(outputPath), StringComparison.Ordinal);
+            Assert.False(clean.OutputRepublished);
+            Assert.Equal(0, clean.ExtractedProjectCount);
+            Assert.Equal(1, clean.ReusedProjectCount);
         }
         finally
         {
@@ -188,6 +263,142 @@ public sealed class IncrementalRefreshEngineTests
                 targetFramework: "net10.0"));
     }
 
+    private static async Task<ImportedConfigurationFixture> CreateImportedConfigurationFixtureAsync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "graphify-csharp-refresh-import-tests", Guid.NewGuid().ToString("N"));
+        var buildDirectory = Path.Combine(root, "build");
+        Directory.CreateDirectory(buildDirectory);
+        var projectPath = Path.Combine(root, "ImportedConfigurationFixture.csproj");
+        var importPath = Path.Combine(buildDirectory, "Custom.props");
+        await File.WriteAllTextAsync(
+            projectPath,
+            """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+                <ImplicitUsings>enable</ImplicitUsings>
+                <Nullable>enable</Nullable>
+              </PropertyGroup>
+              <Import Project="build/Custom.props" />
+            </Project>
+            """);
+        await File.WriteAllTextAsync(importPath, "<Project />");
+        await File.WriteAllTextAsync(
+            Path.Combine(root, "Conditional.cs"),
+            """
+            #if ENABLED_BY_IMPORT
+            namespace ImportedConfigurationFixture;
+            public sealed class EnabledByImport { }
+            #endif
+            """);
+        return new ImportedConfigurationFixture(
+            root,
+            importPath,
+            new ProjectLoadRequest(projectPath, root, configuration: "Release", targetFramework: "net10.0"));
+    }
+
+    private static async Task<IndependentSolutionFixture> CreateIndependentSolutionFixtureAsync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "graphify-csharp-refresh-solution-tests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var projectAPath = Path.Combine(root, "A", "A.csproj");
+            var projectBPath = Path.Combine(root, "B", "B.csproj");
+            var solutionPath = Path.Combine(root, "Independent.slnx");
+            Directory.CreateDirectory(Path.GetDirectoryName(projectAPath)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(projectBPath)!);
+
+            const string project = "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>";
+            await File.WriteAllTextAsync(projectAPath, project);
+            await File.WriteAllTextAsync(projectBPath, project);
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "A", "Code.cs"),
+                "namespace A; public sealed class OnlyInA { }\n");
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "B", "Code.cs"),
+                "namespace B; public sealed class OnlyInB { }\n");
+            await File.WriteAllTextAsync(
+                solutionPath,
+                "<Solution><Project Path=\"A/A.csproj\" /><Project Path=\"B/B.csproj\" /></Solution>");
+
+            var restoreInfo = new ProcessStartInfo
+            {
+                FileName = "dotnet",
+                WorkingDirectory = root,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            restoreInfo.ArgumentList.Add("restore");
+            restoreInfo.ArgumentList.Add(solutionPath);
+            restoreInfo.ArgumentList.Add("--nologo");
+            restoreInfo.ArgumentList.Add("--disable-build-servers");
+            RemoveInheritedMsBuildEnvironment(restoreInfo);
+
+            using var restore = Process.Start(restoreInfo);
+            if (restore is null)
+            {
+                throw new InvalidOperationException("Could not start dotnet restore for the independent solution fixture.");
+            }
+
+            var standardOutput = restore.StandardOutput.ReadToEndAsync();
+            var standardError = restore.StandardError.ReadToEndAsync();
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            try
+            {
+                await restore.WaitForExitAsync(timeout.Token);
+            }
+            catch (OperationCanceledException) when (timeout.IsCancellationRequested)
+            {
+                if (!restore.HasExited)
+                {
+                    restore.Kill(entireProcessTree: true);
+                }
+
+                await restore.WaitForExitAsync();
+                throw new TimeoutException(
+                    $"dotnet restore timed out for the independent solution fixture after 60 seconds. " +
+                    $"stdout: {await standardOutput}\nstderr: {await standardError}");
+            }
+
+            var output = await standardOutput;
+            var error = await standardError;
+            if (restore.ExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"dotnet restore failed for the independent solution fixture with exit code {restore.ExitCode}. " +
+                    $"stdout: {output}\nstderr: {error}");
+            }
+
+            return new IndependentSolutionFixture(
+                root,
+                solutionPath,
+                new ProjectLoadRequest(
+                    solutionPath,
+                    root,
+                    configuration: "Release",
+                    targetFramework: "net10.0"));
+        }
+        catch
+        {
+            DeleteTemporaryDirectory(root);
+            throw;
+        }
+    }
+
+    private static void RemoveInheritedMsBuildEnvironment(ProcessStartInfo startInfo)
+    {
+        foreach (var key in startInfo.Environment.Keys.ToArray())
+        {
+            if (key.Equals("MSBUILD_EXE_PATH", StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("MSBuildSDKsPath", StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("MSBuildExtensionsPath", StringComparison.OrdinalIgnoreCase))
+            {
+                startInfo.Environment.Remove(key);
+            }
+        }
+    }
+
     private static void DeleteTemporaryDirectory(string path)
     {
         if (Directory.Exists(path))
@@ -201,6 +412,16 @@ public sealed class IncrementalRefreshEngineTests
         string AppDirectory,
         string LibrarySourcePath,
         string AppSourcePath,
+        ProjectLoadRequest Request);
+
+    private sealed record ImportedConfigurationFixture(
+        string Root,
+        string ImportPath,
+        ProjectLoadRequest Request);
+
+    private sealed record IndependentSolutionFixture(
+        string Root,
+        string SolutionPath,
         ProjectLoadRequest Request);
 
     private sealed class ThrowingCommitter : IAtomicCacheCommitter

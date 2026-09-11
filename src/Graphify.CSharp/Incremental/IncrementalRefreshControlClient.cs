@@ -21,7 +21,8 @@ internal sealed class IncrementalRefreshControlClient
 
         var outputPathIdentity = IncrementalRefreshControlChannel.OutputPathIdentity(outputPath);
         var pipeName = IncrementalRefreshControlChannel.ForRequest(request, outputPath);
-        var leasePath = WatcherLease.ForOutput(outputPath, request);
+        var matchingLeasePath = WatcherLease.ForOutput(outputPath, request);
+        var outputLeasePath = OutputDestinationLease.ForOutput(outputPath);
         var firstAttempt = true;
         while (true)
         {
@@ -34,10 +35,10 @@ internal sealed class IncrementalRefreshControlClient
                         request.Digest,
                         outputPathIdentity,
                         rebuild,
-                        cancellationToken)
+                    cancellationToken)
                     .ConfigureAwait(false);
             }
-            catch (IOException) when (WatcherLease.IsHeld(leasePath))
+            catch (IOException) when (WatcherLease.IsHeld(matchingLeasePath))
             {
                 await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false);
                 firstAttempt = false;
@@ -69,19 +70,21 @@ internal sealed class IncrementalRefreshControlClient
                 return response;
             }
 
-            if (!firstAttempt && !WatcherLease.IsHeld(leasePath))
+            if (!firstAttempt && !WatcherLease.IsHeld(matchingLeasePath))
             {
+                ThrowIfOutputIsOwnedByAnotherProcess(outputPath, outputLeasePath);
                 return null;
             }
 
             firstAttempt = false;
-            if (!WatcherLease.IsHeld(leasePath))
+            if (!WatcherLease.IsHeld(matchingLeasePath))
             {
                 // Give a watcher that is just acquiring its lease one short
                 // opportunity before falling back to a standalone refresh.
                 await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false);
-                if (!WatcherLease.IsHeld(leasePath))
+                if (!WatcherLease.IsHeld(matchingLeasePath))
                 {
+                    ThrowIfOutputIsOwnedByAnotherProcess(outputPath, outputLeasePath);
                     return null;
                 }
             }
@@ -89,6 +92,15 @@ internal sealed class IncrementalRefreshControlClient
             {
                 await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken).ConfigureAwait(false);
             }
+        }
+    }
+
+    private static void ThrowIfOutputIsOwnedByAnotherProcess(string outputPath, string outputLeasePath)
+    {
+        if (OutputDestinationLease.IsHeld(outputLeasePath))
+        {
+            throw new InvalidOperationException(
+                $"The output destination '{IncrementalPaths.CanonicalAbsolutePath(outputPath)}' is already owned by another Graphify C# process. Use a different output path or stop the existing watcher.");
         }
     }
 

@@ -80,7 +80,9 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
                 analyzedProjects,
                 request.RepositoryRoot,
                 diagnostics,
-                opened.Resources);
+                opened.Resources,
+                request,
+                opened.TransientRoots);
         }
         catch
         {
@@ -132,7 +134,8 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
                 remappedSolution.Projects.ToArray(),
                 generated.ProjectPath,
                 request.InputPath,
-                generated);
+                generated,
+                [generated.TemporaryDirectory]);
         }
         catch
         {
@@ -154,6 +157,7 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
         IReadOnlyList<Project> Projects,
         string PrimaryProjectPath,
         string? LogicalProjectPath,
-        IDisposable? Resources);
+        IDisposable? Resources,
+        IReadOnlyList<string>? TransientRoots = null);
 
 }

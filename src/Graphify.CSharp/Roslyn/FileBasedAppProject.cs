@@ -24,6 +24,8 @@ internal sealed class FileBasedAppProject : IDisposable
 
     public string ProjectPath { get; }
 
+    public string TemporaryDirectory => _temporaryDirectory;
+
     public static async Task<FileBasedAppProject> CreateAsync(
         string inputPath,
         string? targetFramework,

@@ -32,6 +32,11 @@ internal sealed class IncrementalRefreshEngine
         ArgumentNullException.ThrowIfNull(request);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
 
+        // The engine is also used by the one-shot CLI path and must protect
+        // the complete cache/load/extract/publish/save transaction. Watchers
+        // hold the same destination lease for their lifetime.
+        using var outputLease = OutputDestinationLease.Acquire(outputPath);
+
         var requestIdentity = new RefreshRequestIdentity(
             request.InputPath,
             request.RepositoryRoot,
@@ -49,6 +54,11 @@ internal sealed class IncrementalRefreshEngine
         var fingerprints = new IncrementalProjectFingerprintBuilder().BuildAll(solution);
         var dirtyProjectKeys = DetermineDirtyProjects(previousState, fingerprints, rebuild);
         var currentProjectKeys = fingerprints.Keys.ToHashSet(StringComparer.Ordinal);
+        var projectMembershipChanged = previousState is null
+            || !previousState.Manifest
+                .Select(entry => entry.Project.Key)
+                .ToHashSet(StringComparer.Ordinal)
+                .SetEquals(currentProjectKeys);
         var reusableContributions = previousState?.Contributions
             .Where(contribution => currentProjectKeys.Contains(contribution.Project.Key))
             .ToDictionary(contribution => contribution.Project.Key, StringComparer.Ordinal)
@@ -58,7 +68,9 @@ internal sealed class IncrementalRefreshEngine
         var globalDiagnostics = Array.Empty<string>();
         var extractedProjectCount = dirtyProjectKeys.Count;
         var reusedProjectCount = 0;
-        if (dirtyProjectKeys.Count == 0 && previousState is not null)
+        if (dirtyProjectKeys.Count == 0
+            && !projectMembershipChanged
+            && previousState is not null)
         {
             contributions = previousState.Contributions
                 .Where(contribution => currentProjectKeys.Contains(contribution.Project.Key))
@@ -122,15 +134,18 @@ internal sealed class IncrementalRefreshEngine
             .OrderBy(diagnostic => diagnostic, StringComparer.Ordinal)
             .ToArray();
         var fullOutputPath = Path.GetFullPath(outputPath);
+        var outputNeedsPublication = rebuild
+            || dirtyProjectKeys.Count != 0
+            || projectMembershipChanged;
         var outputDigest = await PublishIfNeededAsync(
             fullOutputPath,
             graph,
             diagnostics,
             previousState,
-            dirtyProjectKeys.Count != 0 || rebuild,
+            outputNeedsPublication,
             cancellationToken).ConfigureAwait(false);
 
-        var generation = BuildGeneration(previousState, dirtyProjectKeys.Count != 0 || rebuild);
+        var generation = BuildGeneration(previousState, outputNeedsPublication);
         var manifest = contributions.Select(contribution => new IncrementalManifestEntry(
                 contribution.Fingerprint,
                 contribution.ContributionKey))
@@ -151,7 +166,7 @@ internal sealed class IncrementalRefreshEngine
             cacheResult.Status,
             extractedProjectCount,
             reusedProjectCount,
-            outputRepublished: dirtyProjectKeys.Count != 0 || rebuild || !IsPublishedOutputCurrent(previousState, fullOutputPath),
+            outputRepublished: outputNeedsPublication || !IsPublishedOutputCurrent(previousState, fullOutputPath),
             generation);
     }
 

@@ -1,8 +1,9 @@
 # Incremental indexing and refresh design
 
 > Status: the deterministic cache, warm worker, local refresh protocol, and
-> resilient watcher are implemented on `feature/incremental-indexing`. Release
-> hardening and the documented lifecycle/performance gates are complete.
+> resilient watcher are implemented. The watcher policy is intentionally
+> conservative at structural and dependency boundaries; the test matrix below
+> is the release-hardening contract.
 
 ## Decision
 
@@ -38,6 +39,12 @@ background queue before a user asks for a refresh, but it does not publish a
 Graphify-visible JSON update merely because a file changed. JSON publication is
 controlled by a refresh request.
 
+The same rule applies to automatic recovery. Recovery may cold-load the current
+workspace and update the in-memory graph so trust can be restored, but it does
+not publish JSON or advance the public generation. A later explicit refresh
+publishes that recovered state. Initial startup is the exception: it must
+publish the first complete document before the watcher reports ready.
+
 This gives us both modes without separate extraction implementations:
 
 ```text
@@ -62,8 +69,9 @@ only when the surrounding session remains healthy.
 The watcher combines four mechanisms:
 
 - `FileSystemWatcher` instances use the narrowest practical `NotifyFilter` and
-  a bounded native buffer. Their callbacks do only path normalization and a
-  non-blocking write to the worker queue.
+  a bounded native buffer. Their OS callbacks only enqueue raw typed paths; a
+  separate dispatch worker resolves the entry type, applies the input policy,
+  and invokes the host callback.
 - A bounded in-process event queue keeps callbacks off Roslyn and extraction
   work. If the queue is full, the event is not silently discarded: the session
   is marked untrusted and schedules a cold reconciliation.
@@ -75,8 +83,8 @@ The watcher combines four mechanisms:
 - The `Error` handler, missing watch root, failed backup scan, or uncertain
   event boundary tears down the watcher and invalidates the session. The
   worker scans the current roots, recreates the subscriptions, and performs a
-  cold reconciliation before declaring the session healthy again. No user
-  files are deleted as part of recovery.
+  nonpublishing cold reconciliation before declaring the session healthy again.
+  No user files are deleted as part of recovery.
 
 The backup scan is deliberately metadata-first so it does not turn every
 healthy refresh into a full content hash or Roslyn pass. Normal editor saves,
@@ -93,6 +101,43 @@ There is no need for a third-party watcher wrapper. The reliability comes from
 the queue, explicit error/restart handling, and reconciliation policy around
 the .NET primitive. Time-based coalescing is optional for background work and
 never substitutes for recording an event or completing a reconciliation.
+
+## Input scope and filtering
+
+MSBuild and Roslyn, not `.gitignore`, define the semantic input set. After each
+evaluated load, the worker publishes an immutable input snapshot containing
+exact source documents, additional documents, analyzer configuration,
+references, evaluated project/build imports, project/solution inputs, and
+relevant configuration paths. Event callbacks only perform canonical path
+comparison against that snapshot; they do not evaluate MSBuild, read source
+content, enumerate directories, or start subprocesses.
+
+Inventory traversal prunes conventional noise directories (`obj`, `bin`,
+`.git`, `node_modules`, `.e2e`, `graphify-out`, `.vs`, `TestResults`, and
+`artifacts`). Exact evaluated paths are scanned separately before traversal, so
+an explicitly compiled `obj/Generated.cs` or an arbitrary-extension additional
+file remains visible without recursively scanning all build output. A root
+level custom output is ignored as one exact path rather than hiding its sibling
+source files; the cache directory is ignored as a tool-owned subtree.
+
+An existing evaluated source document changed in place is the only warm
+document mutation. Creation, deletion, rename, directory changes, project
+membership changes, and non-source input changes request a fresh MSBuild
+workspace evaluation; the session never invents a `Document` from directory
+proximity. This preserves conditional `Compile`, `Compile Remove`, disabled
+default globs, linked files, and nested project boundaries. Exact external
+non-source dependencies are protected by the backup scan; live external roots
+are added for linked sources and additional inputs where a low-latency event
+source is useful, but SDK/NuGet trees are never recursively watched.
+
+When evaluated dependency discovery cannot be completed, the tool remains
+usable but marks the input snapshot incomplete and emits a diagnostic. A
+foreground refresh takes an authoritative cold path and retries discovery
+instead of claiming that the incomplete warm view is current. If discovery
+remains incomplete, the output retains the diagnostic so an agent can see the
+freshness limitation. Custom target outputs absent from design-time evaluation
+remain outside the supported discovery boundary and require the producing step
+followed by `--rebuild`.
 
 ## Public commands and ownership
 
@@ -126,9 +171,31 @@ reported for a file that the watcher did not write. Cache and lease paths are
 output-specific as well, so distinct output files in one directory do not
 race through shared incremental state.
 
-Only the watcher or a standalone refresh holding the refresh lock may update
-the cache and output. Readers can continue to read the previous complete
-document while a new one is being built.
+A separate destination lease is keyed only by the canonical output path. A
+watcher acquires that OS-level file lease before it loads Roslyn and holds it
+for its lifetime. A standalone refresh acquires the same lease for its complete
+cache/load/extract/publish/save transaction. This makes publication ownership
+independent of analysis identity and closes the same-output/different-
+configuration race.
+
+The destination sidecar retains the output filename as a filesystem path
+component instead of hashing its spelling. Therefore case-equivalent output
+and parent-directory aliases share the same OS lease on case-insensitive
+volumes while remaining independent on case-sensitive volumes. If an alias
+cannot attach to the matching control endpoint, the held destination is
+rejected safely rather than written through a second cache identity.
+
+If another process already owns the destination, a request that cannot attach
+to that process's matching control channel fails with a clear ownership
+conflict. It never performs a standalone refresh against that output. Use a
+different output path or stop the existing watcher. Matching requests continue
+to use the control channel; different output paths remain independent.
+
+The lease file itself is stable and may remain after a process exits. An
+unheld lease file is harmless because ownership is determined by the OS handle,
+not by file existence. Keeping the path stable also prevents late cleanup from
+deleting a successor's newly acquired lock. Readers can continue to read the
+previous complete document while a new one is being built.
 
 ## Persistent state
 
@@ -143,14 +210,15 @@ The watcher may use ignored internal state alongside it:
 ```text
 graphify-out/.graphify-csharp/
     manifest-<output-path-identity>.json
-    projects/<stable-project-key>.json
-    session.json
+    output-<output-file-name>.lock
+    watch-<request-digest>-<output-path-identity>.lock
 ```
 
-The internal project files are contribution caches, not public Graphify shard
-files. They contain enough information to reconstruct the complete document,
-including declarations, edges, diagnostics, provenance, and the contribution
-identity.
+The single manifest contains the persisted project/TFM contributions; it is an
+internal cache, not a public Graphify shard file. It contains enough domain data
+to reconstruct the complete document, including declarations, edges,
+diagnostics, provenance, and each contribution identity. Roslyn workspace
+objects are never persisted.
 
 The manifest records at least:
 
@@ -186,6 +254,27 @@ watcher must process any affected work before reporting the session as ready.
 If it cannot establish a trustworthy event boundary, it repeats the cold
 reconciliation instead.
 
+Every later cold load has an explicit transition boundary. Before Roslyn
+reevaluates the project, the session publishes a bootstrap snapshot that keeps
+the current logical input roots conservative. The host keeps the watcher set
+that is currently known to be viable; it does not recreate obsolete external
+roots merely because they appeared in the previous evaluated snapshot. An
+uncertain in-scope event during this interval invalidates trust and is folded
+into cold recovery rather than being treated as a warm document edit.
+
+After the load succeeds, the evaluated input snapshot is published before
+cataloging and semantic extraction. The host then establishes any newly
+discovered coverage. A scan captured against an old or transitional snapshot
+is discarded. The post-load inventory is accepted only when it matches the
+current evaluated snapshot; all differences, including changes to existing
+entries and newly observed exact inputs, are reconciled through the serialized
+  cold path before the new baseline is accepted. During automatic recovery,
+  this catch-up is nonpublishing and leaves an in-memory publication obligation
+  for the next explicit refresh. During initial startup, it may publish so the
+  readiness barrier represents the complete first document. This prevents an
+  input that changed during the load/coverage gap from becoming a clean but
+  stale baseline.
+
 ### Ready and watching
 
 Once the initial complete graph has been published, the session enters
@@ -195,7 +284,8 @@ canonical path or project.
 
 There is no correctness dependency on a time-based debounce. Background work
 may coalesce project requests for efficiency, but events are recorded
-immediately and a manual refresh bypasses any waiting period.
+immediately and a manual refresh bypasses debounce; it still waits for any
+active trust recovery before returning a successful result.
 
 ### Stopping or losing trust
 
@@ -208,7 +298,14 @@ restart always creates a new session and follows the same rule. The next
 session must start with a cold reconciliation.
 
 The previous JSON remains a valid last-known snapshot while a replacement is
-being built, but it must not be reported as the result of the new refresh.
+being built. Automatic recovery does not replace it; it only prepares trusted
+in-memory state. An explicit refresh must publish that state before reporting
+success.
+
+If a load fails after the transition snapshot is published, recovery resets
+inventory under the stable base/ancestor coverage and retries the cold load.
+This prevents a failed transition from leaving the backup scanner spinning on
+an untrusted snapshot.
 
 ## Invalidation granularity
 
@@ -266,15 +363,16 @@ success still means that its requested generation was fully published.
 ## Work priority
 
 Background indexing and foreground refresh use one worker-owned scheduler.
-Foreground work is promoted ahead of pending background work, and several
-requests for the same generation coalesce.
+Foreground commands are drained ahead of pending background work, and several
+requests for the same generation coalesce. The current implementation waits
+for an already-running background reconciliation to reach a safe command
+boundary; it does not preempt a Roslyn operation midway through a project.
 
-The implementation should use logical scheduler priority rather than depend on
-`Thread.Priority`, because .NET tasks may migrate between threads and thread
-priority behavior differs by operating system. Safe yield and cancellation
-points belong between project/TFM units. If a project is already in a Roslyn
-operation when a manual request arrives, it normally finishes that project and
-promotes the remaining work instead of throwing away useful work.
+This logical scheduling policy does not depend on `Thread.Priority`, because
+.NET tasks may migrate between threads and thread priority behavior differs by
+operating system. Cancellation and safe handoff points remain at project/TFM
+boundaries. If a project is already in a Roslyn operation when a manual request
+arrives, that operation finishes before the foreground command is handled.
 
 The final serialization and output commit are part of the foreground barrier.
 An indexed contribution without a published JSON document does not satisfy a
@@ -288,15 +386,23 @@ manual refresh request.
 - creates a fresh staging cache;
 - extracts every project/TFM in the configured scope;
 - validates deterministic output; and
-- atomically swaps in the new cache and complete JSON only after success.
+- atomically replaces the complete JSON and cache artifacts independently.
 
-The existing output and cache remain available if the rebuild fails. This
-operation invalidates the enricher's cache only; it does not delete unrelated
-NuGet, MSBuild, or SDK caches.
+Each artifact is staged and validated before its own atomic replacement. The
+JSON and cache are separate files, so they do not have one cross-file atomic
+commit: a failure before JSON replacement leaves the previous document in
+place, while a failure after JSON replacement can leave a complete new JSON
+document alongside the previous cache. The command reports the failure and a
+later refresh or `--rebuild` retries the pending work. This operation
+invalidates the enricher's cache only; it does not delete unrelated NuGet,
+MSBuild, or SDK caches.
 
-If a refresh is requested without a healthy watcher, the standalone process
-performs the cold reconciliation described above. It must not claim a warm
-incremental refresh based solely on a persisted last-update timestamp.
+If a refresh is requested without a matching live watcher, the standalone
+process performs the cold reconciliation described above after acquiring the
+destination lease. A matching watcher is waited on through its control channel;
+an occupied destination owned by a different request fails with an ownership
+conflict. The command must not claim a warm incremental refresh based solely on
+a persisted last-update timestamp.
 
 ## Output consistency and failure handling
 
@@ -313,10 +419,15 @@ The following states are distinct:
   reconciliation.
 
 A manual refresh succeeds only when its requested generation is both indexed
-and published. A failed refresh leaves the prior complete JSON untouched. A
-background indexing failure marks the warm session untrusted and triggers cold
-recovery; a foreground failure leaves the affected work pending for a retry or
-an explicit `--rebuild`.
+and published while the watcher’s delivery-trust epoch is still valid. A
+delivery loss racing with extraction causes the request to wait for recovery
+and retry rather than return the pre-recovery graph. A failed refresh never
+leaves truncated or invalid JSON: failures before JSON replacement leave the
+prior complete document untouched, while a later cache-save failure may leave
+a complete new JSON document with the prior cache and still reports failure.
+The affected work remains pending for a retry or an explicit `--rebuild`. A
+background indexing failure marks the warm session untrusted and triggers
+nonpublishing cold recovery.
 
 ## Graphify compatibility
 
@@ -340,7 +451,8 @@ real project:
   a second load;
 - a clean warm refresh returns the existing published generation immediately;
 - background indexing and a manual refresh coalesce on one generation;
-- a source change updates the published JSON only after manual refresh;
+- a source change, including one observed during automatic recovery, updates
+  the published JSON only after manual refresh;
 - events arriving during refresh remain pending for the next generation;
 - watcher shutdown and restart perform a cold reconciliation;
 - watcher errors and event overflow force a cold reconciliation;
@@ -350,6 +462,9 @@ real project:
   delivered;
 - `--rebuild` ignores valid cached contributions;
 - a failed refresh never leaves truncated or invalid JSON; and
+- a different configuration, input, or target framework cannot overwrite an
+  output owned by a live watcher, while ownership can be released and
+  reacquired safely; and
 - repeated equivalent refreshes produce byte-identical complete documents.
 
 The performance measurement should separate workspace startup, Roslyn

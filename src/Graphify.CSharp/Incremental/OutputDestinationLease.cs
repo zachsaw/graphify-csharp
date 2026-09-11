@@ -1,11 +1,14 @@
 namespace Graphify.CSharp.Incremental;
 
-internal sealed class WatcherLease : IDisposable
+/// <summary>
+/// Owns one publication destination across all Graphify C# processes.
+/// </summary>
+internal sealed class OutputDestinationLease : IDisposable
 {
     private readonly FileStream _stream;
     private int _disposed;
 
-    private WatcherLease(string path, FileStream stream)
+    private OutputDestinationLease(string path, FileStream stream)
     {
         Path = path;
         _stream = stream;
@@ -13,18 +16,17 @@ internal sealed class WatcherLease : IDisposable
 
     public string Path { get; }
 
-    public static WatcherLease Acquire(string outputPath, RefreshRequestIdentity request)
+    public static OutputDestinationLease Acquire(string outputPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
-        ArgumentNullException.ThrowIfNull(request);
 
-        var path = ForOutput(outputPath, request);
+        var path = ForOutput(outputPath);
         var directory = System.IO.Path.GetDirectoryName(path)
-            ?? throw new InvalidOperationException($"Watcher lease path '{path}' has no parent directory.");
+            ?? throw new InvalidOperationException($"Output lease path '{path}' has no parent directory.");
         Directory.CreateDirectory(directory);
         try
         {
-            return new WatcherLease(
+            return new OutputDestinationLease(
                 path,
                 new FileStream(
                     path,
@@ -37,29 +39,44 @@ internal sealed class WatcherLease : IDisposable
         catch (IOException exception)
         {
             throw new InvalidOperationException(
-                "A matching Graphify C# watcher is already running for this input identity.",
+                $"The output destination '{IncrementalPaths.CanonicalAbsolutePath(outputPath)}' is already owned by another Graphify C# process.",
                 exception);
         }
         catch (UnauthorizedAccessException exception)
         {
             throw new InvalidOperationException(
-                $"The watcher could not acquire its local lease at '{path}'.",
+                $"The output destination '{IncrementalPaths.CanonicalAbsolutePath(outputPath)}' could not be leased.",
                 exception);
         }
     }
 
-    public static string ForOutput(string outputPath, RefreshRequestIdentity request)
+    public static string ForOutput(string outputPath)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
-        ArgumentNullException.ThrowIfNull(request);
+        var fullOutputPath = System.IO.Path.GetFullPath(outputPath);
+        var outputDirectory = System.IO.Path.GetDirectoryName(fullOutputPath)
+            ?? throw new InvalidOperationException("The output path has no parent directory.");
+        var outputFileName = System.IO.Path.GetFileName(fullOutputPath);
+        if (string.IsNullOrWhiteSpace(outputFileName))
+        {
+            throw new InvalidOperationException($"Output path '{outputPath}' has no file name.");
+        }
+
+        // Keep the destination spelling in the filesystem path rather than
+        // hashing it. The filesystem then performs the correct equivalence
+        // check: csharp.json and CSHARP.json share this sidecar on a
+        // case-insensitive volume, while remaining independent on a
+        // case-sensitive volume. The same applies to parent-directory aliases
+        // resolved by the OS (including supported symlinked parent paths).
         return System.IO.Path.Combine(
-            System.IO.Path.GetDirectoryName(IncrementalCachePath.ForOutput(outputPath))
-                ?? throw new InvalidOperationException("The output path has no cache directory."),
-            $"watch-{request.Digest}-{IncrementalRefreshControlChannel.OutputPathIdentity(outputPath)}.lock");
+            outputDirectory,
+            ".graphify-csharp",
+            $"output-{outputFileName}.lock");
     }
 
     public static bool IsHeld(string path)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
         if (!File.Exists(path))
         {
             return false;

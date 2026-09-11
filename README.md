@@ -138,46 +138,109 @@ command-line tools can inspect it without another service or database.
 
 ### Example graph structure
 
-This abbreviated excerpt shows the actual output fields; IDs and the semantic
-key are shortened here for readability:
+This is a real excerpt from this repository's generated
+`graphify-out/csharp.json`; unrelated nodes and edges are omitted. The IDs are
+the join keys used by edges, while each node carries the resolved C# identity,
+project, and source location:
 
 ```json
 {
   "nodes": [
     {
-      "id": "cs_<stable-id>",
-      "label": "OrderService.Submit",
+      "id": "cs_006a5f805861ed82717ee15f417e18b40998b5133b4db5eb4ed29b7383f71c28",
+      "label": "Graphify.CSharp.Domain.ProjectIdentity.NormalizePathForRepository(string, string)",
+      "file_type": "code",
+      "source_file": "src/Graphify.CSharp/Domain/ProjectIdentity.cs",
+      "source_location": "L28:C27",
+      "source_locations": [
+        {
+          "file": "src/Graphify.CSharp/Domain/ProjectIdentity.cs",
+          "line": 28,
+          "column": 27
+        }
+      ],
       "properties": {
+        "declaration_kind": "ordinary",
+        "namespace": "Graphify.CSharp.Domain",
         "node_kind": "method",
-        "symbol_key": "csharp/v1|project=...|tfm=net10.0|..."
+        "project": "src/Graphify.CSharp/Graphify.CSharp.csproj",
+        "symbol_key": "csharp/v1|project=src/Graphify.CSharp/Graphify.CSharp.csproj|tfm=net10.0|symbol=method|namespace=Graphify.CSharp.Domain|type=ProjectIdentity|member=|name=NormalizePathForRepository|arity=0|params=string%3Bstring|return=string|discriminator="
+      }
+    },
+    {
+      "id": "cs_57edd93acd8da1c9cc9dce6dd7ecb8050bfcb1019df39966b10b23f9b78d405d",
+      "label": "Graphify.CSharp.Domain.CanonicalText.NormalizePath(string)",
+      "file_type": "code",
+      "source_file": "src/Graphify.CSharp/Domain/CanonicalText.cs",
+      "source_location": "L46:C26",
+      "source_locations": [
+        {
+          "file": "src/Graphify.CSharp/Domain/CanonicalText.cs",
+          "line": 46,
+          "column": 26
+        }
+      ],
+      "properties": {
+        "declaration_kind": "ordinary",
+        "namespace": "Graphify.CSharp.Domain",
+        "node_kind": "method",
+        "project": "src/Graphify.CSharp/Graphify.CSharp.csproj",
+        "symbol_key": "csharp/v1|project=src/Graphify.CSharp/Graphify.CSharp.csproj|tfm=net10.0|symbol=method|namespace=Graphify.CSharp.Domain|type=CanonicalText|member=|name=NormalizePath|arity=0|params=string|return=string|discriminator="
       }
     }
   ],
   "edges": [
     {
-      "source": "cs_<caller-id>",
-      "target": "cs_<stable-id>",
+      "source": "cs_006a5f805861ed82717ee15f417e18b40998b5133b4db5eb4ed29b7383f71c28",
+      "target": "cs_57edd93acd8da1c9cc9dce6dd7ecb8050bfcb1019df39966b10b23f9b78d405d",
       "relation": "calls",
-      "confidence": "EXTRACTED"
+      "confidence": "EXTRACTED",
+      "confidence_score": 1,
+      "source_file": "src/Graphify.CSharp/Domain/ProjectIdentity.cs",
+      "source_location": "L35:C20",
+      "source_locations": [
+        {
+          "file": "src/Graphify.CSharp/Domain/ProjectIdentity.cs",
+          "line": 35,
+          "column": 20
+        },
+        {
+          "file": "src/Graphify.CSharp/Domain/ProjectIdentity.cs",
+          "line": 41,
+          "column": 16
+        }
+      ],
+      "weight": 1
     }
   ]
 }
 ```
 
+Here, the directed `calls` edge means that
+`ProjectIdentity.NormalizePathForRepository(string, string)` calls the exact
+`CanonicalText.NormalizePath(string)` symbol. The edge does not depend on a
+method name or filename match: the `source` and `target` IDs resolve to nodes
+whose `symbol_key` contains the compiler-resolved signature. The same document
+uses relations such as `references` and `implements`, so an agent can inspect
+callers, type relationships, and other declaration usage from the same graph.
+IDs and source locations naturally change when the source changes.
+
 List all methods:
 
 ~~~text
-jq '.nodes[] | select(.properties.declaration_kind == "method")' \
+jq '.nodes[] | select(.properties.node_kind == "method")' \
   graphify-out/csharp.json
 ~~~
 
-Find a declaration by semantic key, then inspect its incoming callers and
-referencers:
+Find a type by its structured namespace/type properties, then inspect its
+incoming callers and referencers:
 
 ~~~text
 node_id="$(jq -r '
   .nodes[]
-  | select(.properties.symbol_key | contains("MyProduct.Services.OrderService"))
+  | select(.properties.node_kind == "type"
+      and .properties.namespace == "MyProduct.Services"
+      and .properties.type == "OrderService")
   | .id
   ' graphify-out/csharp.json | head -1)"
 
@@ -382,12 +445,18 @@ graphify-csharp \
 If no matching watcher exists, the same command performs a cold one-shot
 refresh. A watcher with a different output path is not reused or redirected.
 Use `--rebuild` to invalidate the incremental cache and rebuild from scratch.
+An output destination is exclusive while a watcher is alive. A request with a
+different input, configuration, or target framework that targets that same
+file fails with an ownership conflict rather than overwriting the watcher's
+graph; use another output path or stop the watcher.
 
 The watcher also runs a backup inventory scan. Watcher errors, native-buffer
 overflow, bounded-queue overflow, missing roots, and failed inventory scans
 invalidate the warm session; recovery recreates subscriptions and completes a
-cold reconciliation before serving the next refresh. The previous complete JSON
-remains readable while recovery runs, and recovery does not delete user files.
+nonpublishing cold reconciliation before serving the next refresh. The previous
+complete JSON remains readable while recovery runs, and recovery does not
+delete user files. The recovered in-memory state is published when the next
+explicit refresh is requested.
 
 ## Determinism and real-world validation
 
