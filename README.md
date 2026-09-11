@@ -5,36 +5,62 @@
 [![NuGet downloads](https://img.shields.io/nuget/dt/Graphify.CSharp.svg)](https://www.nuget.org/packages/Graphify.CSharp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## The missing semantic layer for C# coding agents
+## Give your C# agent an IDE’s semantic map
 
-Rider knows that two methods with the same name are different overloads. It knows
-which class implements an interface, which override will run, and which
-parameter a generic call is bound to.
+We humans have the luxury of Rider.
 
-Most coding-agent workflows still get a text dump, a name-based graph, or a
-best guess.
+When we need to understand a C# codebase, we jump to an implementation, walk
+up to a base class, follow derived types, find usages, inspect overrides, trace
+a call hierarchy, and let the compiler distinguish overloaded and generic
+symbols for us. The IDE quietly answers the hard questions while we navigate.
 
-Graphify C# gives agents the compiler’s answer.
+Most coding agents start somewhere very different: a terminal, text search,
+file snippets, and a name-based graph. That is useful for finding words. It is
+not the same as understanding the program. Two methods can have the same name
+and completely different contracts. An interface call can land on an override
+in another project. A generic invocation can bind to one precise method while
+other textually similar candidates remain irrelevant.
 
-It is a headless Roslyn/MSBuild semantic index for C#—the semantic half of an
-IDE, available as a deterministic JSON document outside the IDE. Use it
-directly from an agent, script, or jq; add [Graphify](https://github.com/Graphify-Labs/graphify)
-when you want graph traversal, clustering, explanations, and exports.
+[Graphify](https://github.com/Graphify-Labs/graphify) gives agents a useful
+repository graph, but Graphify alone is not a C# compiler. A general graph can
+show that things are related; it cannot replace Roslyn’s symbol binding when an
+agent needs the exact declaration, caller, implementation, override, or
+parameter involved.
 
-> Rider-like semantic understanding for agents. Not Rider’s editor, refactoring
-> engine, debugger, or runtime analysis.
+Graphify C# adds that missing semantic layer.
+
+It is a headless Roslyn/MSBuild index that gives an agent the compiler’s answer
+as a deterministic JSON document. Use it directly from an agent, script, or
+`jq`; add Graphify when you want graph traversal, clustering, explanations, and
+exports.
+
+> The semantic navigation layer your C# agent should have had from day one.
+
+## From IDE navigation to agent evidence
+
+| What a human does in Rider | What the agent gets from Graphify C# |
+| --- | --- |
+| Find usages | Directed, compiler-resolved `calls` and `references` edges |
+| Jump to implementation | `implements` edges to the exact interface or contract |
+| Move between base and derived types | `inherits` and `overrides` edges |
+| Disambiguate overloads and generics | Stable symbol identities with bound parameter and type information |
+| Inspect a large solution | Project, target-framework, source-location, and provenance metadata |
+| Refresh after editing | A warm watcher with an explicit, complete JSON publication barrier |
+
+The result is not a text dump with better formatting. It is the semantic
+evidence an agent can use to navigate a C# program without an IDE.
 
 ## Why this exists
 
-I wanted to ask an agent a simple question:
+The question that exposed the gap was simple:
 
 > “Which methods are actually used, and which are only reachable from tests?”
 
 Text search is not enough. Generic types, overloads, inheritance, extension
 members, generated compiler bindings, and cross-project references make
-name-based answers unreliable. Graphify’s general graph is useful, but a
-C# agent needs compiler-resolved edges before it can answer that question
-meaningfully.
+name-based answers unreliable. Before an agent can make a useful usage or
+dead-code assessment, it needs the same symbol relationships a human gets from
+IDE navigation.
 
 Graphify C# loads the real MSBuild project with Roslyn and emits the semantic
 facts an agent needs:
