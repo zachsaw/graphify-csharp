@@ -1,41 +1,18 @@
-# Graphify C#
+# graphify-csharp 🚀
 
-[![CI](https://github.com/zachsaw/graphify-csharp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/zachsaw/graphify-csharp/actions/workflows/ci.yml)
-[![NuGet](https://img.shields.io/nuget/v/Graphify.CSharp.svg)](https://www.nuget.org/packages/Graphify.CSharp)
+> Give your LLM agents the semantic codebase awareness developers get from JetBrains Rider.
+
+[![NuGet Version](https://img.shields.io/nuget/v/Graphify.CSharp.svg)](https://www.nuget.org/packages/Graphify.CSharp)
 [![NuGet downloads](https://img.shields.io/nuget/dt/Graphify.CSharp.svg)](https://www.nuget.org/packages/Graphify.CSharp)
+[![CI](https://github.com/zachsaw/graphify-csharp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/zachsaw/graphify-csharp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Give your LLM agent an IDE’s semantic map
-
-We humans have the luxury of Rider.
-
-When we need to understand a C# codebase, we jump to an implementation, walk
-up to a base class, follow derived types, find usages, inspect overrides, trace
-a call hierarchy, and let the compiler distinguish overloaded and generic
-symbols for us. The IDE quietly answers the hard questions while we navigate.
-
-Most coding agents start somewhere very different: a terminal, text search,
-file snippets, and a broad repository graph. That is useful for finding words
-and broad relationships. It is not the same as understanding the program. Two
-methods can have the same name and completely different contracts. An
-interface call can land on an override in another project. A generic invocation
-can bind to one precise method while other textually similar candidates remain
-irrelevant.
-
-[Graphify](https://github.com/Graphify-Labs/graphify) gives agents a useful
-repository graph, but Graphify alone is not a C# compiler. A general graph can
-show that things are related; it cannot replace Roslyn’s symbol binding when an
-agent needs the exact declaration, caller, implementation, override, or
-parameter involved.
-
-Graphify C# adds that missing semantic layer.
-
-It is a headless Roslyn/MSBuild index that gives an agent the compiler’s answer
-as a deterministic JSON document. Use it directly from an agent, script, or
-`jq`; add Graphify when you want graph traversal, clustering, explanations, and
-exports.
-
-> The semantic navigation layer your C# agent should have had from day one.
+`graphify-csharp` is a headless Roslyn/MSBuild indexer that extracts
+compiler-resolved C# declarations and relationships into deterministic,
+queryable JSON. Instead of forcing an LLM to guess how decoupled interfaces,
+inheritance, generic overloads, or constructors fit together, you give it a
+semantic map. Your agent gets Find Usages-style and navigation evidence, with
+the limits of static analysis made visible.
 
 ## From IDE navigation to agent evidence
 
@@ -48,8 +25,52 @@ exports.
 | Inspect a large solution | Project, target-framework, source-location, and provenance metadata |
 | Keep navigating while editing | A warm watcher that prepares changes and publishes a complete JSON snapshot on demand |
 
-The result is not a text dump with better formatting. It is the semantic
-evidence an agent can use to navigate a C# program without an IDE.
+## 🛠️ Quick start
+
+### 1. Install the tool globally
+
+```bash
+dotnet tool install --global Graphify.CSharp --framework net10.0
+```
+
+### 2. Index your solution
+
+```bash
+graphify-csharp --input ./src/MyProduct.sln --root . --configuration Release --output ./graphify-out/csharp.json
+```
+
+The result is one complete JSON document with `nodes`, `edges`, and
+`hyperedges`. It works whether or not Graphify is installed.
+
+For C# 15 syntax, select the .NET 11 asset from the same multi-targeted package:
+
+```bash
+dotnet tool update --global Graphify.CSharp --framework net11.0
+```
+
+The two framework options answer different questions:
+
+- install `--framework` selects the runtime and Roslyn asset used by the tool;
+- `--target-framework` selects the analyzed compilation when the input
+  project targets multiple frameworks.
+
+For a single-target project, `--target-framework` is optional.
+
+Supported inputs are `.sln`, `.slnx`, `.csproj`, and SDK file-based `.cs` apps.
+MSBuild, the selected SDK, referenced projects, and packages must be available
+on the host.
+
+## 🤖 Give the map to your agent
+
+Once `graphify-out/csharp.json` exists, add a short directive to `AGENTS.md`,
+`.cursorrules`, or your agent’s equivalent project instructions:
+
+> For C# structure and usage questions, use `graphify-out/csharp.json` as semantic evidence. Refresh it with `graphify-csharp` (or wait for a matching watcher) before answering. Use `symbol_key` to identify declarations and incoming `calls`/`references` edges to investigate usage. Treat zero inbound edges as observed static evidence, not proof of runtime unreachability.
+
+This is the minimum prompt glue. The reusable
+[`graphify-csharp` skill](.agents/skills/graphify-csharp/SKILL.md) teaches an
+agent the refresh workflow, schema, and static-analysis boundaries; the
+installation options are documented below.
 
 ## Why this exists
 
@@ -110,45 +131,38 @@ generated code, native callbacks, and dynamic dispatch can create runtime
 reachability that is not visible as a direct Roslyn edge. The tool makes that
 boundary explicit instead of pretending the answer is certain.
 
-## Quick start
-
-Install the global tool and index a solution:
-
-~~~text
-dotnet tool install --global Graphify.CSharp --framework net10.0
-
-graphify-csharp \
-  --input ./src/MyProduct.sln \
-  --root . \
-  --configuration Release \
-  --output ./graphify-out/csharp.json
-~~~
-
-The result is one complete JSON document with `nodes`, `edges`, and
-`hyperedges`. It works whether or not Graphify is installed.
-
-For C# 15 syntax, select the .NET 11 asset from the same multi-targeted package:
-
-~~~text
-dotnet tool update --global Graphify.CSharp --framework net11.0
-~~~
-
-The two framework options answer different questions:
-
-- install `--framework` selects the runtime and Roslyn asset used by the tool;
-- `--target-framework` selects the analyzed compilation when the input
-  project targets multiple frameworks.
-
-For a single-target project, `--target-framework` is optional.
-
-Supported inputs are `.sln`, `.slnx`, `.csproj`, and SDK file-based
-`.cs` apps. MSBuild, the selected SDK, referenced projects, and packages must
-be available on the host.
-
 ## Use it without Graphify
 
 The output is self-contained JSON. An agent can read it directly, and existing
 command-line tools can inspect it without another service or database.
+
+### Example graph structure
+
+This abbreviated excerpt shows the actual output fields; IDs and the semantic
+key are shortened here for readability:
+
+```json
+{
+  "nodes": [
+    {
+      "id": "cs_<stable-id>",
+      "label": "OrderService.Submit",
+      "properties": {
+        "node_kind": "method",
+        "symbol_key": "csharp/v1|project=...|tfm=net10.0|..."
+      }
+    }
+  ],
+  "edges": [
+    {
+      "source": "cs_<caller-id>",
+      "target": "cs_<stable-id>",
+      "relation": "calls",
+      "confidence": "EXTRACTED"
+    }
+  ]
+}
+```
 
 List all methods:
 
