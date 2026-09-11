@@ -172,6 +172,14 @@ This output is evidence for downstream analysis. The enricher deliberately does
 not decide whether a caller is a test, whether a target has zero inbound edges,
 or whether code is safe to delete.
 
+## Standalone use
+
+Graphify C# does not invoke, load, or require Graphify. The command emits a
+complete JSON document that an agent, `jq`, a C# program, or another analysis
+tool can consume directly. Graphify is an optional consumer of the same
+Graphify-compatible document; install it only when its graph queries, paths,
+explanations, clustering, or exports are useful.
+
 ## Graphify integration
 
 The file is valid Graphify extraction JSON: it has the base `nodes`, `edges`, and

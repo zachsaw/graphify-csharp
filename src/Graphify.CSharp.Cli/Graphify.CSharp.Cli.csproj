@@ -13,7 +13,7 @@
     <PackageId>Graphify.CSharp</PackageId>
     <Version>0.1.5</Version>
     <Authors>Zach Saw</Authors>
-    <Description>Roslyn-backed semantic C# caller and reference enricher for Graphify.</Description>
+    <Description>Roslyn-backed semantic C# index and optional Graphify-compatible enricher.</Description>
     <PackageTags>graphify;csharp;roslyn;static-analysis;call-graph</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>

@@ -33,10 +33,11 @@ and the loader records the evaluated target automatically. For a multi-targeted
 project, pass one value so the symbol key cannot silently combine different
 compilations.
 
-## Graphify output
+## Output format
 
-The emitted document follows Graphify’s v8 extraction shape and adds a
-`graphify_csharp` extractor-metadata block. The C# semantic node IDs are
+The CLI emits a standalone JSON document. It follows Graphify’s v8 extraction
+shape and adds a `graphify_csharp` extractor-metadata block, so Graphify can
+consume it without an adapter. The C# semantic node IDs are
 lowercase stable SHA-256-derived IDs; the full project/TFM-aware symbol key
 remains in node properties. This avoids overload collisions, but means a
 name-only C# extraction must use an explicit ID join before merging. The CLI

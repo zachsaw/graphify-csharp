@@ -1,14 +1,17 @@
 ---
 name: graphify-csharp
-description: Build the Roslyn-backed C# semantic Graphify enricher that emits deterministic nodes, caller/reference edges, provenance, and compiler facts for downstream analysis.
+description: Use the Roslyn-backed C# semantic index for compiler-resolved callers, references, declarations, inheritance, implementations, overrides, provenance, and deterministic Graphify output.
 ---
 
 # Graphify C# enricher
 
 ## Outcome
 
-This repository builds a headless, reusable C# semantic enricher for Graphify.
-Its output is the evidence layer, not the repository-specific analysis layer:
+Use this skill when an agent needs reliable C# structure or usage facts. The
+published `Graphify.CSharp` tool works standalone and does not require Graphify;
+Graphify is an optional consumer that adds traversal, clustering, explanations,
+and exports. The output is the evidence layer, not the repository-specific
+analysis layer:
 
 - source declaration nodes for namespaces, named types, constructors,
   methods/operators/local functions, properties/indexers, fields/enum values,
@@ -33,6 +36,129 @@ Graphify or another consumer can derive callers by following incoming edges and
 can classify test-only, production, mixed, or zero-inbound-reference symbols
 using its own query/policy. Do not add test-namespace or production-root policy
 to this enricher.
+
+## Consumer workflow
+
+For a C# semantic question, refresh the C# evidence before answering. Do not
+rely on a name-only graph when overloads, generics, inheritance, extension
+members, or cross-project references affect the answer.
+
+```text
+graphify-csharp \
+  --input ./src/MyProduct.sln \
+  --root . \
+  --configuration Release \
+  --output ./graphify-out/csharp.json
+```
+
+The tool runtime is selected at install time. Use the `net10.0` asset for the
+normal C# 14 path and the `net11.0` asset when the analyzed source requires the
+C# 15 compiler surface:
+
+```text
+dotnet tool install --global Graphify.CSharp --framework net10.0
+dotnet tool update --global Graphify.CSharp --framework net11.0
+```
+
+The install-time `--framework` selects the runtime/Roslyn asset. The command’s
+optional `--target-framework` selects one analyzed project compilation when a
+multi-targeted input is ambiguous. These are independent choices. A
+single-target project does not need `--target-framework`.
+
+The output is one complete JSON document with `nodes`, `edges`, and
+`hyperedges`. Without Graphify, pass it to an agent, `jq`, or another program.
+With Graphify, pass it with `--graph` and keep the raw C# document as the
+authoritative relation-level evidence.
+
+## Install for an agent
+
+For a personal, machine-wide setup, copy this skill into the matching user
+skill directory. Graphify’s general skill is optional; install it only when an
+agent also needs Graphify’s query, path, explanation, or export workflow.
+
+Codex:
+
+```text
+mkdir -p ~/.codex/skills/graphify-csharp
+cp /path/to/graphify-csharp/.agents/skills/graphify-csharp/SKILL.md \
+  ~/.codex/skills/graphify-csharp/SKILL.md
+```
+
+If Graphify is also installed, add its general skill separately with
+`graphify install --platform codex`.
+
+Claude Code:
+
+```text
+mkdir -p ~/.claude/skills/graphify-csharp
+cp /path/to/graphify-csharp/.agents/skills/graphify-csharp/SKILL.md \
+  ~/.claude/skills/graphify-csharp/SKILL.md
+```
+
+Claude Code discovers personal skills from `~/.claude/skills` in every
+project, and the directory name exposes this skill as `/graphify-csharp`.
+For a team-shared setup, copy the skill into the project’s `.agents/skills` or
+`.claude/skills` directory and commit it. Reload an already-running agent
+session after installing or changing a skill.
+
+## Warm watcher and explicit refresh
+
+For repeated agent work, start exactly one watcher for the selected input,
+repository root, configuration, target framework, and output path:
+
+```text
+graphify-csharp \
+  --input ./src/MyProduct.sln \
+  --root . \
+  --configuration Release \
+  --output ./graphify-out/csharp.json \
+  --watch
+```
+
+The watcher subscribes before cold startup, keeps the Roslyn workspace in
+memory, queues file-system hints away from the OS callback, and may prepare
+dirty projects in the background. A file event is not a publication signal:
+ordinary changes do not silently rewrite the public JSON.
+
+Run the ordinary command when an agent needs fresh evidence:
+
+```text
+graphify-csharp \
+  --input ./src/MyProduct.sln \
+  --root . \
+  --configuration Release \
+  --output ./graphify-out/csharp.json
+```
+
+That command connects only to a watcher with the same analysis identity and
+exact output path. It waits for the watcher’s ready/index/publish barrier and
+returns only after the complete document has been atomically published. If no
+matching watcher exists, it performs a cold one-shot refresh. A watcher using
+another output path is never silently redirected or treated as having written
+the requested file.
+
+Use `--rebuild` when cache invalidation is required:
+
+```text
+graphify-csharp \
+  --input ./src/MyProduct.sln \
+  --root . \
+  --configuration Release \
+  --output ./graphify-out/csharp.json \
+  --rebuild
+```
+
+The watcher runs a backup inventory scan in addition to the OS watcher. Native
+watcher errors or buffer overflow, bounded event-queue overflow, missing roots,
+and failed inventory scans invalidate the warm session. Recovery recreates the
+subscriptions and completes a cold reconciliation before the watcher becomes
+healthy again. The prior complete JSON remains readable while recovery runs.
+The default backup interval is five minutes; change it only for a concrete
+latency need with `--watch-scan-interval 00:02:00`.
+
+When starting a detached watcher, retain its PID and log under
+`graphify-out/`, and verify the process arguments before stopping it. Do not
+kill processes by broad process-name matching.
 
 ## Working method
 
