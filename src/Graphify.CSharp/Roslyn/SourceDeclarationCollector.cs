@@ -24,13 +24,12 @@ internal sealed class SourceDeclarationCollector
     {
         ArgumentNullException.ThrowIfNull(project);
 
-        var documents = project.Project.Documents
-            .Select(document => new DocumentWork(
-                document,
-                DocumentKey(document),
-                EstimateCost(document)))
-            .OrderBy(document => document.Key, StringComparer.Ordinal)
-            .Select((document, index) => document with { Index = index })
+        var documents = RoslynDocumentKeyPolicy.Create(project.Project.Documents)
+            .Select((document, index) => new DocumentWork(
+                document.Document,
+                document.Key,
+                EstimateCost(document.Document),
+                index))
             .ToArray();
         var declarationsByDocument = new IReadOnlyList<ISymbol>[documents.Length];
         if (documents.Length == 0)
@@ -134,11 +133,6 @@ internal sealed class SourceDeclarationCollector
             .Visit(root);
         return declarations;
     }
-
-    private static string DocumentKey(Microsoft.CodeAnalysis.Document document) =>
-        string.IsNullOrWhiteSpace(document.FilePath)
-            ? document.Name
-            : Path.GetFullPath(document.FilePath).Replace('\\', '/');
 
     private static long EstimateCost(Microsoft.CodeAnalysis.Document document)
     {

@@ -189,12 +189,11 @@ public sealed class SemanticReferenceExtractor
 
     private BatchWork[] CreateProjectBatchWork(AnalyzedProject project)
     {
-        var documents = project.Project.Documents
+        var documents = RoslynDocumentKeyPolicy.Create(project.Project.Documents)
             .Select(document => new DocumentWork(
-                document,
-                DocumentKey(document),
-                EstimateCost(document)))
-            .OrderBy(document => document.Key, StringComparer.Ordinal)
+                document.Document,
+                document.Key,
+                EstimateCost(document.Document)))
             .ToArray();
         var documentByKey = documents.ToDictionary(document => document.Key, StringComparer.Ordinal);
         return ExtractionBatchPlanner
@@ -247,11 +246,6 @@ public sealed class SemanticReferenceExtractor
             edges.ToImmutableArray(),
             diagnostics.OrderBy(diagnostic => diagnostic, StringComparer.Ordinal).ToImmutableArray());
     }
-
-    private static string DocumentKey(Microsoft.CodeAnalysis.Document document) =>
-        string.IsNullOrWhiteSpace(document.FilePath)
-            ? document.Name
-            : Path.GetFullPath(document.FilePath).Replace('\\', '/');
 
     private static long EstimateCost(Microsoft.CodeAnalysis.Document document)
     {

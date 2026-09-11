@@ -137,6 +137,14 @@ matching watcher exists, it performs a cold one-shot refresh. A watcher using
 another output path is never silently redirected or treated as having written
 the requested file.
 
+The canonical output destination is exclusive while any Graphify C# watcher
+owns it. A request with a different input, configuration, or target framework
+that targets the same output fails with an ownership conflict; it does not
+fall through to a standalone write. Standalone refreshes acquire the same
+destination lease for their complete cache/load/publish transaction. Use a
+different output path or stop the existing watcher when changing analysis
+identity.
+
 Use `--rebuild` when cache invalidation is required:
 
 ```text
@@ -151,10 +159,52 @@ graphify-csharp \
 The watcher runs a backup inventory scan in addition to the OS watcher. Native
 watcher errors or buffer overflow, bounded event-queue overflow, missing roots,
 and failed inventory scans invalidate the warm session. Recovery recreates the
-subscriptions and completes a cold reconciliation before the watcher becomes
-healthy again. The prior complete JSON remains readable while recovery runs.
+subscriptions and completes a nonpublishing cold reconciliation before the
+watcher becomes healthy again. The prior complete JSON remains readable while
+recovery runs; the recovered in-memory graph is published by the next explicit
+refresh.
 The default backup interval is five minutes; change it only for a concrete
 latency need with `--watch-scan-interval 00:02:00`.
+
+Input membership comes from the evaluated MSBuild/Roslyn workspace, not
+`.gitignore`. Exact evaluated source, additional, analyzer/configuration,
+reference, import, project, and solution paths take precedence over the
+conventional `obj/` and `bin/` noise filter. An explicitly compiled physical
+source under `obj/` is therefore watched/scanned, while unrelated files in that
+subtree are dropped before they reach the session. Exact non-source inputs are
+included in the backup scan; linked sources and additional inputs outside the
+repository can receive narrow live coverage without recursively watching SDK
+or package trees.
+
+Evaluated wildcard rules are retained as candidate filters too. A newly
+created arbitrary-extension file matching an evaluated `Compile` or
+    `AdditionalFiles` glob is eligible in both the native watcher and backup
+    inventory, then causes a cold MSBuild/Roslyn re-evaluation. The ordinary noise
+    filter still prunes `obj/` and similar directories unless an evaluated
+    candidate rule can reach that path and its own evaluated exclusions do not
+    reject it. Broad custom globs can therefore reopen an excluded subtree even
+    when they do not spell out its directory name.
+
+Only an in-place edit to an existing evaluated source document uses the warm
+document path. New, removed, or renamed files and project/build/dependency
+changes trigger a complete MSBuild workspace reload so project globs,
+`Compile Remove`, conditions, linked files, and disabled default includes are
+authoritative. Do not infer that a file beside a project is compiled, and do
+not expect an arbitrary custom-target output absent from design-time evaluation
+to appear until its producer has run and a fresh `--rebuild` is requested.
+
+If auxiliary MSBuild input discovery is incomplete, the snapshot carries a
+diagnostic and foreground refreshes use the authoritative cold path to retry
+discovery. Do not treat an incomplete warm snapshot as proof that no external
+input changed.
+
+During a cold reload, the watcher publishes a conservative transition snapshot
+while MSBuild/Roslyn reevaluates the project. It retains the currently viable
+coverage, treats uncertain in-scope events as cold-recovery evidence, and does
+not recreate obsolete external roots from that transitional snapshot. The
+evaluated snapshot is published before semantic extraction, and scans captured
+against an old or transitional snapshot are discarded. Existing inventory
+changes are reconciled before the post-load baseline is accepted.
 
 When starting a detached watcher, retain its PID and log under
 `graphify-out/`, and verify the process arguments before stopping it. Do not
@@ -381,7 +431,10 @@ watcher uses `FileSystemWatcher` only as a low-latency hint source, keeps its
 callbacks to bounded path enqueueing, and backs them with a metadata inventory
 timer. Overflow, watcher errors, missing roots, or an uncertain inventory force
 watcher recreation and cold reconciliation. Do not make an agent assume that a
-file event alone means the public JSON has already changed.
+file event alone means the public JSON has already changed. A foreground
+request also validates the watcher trust epoch after extraction; if delivery
+was lost during that request, it waits for recovery and retries before
+returning success.
 
 The CLI currently emits one complete document. If same-repository output
 sharding is added later, each shard must retain the envelope and stable IDs;

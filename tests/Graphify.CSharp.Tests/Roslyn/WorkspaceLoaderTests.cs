@@ -1,4 +1,5 @@
 using Graphify.CSharp.Domain;
+using Graphify.CSharp.Incremental;
 using Graphify.CSharp.Roslyn;
 
 namespace Graphify.CSharp.Tests.Roslyn;
@@ -19,6 +20,25 @@ public sealed class WorkspaceLoaderTests
         Assert.Equal("tests/Fixtures/LoaderFixture/LoaderFixture.csproj", project.Identity.RelativePath);
         Assert.Equal("net10.0", project.Identity.TargetFramework);
         Assert.Contains(project.Compilation.SyntaxTrees, tree => tree.FilePath.EndsWith("FixtureTypes.cs", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Input_discovery_tracks_restore_metadata_and_absent_ancestor_candidates()
+    {
+        var root = RepositoryRoot();
+        var projectPath = Path.Combine(root, "tests/Fixtures/LoaderFixture/LoaderFixture.csproj");
+        using var loaded = await new RoslynWorkspaceLoader().LoadAsync(new ProjectLoadRequest(projectPath, root));
+        var project = Assert.Single(loaded.Projects);
+        var projectDirectory = Path.GetDirectoryName(projectPath)!;
+        var assetsPath = IncrementalPaths.CanonicalAbsolutePath(
+            Path.Combine(projectDirectory, "obj", "project.assets.json"));
+        var absentCandidate = IncrementalPaths.CanonicalAbsolutePath(
+            Path.Combine(projectDirectory, "Directory.Build.rsp"));
+
+        var discovery = loaded.GetInputDiscovery(project);
+
+        Assert.Contains(discovery.Paths, path => string.Equals(path, assetsPath, IncrementalPaths.PathComparison));
+        Assert.Contains(discovery.Paths, path => string.Equals(path, absentCandidate, IncrementalPaths.PathComparison));
     }
 
     [Fact]

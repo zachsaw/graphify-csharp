@@ -21,19 +21,27 @@ internal sealed class FileInventorySnapshot
     public IReadOnlyDictionary<string, FileInventoryEntry> Entries { get; }
 
     public IReadOnlyList<string> CompareTo(FileInventorySnapshot? previous)
+        => CompareToEvents(previous).Select(change => change.Path).ToArray();
+
+    public IReadOnlyList<FileChangeEvent> CompareToEvents(FileInventorySnapshot? previous)
     {
         if (previous is null)
         {
-            return Entries.Keys.OrderBy(path => path, PathComparer).ToArray();
+            return Entries.Keys
+                .OrderBy(path => path, PathComparer)
+                .Select(path => new FileChangeEvent(FileChangeKind.Created, path))
+                .ToArray();
         }
 
-        var changed = new HashSet<string>(PathComparer);
+        var changed = new Dictionary<string, FileChangeEvent>(PathComparer);
         foreach (var (path, entry) in Entries)
         {
             if (!previous.Entries.TryGetValue(path, out var oldEntry)
                 || oldEntry.Fingerprint.CompareTo(entry.Fingerprint) == FingerprintComparison.Different)
             {
-                changed.Add(path);
+                changed[path] = new FileChangeEvent(
+                    previous.Entries.ContainsKey(path) ? FileChangeKind.Changed : FileChangeKind.Created,
+                    path);
             }
         }
 
@@ -41,11 +49,14 @@ internal sealed class FileInventorySnapshot
         {
             if (!Entries.ContainsKey(path))
             {
-                changed.Add(path);
+                changed[path] = new FileChangeEvent(FileChangeKind.Deleted, path);
             }
         }
 
-        return changed.OrderBy(path => path, PathComparer).ToArray();
+        return changed
+            .Values
+            .OrderBy(change => change.Path, PathComparer)
+            .ToArray();
     }
 
     private static StringComparer PathComparer =>

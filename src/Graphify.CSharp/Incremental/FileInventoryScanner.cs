@@ -6,7 +6,8 @@ internal interface IFileInventoryScanner
         IReadOnlyList<string> roots,
         string repositoryRoot,
         bool includeContentHashes = false,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        WatcherInputSnapshot? inputSnapshot = null);
 }
 
 internal sealed class FileInventoryScanner : IFileInventoryScanner
@@ -18,7 +19,8 @@ internal sealed class FileInventoryScanner : IFileInventoryScanner
         IReadOnlyList<string> roots,
         string repositoryRoot,
         bool includeContentHashes = false,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        WatcherInputSnapshot? inputSnapshot = null)
     {
         ArgumentNullException.ThrowIfNull(roots);
         ArgumentException.ThrowIfNullOrWhiteSpace(repositoryRoot);
@@ -27,6 +29,15 @@ internal sealed class FileInventoryScanner : IFileInventoryScanner
         var normalizedRoot = IncrementalPaths.CanonicalAbsolutePath(repositoryRoot);
         var normalizedRoots = NormalizeRoots(roots);
         var entries = new Dictionary<string, FileInventoryEntry>(PathComparer);
+        if (inputSnapshot is not null)
+        {
+            foreach (var exactPath in inputSnapshot.KnownInputPaths)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                AddFileEntry(exactPath, normalizedRoot, includeContentHashes, entries);
+            }
+        }
+
         var pendingDirectories = new Stack<string>(normalizedRoots.Reverse());
         while (pendingDirectories.Count > 0)
         {
@@ -38,7 +49,7 @@ internal sealed class FileInventoryScanner : IFileInventoryScanner
                 var attributes = ReadAttributes(entryPath);
                 if ((attributes & FileAttributes.Directory) != 0)
                 {
-                    if (!ShouldSkipDirectory(entryPath, attributes))
+                    if (ShouldTraverseDirectory(entryPath, attributes, inputSnapshot))
                     {
                         pendingDirectories.Push(entryPath);
                     }
@@ -46,39 +57,14 @@ internal sealed class FileInventoryScanner : IFileInventoryScanner
                     continue;
                 }
 
-                if (!IsRelevantFile(entryPath))
+                if (inputSnapshot is not null
+                    ? !inputSnapshot.ShouldIncludeInInventory(entryPath)
+                    : !IsRelevantFile(entryPath))
                 {
                     continue;
                 }
 
-                try
-                {
-                    var fullPath = IncrementalPaths.CanonicalAbsolutePath(entryPath);
-                    var fingerprint = SourceFingerprint.FromFile(
-                        fullPath,
-                        normalizedRoot,
-                        includeContentHashes);
-                    if (fingerprint.Exists)
-                    {
-                        entries[fullPath] = new FileInventoryEntry(fullPath, fingerprint);
-                    }
-                }
-                catch (FileNotFoundException)
-                {
-                    // A concurrent delete is represented by the difference
-                    // from the previous snapshot and will also be delivered by
-                    // FileSystemWatcher when possible.
-                }
-                catch (DirectoryNotFoundException)
-                {
-                    // See the FileNotFoundException case above.
-                }
-                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-                {
-                    throw new InvalidDataException(
-                        $"The file inventory could not read '{entryPath}': {exception.Message}",
-                        exception);
-                }
+                AddFileEntry(entryPath, normalizedRoot, includeContentHashes, entries);
             }
         }
 
@@ -157,22 +143,17 @@ internal sealed class FileInventoryScanner : IFileInventoryScanner
         }
     }
 
-    private static bool ShouldSkipDirectory(string path, FileAttributes attributes)
+    private static bool ShouldTraverseDirectory(
+        string path,
+        FileAttributes attributes,
+        WatcherInputSnapshot? inputSnapshot)
     {
         if ((attributes & FileAttributes.ReparsePoint) != 0)
         {
-            return true;
+            return false;
         }
 
-        var name = Path.GetFileName(path);
-        return name.Equals(".git", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("bin", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("obj", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("node_modules", StringComparison.OrdinalIgnoreCase)
-            || name.Equals(".e2e", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("graphify-out", StringComparison.OrdinalIgnoreCase)
-            || name.Equals(".vs", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("TestResults", StringComparison.OrdinalIgnoreCase);
+        return inputSnapshot?.ShouldTraverseDirectory(path) ?? !IsExcludedDirectory(path);
     }
 
     internal static bool IsRelevantFilePath(string path)
@@ -182,22 +163,52 @@ internal sealed class FileInventoryScanner : IFileInventoryScanner
     }
 
     private static bool IsRelevantFile(string path)
+        => WatcherInputSnapshot.IsConventionalRelevantFilePath(path);
+
+    private static bool IsExcludedDirectory(string path)
     {
-        var fileName = Path.GetFileName(path);
-        var extension = Path.GetExtension(fileName);
-        return extension.Equals(".cs", StringComparison.OrdinalIgnoreCase)
-            || extension.Equals(".csproj", StringComparison.OrdinalIgnoreCase)
-            || extension.Equals(".sln", StringComparison.OrdinalIgnoreCase)
-            || extension.Equals(".slnx", StringComparison.OrdinalIgnoreCase)
-            || extension.Equals(".props", StringComparison.OrdinalIgnoreCase)
-            || extension.Equals(".targets", StringComparison.OrdinalIgnoreCase)
-            || fileName.Equals("global.json", StringComparison.OrdinalIgnoreCase)
-            || fileName.Equals(".editorconfig", StringComparison.OrdinalIgnoreCase)
-            || fileName.Equals("Directory.Build.props", StringComparison.OrdinalIgnoreCase)
-            || fileName.Equals("Directory.Build.targets", StringComparison.OrdinalIgnoreCase)
-            || fileName.Equals("Directory.Packages.props", StringComparison.OrdinalIgnoreCase)
-            || fileName.Equals("packages.lock.json", StringComparison.OrdinalIgnoreCase)
-            || fileName.Equals("NuGet.Config", StringComparison.OrdinalIgnoreCase);
+        var name = Path.GetFileName(path);
+        return name.Equals(".git", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("bin", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("obj", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("node_modules", StringComparison.OrdinalIgnoreCase)
+            || name.Equals(".e2e", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("graphify-out", StringComparison.OrdinalIgnoreCase)
+            || name.Equals(".vs", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("TestResults", StringComparison.OrdinalIgnoreCase)
+            || name.Equals("artifacts", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void AddFileEntry(
+        string path,
+        string normalizedRoot,
+        bool includeContentHashes,
+        IDictionary<string, FileInventoryEntry> entries)
+    {
+        try
+        {
+            var fullPath = IncrementalPaths.CanonicalAbsolutePath(path);
+            var fingerprint = SourceFingerprint.FromFile(fullPath, normalizedRoot, includeContentHashes);
+            if (fingerprint.Exists)
+            {
+                entries[fullPath] = new FileInventoryEntry(fullPath, fingerprint);
+            }
+        }
+        catch (FileNotFoundException)
+        {
+            // A concurrent delete is represented by the difference from the
+            // previous snapshot and will also be delivered by the watcher.
+        }
+        catch (DirectoryNotFoundException)
+        {
+            // See the FileNotFoundException case above.
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidDataException(
+                $"The file inventory could not read '{path}': {exception.Message}",
+                exception);
+        }
     }
 
     private static bool IsUnderDirectory(string path, string parent)

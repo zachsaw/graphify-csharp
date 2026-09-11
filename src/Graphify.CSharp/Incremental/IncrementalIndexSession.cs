@@ -11,6 +11,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 {
     private const int EventQueueCapacity = 4096;
     private readonly object _lifecycleGate = new();
+    private readonly object _trustGate = new();
     private readonly ProjectLoadRequest _request;
     private readonly string _outputPath;
     private readonly string _cachePath;
@@ -19,6 +20,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     private readonly IncrementalCacheStore _cacheStore;
     private readonly IncrementalOutputPublisher _outputPublisher;
     private readonly Action<string>? _trustLostCallback;
+    private readonly Func<WatcherInputSnapshot, bool>? _inputSnapshotChangedCallback;
     private readonly Guid _sessionId;
     private readonly Channel<SessionCommand> _commands = Channel.CreateUnbounded<SessionCommand>(
         new UnboundedChannelOptions
@@ -42,6 +44,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     private int _queuedEventCount;
     private int _backgroundIndexRequested;
     private int _eventDeliveryUntrusted;
+    private int _publicationPending;
     private int _disposeRequested;
     private int _status = (int)IncrementalSessionStatus.Created;
     private Exception? _failure;
@@ -59,6 +62,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     private RefreshGeneration _generation;
     private string? _publishedOutputDigest;
     private int _requiresColdReconciliation;
+    private WatcherInputSnapshot _inputSnapshot;
 
     public IncrementalIndexSession(
         ProjectLoadRequest request,
@@ -67,7 +71,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         IncrementalCacheStore? cacheStore = null,
         IncrementalOutputPublisher? outputPublisher = null,
         Func<Guid>? sessionIdFactory = null,
-        Action<string>? trustLostCallback = null)
+        Action<string>? trustLostCallback = null,
+        Func<WatcherInputSnapshot, bool>? inputSnapshotChangedCallback = null)
     {
         _request = request ?? throw new ArgumentNullException(nameof(request));
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
@@ -82,8 +87,27 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         _cacheStore = cacheStore ?? new IncrementalCacheStore();
         _outputPublisher = outputPublisher ?? new IncrementalOutputPublisher();
         _trustLostCallback = trustLostCallback;
+        _inputSnapshotChangedCallback = inputSnapshotChangedCallback;
         _sessionId = (sessionIdFactory ?? Guid.NewGuid)();
         _generation = new RefreshGeneration(_sessionId);
+        var bootstrapRoots = new HashSet<string>(IncrementalPaths.PathComparer)
+        {
+            request.RepositoryRoot,
+        };
+        var inputPath = IncrementalPaths.CanonicalAbsolutePath(request.InputPath);
+        var inputRoot = Directory.Exists(inputPath)
+            ? inputPath
+            : Path.GetDirectoryName(inputPath) ?? IncrementalPaths.CanonicalAbsolutePath(request.RepositoryRoot);
+        if (!IncrementalPaths.IsUnderDirectory(inputRoot, request.RepositoryRoot))
+        {
+            bootstrapRoots.Add(inputRoot);
+        }
+
+        _inputSnapshot = WatcherInputSnapshot.CreateBootstrap(
+            bootstrapRoots,
+            _outputPath,
+            _cachePath,
+            bootstrapRoots.Select(root => new WatcherRoot(root, IncludeSubdirectories: true)));
     }
 
     public IncrementalSessionStatus Status =>
@@ -92,6 +116,18 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     public Guid SessionId => _sessionId;
 
     public long EventGeneration => Volatile.Read(ref _eventClock);
+
+    internal WatcherInputSnapshot InputSnapshot => Volatile.Read(ref _inputSnapshot);
+
+    internal long EventTrustVersion => CaptureEventTrustVersion();
+
+    internal bool IsEventTrustValid(long version)
+    {
+        lock (_trustGate)
+        {
+            return _eventTrustVersion == version && _eventDeliveryUntrusted == 0;
+        }
+    }
 
     public Task StartAsync(CancellationToken cancellationToken = default)
     {
@@ -107,7 +143,13 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     public Task<IncrementalRefreshResult> RebuildAsync(CancellationToken cancellationToken = default)
         => RefreshCoreAsync(rebuild: true, cancellationToken);
 
-    private Task<IncrementalRefreshResult> RefreshCoreAsync(bool rebuild, CancellationToken cancellationToken)
+    internal Task<IncrementalRefreshResult> RecoverAsync(CancellationToken cancellationToken = default)
+        => RefreshCoreAsync(rebuild: true, cancellationToken, publishOutput: false);
+
+    private Task<IncrementalRefreshResult> RefreshCoreAsync(
+        bool rebuild,
+        CancellationToken cancellationToken,
+        bool publishOutput = true)
     {
         EnsureWorkerStarted();
         var target = new RefreshTarget(
@@ -117,7 +159,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         lock (_lifecycleGate)
         {
             ThrowIfSessionUnavailableLocked();
-            if (!_commands.Writer.TryWrite(new RefreshCommand(target, rebuild, completion)))
+            if (!_commands.Writer.TryWrite(new RefreshCommand(target, rebuild, publishOutput, completion)))
             {
                 completion.TrySetException(new InvalidOperationException("The incremental session is not accepting refresh requests."));
             }
@@ -132,8 +174,29 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             : completion.Task;
     }
 
-    public void ReportFileChanged(string path)
+    public void ReportFileChanged(string path) =>
+        ReportFileChanged(new FileChangeEvent(FileChangeKind.Changed, path));
+
+    public void ReportFileChanged(FileChangeEvent change)
     {
+        ArgumentNullException.ThrowIfNull(change);
+        WatcherEventClassification classification;
+        try
+        {
+            classification = Volatile.Read(ref _inputSnapshot).Classify(change);
+        }
+        catch (ArgumentException)
+        {
+            Volatile.Write(ref _requiresColdReconciliation, 1);
+            MarkEventDeliveryUntrusted("An invalid file-system event path was received.");
+            return;
+        }
+
+        if (!classification.Accepted)
+        {
+            return;
+        }
+
         EnsureWorkerStarted();
         bool accepted;
         lock (_lifecycleGate)
@@ -141,14 +204,23 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             ThrowIfSessionUnavailableLocked();
             var generation = Interlocked.Increment(ref _eventClock);
             var queued = Interlocked.Increment(ref _queuedEventCount);
-            accepted = !string.IsNullOrWhiteSpace(path)
+            var normalizedChange = change with
+            {
+                Path = IncrementalPaths.CanonicalAbsolutePath(change.Path),
+                OldPath = string.IsNullOrWhiteSpace(change.OldPath)
+                    ? null
+                    : IncrementalPaths.CanonicalAbsolutePath(change.OldPath),
+                RequiresColdReconciliation = change.RequiresColdReconciliation
+                    || classification.RequiresColdReconciliation,
+            };
+            accepted = !string.IsNullOrWhiteSpace(normalizedChange.Path)
                 && queued <= EventQueueCapacity
-                && _fileEvents.Writer.TryWrite(new FileChangeCommand(path, generation));
+                && _fileEvents.Writer.TryWrite(new FileChangeCommand(normalizedChange, generation));
             if (!accepted)
             {
                 Interlocked.Decrement(ref _queuedEventCount);
             }
-            else if (Volatile.Read(ref _eventDeliveryUntrusted) == 0)
+            else if (!IsEventDeliveryUntrusted())
             {
                 // Publish the background request before waking the worker.
                 // Reversing these operations allows the worker to consume the
@@ -174,7 +246,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         lock (_lifecycleGate)
         {
             ThrowIfSessionUnavailableLocked();
-            if (Volatile.Read(ref _eventDeliveryUntrusted) != 0
+            if (IsEventDeliveryUntrusted()
                 || Volatile.Read(ref _requiresColdReconciliation) != 0)
             {
                 return;
@@ -411,11 +483,11 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         DrainFileEvents();
         var target = new RefreshTarget(_sessionId, Volatile.Read(ref _eventClock));
         var duePaths = DueDirtyPaths(target.EventGeneration);
-        if (Volatile.Read(ref _eventDeliveryUntrusted) != 0 || duePaths.Count > 0)
+        if (IsEventDeliveryUntrusted() || duePaths.Count > 0)
         {
             await ReconcileAsync(
                     target,
-                    forceCold: Volatile.Read(ref _eventDeliveryUntrusted) != 0,
+                    forceCold: IsEventDeliveryUntrusted(),
                     publishOutput: true,
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -446,7 +518,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                     var result = await ReconcileAsync(
                             refresh.Target,
                             forceCold: refresh.Rebuild,
-                            publishOutput: true,
+                            publishOutput: refresh.PublishOutput,
                             cancellationToken)
                         .ConfigureAwait(false);
                     TrySetStatusIfActive(IncrementalSessionStatus.Ready);
@@ -486,8 +558,9 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     {
         ValidateTarget(target);
         DrainFileEvents();
-        forceCold |= Volatile.Read(ref _eventDeliveryUntrusted) != 0
-            || Volatile.Read(ref _requiresColdReconciliation) != 0;
+        forceCold |= IsEventDeliveryUntrusted()
+            || Volatile.Read(ref _requiresColdReconciliation) != 0
+            || !Volatile.Read(ref _inputSnapshot).InputDiscoveryComplete;
         var duePaths = DueDirtyPaths(target.EventGeneration);
         var dirtyProjectKeys = forceCold
             ? _fingerprints.Keys.ToHashSet(StringComparer.Ordinal)
@@ -498,7 +571,9 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             dirtyProjectKeys = _fingerprints.Keys.ToHashSet(StringComparer.Ordinal);
         }
         var fullRebuild = forceCold;
-        var outputChanged = dirtyProjectKeys.Count > 0 || fullRebuild;
+        var outputChanged = dirtyProjectKeys.Count > 0
+            || fullRebuild
+            || Volatile.Read(ref _publicationPending) != 0;
         if (!outputChanged)
         {
             _generation = _generation.AdvanceEventsThrough(
@@ -526,15 +601,13 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         var reusedProjectCount = 0;
         if (fullRebuild)
         {
-            var trustVersionAtStart = Volatile.Read(ref _eventTrustVersion);
+            var trustVersionAtStart = CaptureEventTrustVersion();
             await LoadAndExtractAllAsync(cancellationToken).ConfigureAwait(false);
             extractedProjectCount = _contributions.Count;
-            Volatile.Write(ref _requiresColdReconciliation, 0);
-            if (Volatile.Read(ref _eventTrustVersion) == trustVersionAtStart)
-            {
-                Interlocked.Exchange(ref _eventDeliveryUntrusted, 0);
-            }
-            else
+            Volatile.Write(
+                ref _requiresColdReconciliation,
+                Volatile.Read(ref _inputSnapshot).InputDiscoveryComplete ? 0 : 1);
+            if (!TryAcknowledgeEventTrust(trustVersionAtStart))
             {
                 Volatile.Write(ref _requiresColdReconciliation, 1);
             }
@@ -546,7 +619,12 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             {
                 await LoadAndExtractAllAsync(cancellationToken).ConfigureAwait(false);
                 extractedProjectCount = _contributions.Count;
-                Volatile.Write(ref _requiresColdReconciliation, 0);
+                Volatile.Write(
+                    ref _requiresColdReconciliation,
+                    IsEventDeliveryUntrusted()
+                    || !Volatile.Read(ref _inputSnapshot).InputDiscoveryComplete
+                        ? 1
+                        : 0);
             }
             else
             {
@@ -599,6 +677,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                 _contributions = merged;
                 _globalDiagnostics = _loadedSolution.Diagnostics
                     .Select(diagnostic => $"{diagnostic.Kind}: {diagnostic.Message}")
+                    .Concat(_inputSnapshot.InputDiscoveryDiagnostics)
                     .Concat(catalog.Diagnostics)
                     .Distinct(StringComparer.Ordinal)
                     .OrderBy(diagnostic => diagnostic, StringComparer.Ordinal)
@@ -611,6 +690,12 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         _generation = MarkGenerationIndexed(target.EventGeneration);
         if (!publishOutput)
         {
+            // Recovery and opportunistic background indexing may update the
+            // in-memory Roslyn state without touching the public JSON. Keep
+            // an explicit publication obligation even when the triggering
+            // event was observed only during a transition and therefore did
+            // not receive its own event generation.
+            Interlocked.Exchange(ref _publicationPending, 1);
             ClearDirtyPaths(duePaths, target.EventGeneration);
             return CreateUnpublishedResult(extractedProjectCount, reusedProjectCount);
         }
@@ -627,7 +712,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 
     private async Task IndexBackgroundAsync(CancellationToken cancellationToken)
     {
-        if (Volatile.Read(ref _eventDeliveryUntrusted) != 0)
+        if (IsEventDeliveryUntrusted())
         {
             return;
         }
@@ -702,6 +787,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             _outputPath,
             outputDigest);
         await _cacheStore.SaveAsync(_cachePath, state, cancellationToken).ConfigureAwait(false);
+        Interlocked.Exchange(ref _publicationPending, 0);
         return new IncrementalRefreshResult(
             graph,
             outputDigest,
@@ -735,11 +821,53 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 
     private async Task LoadAndExtractAllAsync(CancellationToken cancellationToken)
     {
+        // A newly discovered external root is subscribed only after the first
+        // evaluated load. Repeat once after coverage is established so an edit
+        // in that observation gap cannot survive in the published snapshot.
+        while (await LoadAndExtractAllOnceAsync(cancellationToken).ConfigureAwait(false))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+    }
+
+    private async Task<bool> LoadAndExtractAllOnceAsync(CancellationToken cancellationToken)
+    {
         Volatile.Write(ref _requiresColdReconciliation, 1);
+
+        // Keep the last known coverage alive, but temporarily stop treating
+        // project membership and conventional exclusions as authoritative.
+        // This closes the interval between the old Roslyn load and publication
+        // of the next evaluated input snapshot. An uncertain event causes a
+        // cold recovery; it is deliberately not pushed through the warm path.
+        var previousSnapshot = Volatile.Read(ref _inputSnapshot);
+        var transitionSnapshot = WatcherInputSnapshot.CreateBootstrap(
+            previousSnapshot.DiscoveryRoots.Length > 0
+                ? previousSnapshot.DiscoveryRoots
+                : [IncrementalPaths.CanonicalAbsolutePath(_request.RepositoryRoot)],
+            _outputPath,
+            _cachePath,
+            previousSnapshot.WatchRoots.Length > 0
+                ? previousSnapshot.WatchRoots
+                : [new WatcherRoot(_request.RepositoryRoot, IncludeSubdirectories: true)]);
+        Volatile.Write(ref _inputSnapshot, transitionSnapshot);
+        NotifyInputSnapshotChanged(transitionSnapshot, out _);
+
         _loadedSolution?.Dispose();
         _loadedSolution = null;
         _loadedSolution = await _projectLoader.LoadAsync(_request, cancellationToken).ConfigureAwait(false);
         _currentRoslynSolution = _loadedSolution.Workspace.CurrentSolution;
+
+        // Publish evaluated membership before the expensive catalog/extraction
+        // work. Events arriving during extraction are then retained against
+        // the new snapshot and reconciled by the caller after this load.
+        var inputSnapshot = WatcherInputSnapshot.Create(
+            _loadedSolution,
+            _request,
+            _outputPath,
+            _cachePath);
+        Volatile.Write(ref _inputSnapshot, inputSnapshot);
+        NotifyInputSnapshotChanged(inputSnapshot, out var requiresCoverageVerification);
+
         _catalog = await new DeclarationCatalogBuilder().BuildAsync(_loadedSolution, cancellationToken).ConfigureAwait(false);
         var extractor = new SemanticReferenceExtractor();
         var extracted = await extractor
@@ -755,11 +883,15 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             StringComparer.Ordinal);
         _globalDiagnostics = _loadedSolution.Diagnostics
             .Select(diagnostic => $"{diagnostic.Kind}: {diagnostic.Message}")
+            .Concat(inputSnapshot.InputDiscoveryDiagnostics)
             .Concat(_catalog.Diagnostics)
             .Distinct(StringComparer.Ordinal)
             .OrderBy(diagnostic => diagnostic, StringComparer.Ordinal)
             .ToImmutableArray();
-        Volatile.Write(ref _requiresColdReconciliation, 0);
+        Volatile.Write(
+            ref _requiresColdReconciliation,
+            inputSnapshot.InputDiscoveryComplete ? 0 : 1);
+        return requiresCoverageVerification;
     }
 
     private async Task<Solution?> ApplySourceChangesAsync(
@@ -775,11 +907,6 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         foreach (var path in duePaths)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
             var exists = File.Exists(path);
             var changedDocument = false;
             foreach (var project in _loadedSolution.Projects)
@@ -798,28 +925,13 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                             document.Id,
                             SourceText.From(await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false)),
                             PreservationMode.PreserveIdentity)
-                        : solution.RemoveDocument(document.Id);
+                        : solution;
                 }
             }
 
-            if (exists && !changedDocument)
+            if (!exists || !changedDocument)
             {
-                var projectKeys = ResolveProjectsForPath(path);
-                if (projectKeys.Count == 0)
-                {
-                    return null;
-                }
-
-                var sourceText = SourceText.From(await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false));
-                foreach (var projectKey in projectKeys)
-                {
-                    var project = _loadedSolution.Projects.Single(item => item.Identity.Key == projectKey);
-                    solution = solution.AddDocument(
-                        DocumentId.CreateNewId(project.Project.Id, Path.GetFileName(path)),
-                        Path.GetFileName(path),
-                        sourceText,
-                        filePath: path);
-                }
+                return null;
             }
         }
 
@@ -862,14 +974,25 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     {
         try
         {
-            var path = IncrementalPaths.CanonicalAbsolutePath(fileEvent.Path);
-            if (_dirtyPaths.TryGetValue(path, out var existing))
+            if (fileEvent.Change.RequiresColdReconciliation)
             {
-                _dirtyPaths[path] = existing with { LastGeneration = Math.Max(existing.LastGeneration, fileEvent.Generation) };
+                Volatile.Write(ref _requiresColdReconciliation, 1);
             }
-            else
+
+            foreach (var endpoint in fileEvent.Change.Endpoints)
             {
-                _dirtyPaths.Add(path, new DirtyPathState(path, fileEvent.Generation, fileEvent.Generation));
+                var path = IncrementalPaths.CanonicalAbsolutePath(endpoint);
+                if (_dirtyPaths.TryGetValue(path, out var existing))
+                {
+                    _dirtyPaths[path] = existing with
+                    {
+                        LastGeneration = Math.Max(existing.LastGeneration, fileEvent.Generation),
+                    };
+                }
+                else
+                {
+                    _dirtyPaths.Add(path, new DirtyPathState(path, fileEvent.Generation, fileEvent.Generation));
+                }
             }
 
             _generation = _generation.AdvanceEventsThrough(
@@ -884,18 +1007,68 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 
     private void MarkEventDeliveryUntrusted(string reason)
     {
-        if (Interlocked.Exchange(ref _eventDeliveryUntrusted, 1) == 0)
+        lock (_trustGate)
         {
-            Interlocked.Increment(ref _eventTrustVersion);
-            try
+            _eventTrustVersion++;
+            _eventDeliveryUntrusted = 1;
+        }
+
+        try
+        {
+            // Every loss advances the epoch and notifies the host. The host
+            // coalesces the semaphore signal, while a second loss during a
+            // rebuild remains visible and keeps recovery pending.
+            _trustLostCallback?.Invoke(reason);
+        }
+        catch
+        {
+            // A watcher callback must never fail because a recovery signal
+            // consumer is stopping. The session remains untrusted.
+        }
+    }
+
+    private bool IsEventDeliveryUntrusted()
+    {
+        lock (_trustGate)
+        {
+            return _eventDeliveryUntrusted != 0;
+        }
+    }
+
+    private long CaptureEventTrustVersion()
+    {
+        lock (_trustGate)
+        {
+            return _eventTrustVersion;
+        }
+    }
+
+    private bool TryAcknowledgeEventTrust(long version)
+    {
+        lock (_trustGate)
+        {
+            if (_eventTrustVersion != version)
             {
-                _trustLostCallback?.Invoke(reason);
+                return false;
             }
-            catch
-            {
-                // A watcher callback must never fail because a recovery signal
-                // consumer is stopping. The session remains untrusted.
-            }
+
+            _eventDeliveryUntrusted = 0;
+            return true;
+        }
+    }
+
+    private void NotifyInputSnapshotChanged(WatcherInputSnapshot snapshot, out bool coverageChanged)
+    {
+        coverageChanged = false;
+        try
+        {
+            coverageChanged = _inputSnapshotChangedCallback?.Invoke(snapshot) == true;
+        }
+        catch
+        {
+            // Snapshot publication is an optimization boundary for the host.
+            // A watcher coverage failure is reported through its normal
+            // recovery path; it must not strand the Roslyn worker here.
         }
     }
 
@@ -904,24 +1077,22 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         var dirty = new HashSet<string>(StringComparer.Ordinal);
         foreach (var path in duePaths)
         {
-            if (IsBuildInput(path))
+            if (_inputSnapshot.IsKnownSource(path))
             {
-                Volatile.Write(ref _requiresColdReconciliation, 1);
-                return _fingerprints.Keys.ToHashSet(StringComparer.Ordinal);
+                var matchingProjects = ResolveProjectsForPath(path);
+                if (matchingProjects.Count > 0)
+                {
+                    dirty.UnionWith(matchingProjects);
+                    continue;
+                }
             }
 
-            var matchingProjects = ResolveProjectsForPath(path);
-            if (matchingProjects.Count > 0)
-            {
-                dirty.UnionWith(matchingProjects);
-                continue;
-            }
-
-            if (path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
-            {
-                Volatile.Write(ref _requiresColdReconciliation, 1);
-                return _fingerprints.Keys.ToHashSet(StringComparer.Ordinal);
-            }
+            // Only exact source edits are eligible for the warm document path.
+            // New/deleted/renamed sources and every other accepted input must
+            // be re-evaluated by MSBuild so Include/Remove/Condition semantics
+            // remain authoritative.
+            Volatile.Write(ref _requiresColdReconciliation, 1);
+            return _fingerprints.Keys.ToHashSet(StringComparer.Ordinal);
         }
 
         return dirty.Count == 0
@@ -937,43 +1108,23 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             return matches;
         }
 
-        foreach (var project in _loadedSolution.Projects)
+        foreach (var projectKey in _inputSnapshot.GetSourceProjects(path))
         {
-            var fingerprint = _fingerprints.GetValueOrDefault(project.Identity.Key);
-            if (fingerprint is null)
+            if (_fingerprints.ContainsKey(projectKey))
             {
-                continue;
-            }
-
-            var relativePath = IncrementalPaths.CanonicalRelativePath(path, _request.RepositoryRoot);
-            if (fingerprint.SourceFiles.Any(source => string.Equals(source.RelativePath, relativePath, StringComparison.Ordinal))
-                || fingerprint.ProjectFile is { } projectFile
-                    && string.Equals(projectFile.RelativePath, relativePath, StringComparison.Ordinal)
-                || IsUnderProjectDirectory(path, project.Identity))
-            {
-                if (!IsIgnoredPath(path))
-                {
-                    matches.Add(project.Identity.Key);
-                }
+                matches.Add(projectKey);
             }
         }
 
         return matches;
     }
 
-    private bool IsUnderProjectDirectory(string path, ProjectIdentity identity)
-    {
-        var projectPath = Path.Combine(
-            _request.RepositoryRoot,
-            identity.RelativePath.Replace('/', Path.DirectorySeparatorChar));
-        var projectDirectory = Directory.Exists(projectPath)
-            ? projectPath
-            : Path.GetDirectoryName(projectPath) ?? _request.RepositoryRoot;
-        var relative = Path.GetRelativePath(projectDirectory, path);
-        return !relative.Equals("..", StringComparison.Ordinal)
-            && !relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal)
-            && !Path.IsPathRooted(relative);
-    }
+    private static bool PathsEqual(string? first, string second) =>
+        first is not null
+        && string.Equals(
+            IncrementalPaths.CanonicalAbsolutePath(first),
+            IncrementalPaths.CanonicalAbsolutePath(second),
+            IncrementalPaths.PathComparison);
 
     private IReadOnlyList<string> DueDirtyPaths(long targetGeneration) => _dirtyPaths.Values
         .Where(path => path.FirstGeneration <= targetGeneration)
@@ -1140,43 +1291,17 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         return separator < 0 ? referenceKey : referenceKey[..separator];
     }
 
-    private static bool PathsEqual(string? first, string second) =>
-        first is not null
-        && string.Equals(
-            IncrementalPaths.CanonicalAbsolutePath(first),
-            IncrementalPaths.CanonicalAbsolutePath(second),
-            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
-
-    private static bool IsBuildInput(string path) =>
-        path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)
-        || path.EndsWith(".sln", StringComparison.OrdinalIgnoreCase)
-        || path.EndsWith(".slnx", StringComparison.OrdinalIgnoreCase)
-        || path.EndsWith(".props", StringComparison.OrdinalIgnoreCase)
-        || path.EndsWith(".targets", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(Path.GetFileName(path), "global.json", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(Path.GetFileName(path), "Directory.Build.props", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(Path.GetFileName(path), "Directory.Build.targets", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(Path.GetFileName(path), "Directory.Packages.props", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsIgnoredPath(string path)
-    {
-        var segments = path.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
-        return segments.Any(segment =>
-            string.Equals(segment, "bin", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(segment, "obj", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(segment, ".git", StringComparison.OrdinalIgnoreCase));
-    }
-
     private abstract record SessionCommand;
 
     private sealed record RefreshCommand(
         RefreshTarget Target,
         bool Rebuild,
+        bool PublishOutput,
         TaskCompletionSource<IncrementalRefreshResult> Completion) : SessionCommand;
 
     private sealed record WatcherInvalidatedCommand(string Reason) : SessionCommand;
 
-    private sealed record FileChangeCommand(string Path, long Generation);
+    private sealed record FileChangeCommand(FileChangeEvent Change, long Generation);
 
     private sealed record DirtyPathState(string Path, long FirstGeneration, long LastGeneration);
 }

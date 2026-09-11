@@ -491,6 +491,15 @@ internal sealed class IncrementalCacheStore
         [JsonPropertyName("source_files")]
         public List<SourceFingerprintDto>? SourceFiles { get; init; }
 
+        [JsonPropertyName("dependency_files")]
+        public List<SourceFingerprintDto>? DependencyFiles { get; init; }
+
+        [JsonPropertyName("dependency_discovery_complete")]
+        public bool? DependencyDiscoveryComplete { get; init; }
+
+        [JsonPropertyName("compilation_options_key")]
+        public string? CompilationOptionsKey { get; init; }
+
         [JsonPropertyName("project_references")]
         public List<string>? ProjectReferences { get; init; }
 
@@ -499,7 +508,13 @@ internal sealed class IncrementalCacheStore
 
         public ProjectFingerprint ToModel()
         {
-            if (Project is null || SourceFiles is null || ProjectReferences is null || Digest is null)
+            if (Project is null
+                || SourceFiles is null
+                || DependencyFiles is null
+                || DependencyDiscoveryComplete is null
+                || CompilationOptionsKey is null
+                || ProjectReferences is null
+                || Digest is null)
             {
                 throw new InvalidDataException("The incremental cache project fingerprint is incomplete.");
             }
@@ -508,7 +523,10 @@ internal sealed class IncrementalCacheStore
                 Project.ToModel(),
                 ProjectFile?.ToModel(),
                 SourceFiles.Select(source => source.ToModel()),
-                ProjectReferences);
+                ProjectReferences,
+                DependencyFiles.Select(dependency => dependency.ToModel()),
+                DependencyDiscoveryComplete.Value,
+                CompilationOptionsKey);
             if (!string.Equals(Digest, model.Digest, StringComparison.Ordinal))
             {
                 throw new InvalidDataException($"The fingerprint for project '{model.Project.Key}' is invalid.");
@@ -522,6 +540,9 @@ internal sealed class IncrementalCacheStore
             Project = ProjectIdentityDto.FromModel(model.Project),
             ProjectFile = model.ProjectFile is null ? null : SourceFingerprintDto.FromModel(model.ProjectFile),
             SourceFiles = model.SourceFiles.Select(SourceFingerprintDto.FromModel).ToList(),
+            DependencyFiles = model.DependencyFiles.Select(SourceFingerprintDto.FromModel).ToList(),
+            DependencyDiscoveryComplete = model.DependencyDiscoveryComplete,
+            CompilationOptionsKey = model.CompilationOptionsKey,
             ProjectReferences = model.ProjectReferenceKeys.ToList(),
             Digest = model.Digest,
         };

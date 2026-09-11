@@ -1,5 +1,8 @@
 using Graphify.CSharp.Domain;
 using Graphify.CSharp.Incremental;
+using Graphify.CSharp.Roslyn;
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.CSharp;
 
 namespace Graphify.CSharp.Tests.Incremental;
 
@@ -83,29 +86,66 @@ public sealed class IncrementalContractsTests
         var project = new ProjectIdentity("src/App/App.csproj", "net10.0");
         var sourceA = new SourceFingerprint("src/App/A.cs", true, 1, 1);
         var sourceB = new SourceFingerprint("src/App/B.cs", true, 1, 1);
+        var dependency = new SourceFingerprint("build/generator.props", true, 1, 1);
         var first = new ProjectFingerprint(
             project,
             new SourceFingerprint("src/App/App.csproj", true, 1, 1),
             [sourceB, sourceA],
-            ["project=z", "project=a"]);
+            ["project=z", "project=a"],
+            [dependency]);
         var same = new ProjectFingerprint(
             project,
             new SourceFingerprint("src/App/App.csproj", true, 1, 1),
             [sourceA, sourceB],
-            ["project=a", "project=z"]);
+            ["project=a", "project=z"],
+            [dependency]);
         var changedDependency = new ProjectFingerprint(
             project,
             new SourceFingerprint("src/App/App.csproj", true, 1, 1),
             [sourceA, sourceB],
-            ["project=a", "project=b"]);
+            ["project=a", "project=b"],
+            [dependency]);
 
         Assert.True(
             new[] { "src/App/A.cs", "src/App/B.cs" }
                 .SequenceEqual(first.SourceFiles.Select(source => source.RelativePath)));
         Assert.True(new[] { "project=a", "project=z" }.SequenceEqual(first.ProjectReferenceKeys));
+        Assert.Equal("build/generator.props", Assert.Single(first.DependencyFiles).RelativePath);
         Assert.Equal(first.Digest, same.Digest);
         Assert.Equal(FingerprintComparison.MetadataMatch, first.CompareTo(same));
         Assert.Equal(FingerprintComparison.Different, first.CompareTo(changedDependency));
+    }
+
+    [Fact]
+    public void Compilation_option_keys_are_deterministic_and_semantic()
+    {
+        var firstParse = new CSharpParseOptions(
+            LanguageVersion.CSharp13,
+            DocumentationMode.Parse,
+            SourceCodeKind.Regular,
+            preprocessorSymbols: ["FEATURE_B", "FEATURE_A"]);
+        var sameParse = new CSharpParseOptions(
+            LanguageVersion.CSharp13,
+            DocumentationMode.Parse,
+            SourceCodeKind.Regular,
+            preprocessorSymbols: ["FEATURE_A", "FEATURE_B"]);
+        var changedParse = firstParse.WithLanguageVersion(LanguageVersion.CSharp12);
+        var firstCompilation = new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
+            .WithAllowUnsafe(true)
+            .WithUsings(System.Collections.Immutable.ImmutableArray.Create("System.Linq", "System"));
+        var sameCompilation = new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary)
+            .WithAllowUnsafe(true)
+            .WithUsings(System.Collections.Immutable.ImmutableArray.Create("System", "System.Linq"));
+        var changedCompilation = firstCompilation.WithOptimizationLevel(OptimizationLevel.Release);
+
+        var first = IncrementalProjectFingerprintBuilder.CreateCompilationOptionsKey(firstParse, firstCompilation);
+        var same = IncrementalProjectFingerprintBuilder.CreateCompilationOptionsKey(sameParse, sameCompilation);
+        var parseChanged = IncrementalProjectFingerprintBuilder.CreateCompilationOptionsKey(changedParse, firstCompilation);
+        var compilationChanged = IncrementalProjectFingerprintBuilder.CreateCompilationOptionsKey(firstParse, changedCompilation);
+
+        Assert.Equal(first, same);
+        Assert.NotEqual(first, parseChanged);
+        Assert.NotEqual(first, compilationChanged);
     }
 
     [Fact]
@@ -170,6 +210,16 @@ public sealed class IncrementalContractsTests
             var store = new IncrementalCacheStore();
             await store.SaveAsync(path, state);
 
+            var legacyJson = (await File.ReadAllTextAsync(path)).Replace(
+                RefreshRequestIdentity.CurrentCacheSchemaVersion,
+                "graphify-csharp/incremental-cache/v2",
+                StringComparison.Ordinal);
+            await File.WriteAllTextAsync(path, legacyJson);
+            var legacy = await store.LoadAsync(path, state.Request);
+            Assert.Equal(IncrementalCacheLoadStatus.Incompatible, legacy.Status);
+
+            await store.SaveAsync(path, state);
+
             var wrongRequest = new RefreshRequestIdentity(
                 state.Request.InputPath,
                 state.Request.RepositoryRoot,
@@ -228,8 +278,9 @@ public sealed class IncrementalContractsTests
             project,
             new SourceFingerprint("src/App/App.csproj", true, 12, 100),
             [new SourceFingerprint("src/App/App.cs", true, 20, 200)],
-            ["project=src/Library/Library.csproj|tfm=net10.0"]);
-        var identity = new SymbolIdentity(project, "App", [new ContainingTypeIdentity("Program")], SymbolKind.Method, "Run");
+            ["project=src/Library/Library.csproj|tfm=net10.0"],
+            [new SourceFingerprint("build/generator.props", true, 1, 1)]);
+        var identity = new SymbolIdentity(project, "App", [new ContainingTypeIdentity("Program")], global::Graphify.CSharp.Domain.SymbolKind.Method, "Run");
         var node = GraphNode.ForSymbol(identity, [new SourceLocation("src/App/App.cs", 4, 5)]);
         var graph = GraphSnapshot.Create([node], []);
         var contribution = new ProjectContributionEnvelope(fingerprint, graph, ["diagnostic"]);

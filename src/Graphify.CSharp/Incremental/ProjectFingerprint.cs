@@ -9,7 +9,10 @@ internal sealed record ProjectFingerprint
         ProjectIdentity project,
         SourceFingerprint? projectFile,
         IEnumerable<SourceFingerprint>? sourceFiles,
-        IEnumerable<string>? projectReferenceKeys)
+        IEnumerable<string>? projectReferenceKeys,
+        IEnumerable<SourceFingerprint>? dependencyFiles = null,
+        bool dependencyDiscoveryComplete = true,
+        string? compilationOptionsKey = null)
     {
         Project = project ?? throw new ArgumentNullException(nameof(project));
         ProjectFile = projectFile;
@@ -27,6 +30,22 @@ internal sealed record ProjectFingerprint
         SourceFiles = normalizedSourceFiles
             .Distinct()
             .ToImmutableArray();
+        var normalizedDependencyFiles = (dependencyFiles ?? Array.Empty<SourceFingerprint>())
+            .Select(file => file ?? throw new ArgumentException("Dependency fingerprint cannot be null.", nameof(dependencyFiles)))
+            .OrderBy(file => file.RelativePath, StringComparer.Ordinal)
+            .ToArray();
+        if (normalizedDependencyFiles
+            .GroupBy(file => file.RelativePath, StringComparer.Ordinal)
+            .Any(group => group.Select(file => file.CanonicalForm).Distinct(StringComparer.Ordinal).Count() > 1))
+        {
+            throw new ArgumentException("A project fingerprint cannot contain conflicting dependency entries for one path.", nameof(dependencyFiles));
+        }
+
+        DependencyFiles = normalizedDependencyFiles
+            .Distinct()
+            .ToImmutableArray();
+        DependencyDiscoveryComplete = dependencyDiscoveryComplete;
+        CompilationOptionsKey = compilationOptionsKey ?? string.Empty;
         ProjectReferenceKeys = (projectReferenceKeys ?? Array.Empty<string>())
             .Where(key => !string.IsNullOrWhiteSpace(key))
             .Select(key => key.Trim())
@@ -45,6 +64,12 @@ internal sealed record ProjectFingerprint
 
     public ImmutableArray<string> ProjectReferenceKeys { get; }
 
+    public ImmutableArray<SourceFingerprint> DependencyFiles { get; }
+
+    public bool DependencyDiscoveryComplete { get; }
+
+    public string CompilationOptionsKey { get; }
+
     public string CanonicalKey { get; }
 
     public string Digest { get; }
@@ -53,7 +78,10 @@ internal sealed record ProjectFingerprint
     {
         ArgumentNullException.ThrowIfNull(other);
         if (!string.Equals(Project.Key, other.Project.Key, StringComparison.Ordinal)
-            || !ProjectReferenceKeys.SequenceEqual(other.ProjectReferenceKeys, StringComparer.Ordinal))
+            || !ProjectReferenceKeys.SequenceEqual(other.ProjectReferenceKeys, StringComparer.Ordinal)
+            || !DependencyDiscoveryComplete
+            || !other.DependencyDiscoveryComplete
+            || !string.Equals(CompilationOptionsKey, other.CompilationOptionsKey, StringComparison.Ordinal))
         {
             return FingerprintComparison.Different;
         }
@@ -78,6 +106,20 @@ internal sealed record ProjectFingerprint
             }
         }
 
+        if (DependencyFiles.Length != other.DependencyFiles.Length)
+        {
+            return FingerprintComparison.Different;
+        }
+
+        foreach (var (dependency, otherDependency) in DependencyFiles.Zip(other.DependencyFiles))
+        {
+            comparison = Combine(comparison, dependency.CompareTo(otherDependency));
+            if (comparison == FingerprintComparison.Different)
+            {
+                return comparison;
+            }
+        }
+
         return comparison;
     }
 
@@ -85,12 +127,16 @@ internal sealed record ProjectFingerprint
     {
         var projectFile = ProjectFile?.CanonicalForm ?? "<none>";
         var sources = string.Join('\u001E', SourceFiles.Select(file => file.CanonicalForm));
+        var dependencies = string.Join('\u001E', DependencyFiles.Select(file => file.CanonicalForm));
         var references = string.Join('\u001E', ProjectReferenceKeys.Select(CanonicalText.Escape));
         return string.Join(
             '\u001D',
             Project.Key,
             projectFile,
             sources,
+            dependencies,
+            DependencyDiscoveryComplete ? "dependency-discovery-complete" : "dependency-discovery-incomplete",
+            CanonicalText.Escape(CompilationOptionsKey),
             references);
     }
 
