@@ -148,7 +148,15 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             {
                 Interlocked.Decrement(ref _queuedEventCount);
             }
-            else
+            else if (Volatile.Read(ref _eventDeliveryUntrusted) == 0)
+            {
+                // Publish the background request before waking the worker.
+                // Reversing these operations allows the worker to consume the
+                // event signal, observe no request, and then sleep forever.
+                Interlocked.Exchange(ref _backgroundIndexRequested, 1);
+            }
+
+            if (accepted)
             {
                 _workSignal.Release();
             }
@@ -157,12 +165,6 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         if (!accepted)
         {
             MarkEventDeliveryUntrusted("The file-system event queue is full or received an invalid path.");
-        }
-        else if (Volatile.Read(ref _eventDeliveryUntrusted) == 0
-            && Interlocked.Exchange(ref _backgroundIndexRequested, 1) == 0)
-        {
-            // The event signal below wakes the worker; this flag causes the
-            // worker to index after it has drained the event queue.
         }
     }
 
