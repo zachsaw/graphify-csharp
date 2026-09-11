@@ -149,18 +149,19 @@ Nodes contain stable C# properties:
   `label`, `range_variable`, `indexer`, or `union` (with the .NET 11 tool asset).
   Closed hierarchy types additionally carry `is_closed=true`.
 
-Edges point from the source declaration to the referenced declaration. Reverse
-the edges in Graphify to obtain callers. `calls`, `references`, `implements`,
-`inherits`, and `overrides` are direct Roslyn evidence; invocation and
-constructor arguments also reference their bound source formal parameters.
+Edges point from the source declaration to the referenced declaration. Inspect
+incoming `calls` edges to obtain callers and incoming `references` edges to
+obtain other referencers. `calls`, `references`, `implements`, `inherits`, and
+`overrides` are direct Roslyn evidence; invocation and constructor arguments
+also reference their bound source formal parameters.
 Locations on each edge explain where the relationship was observed.
 Compiler-known entry points are marked on their node as `is_entry_point=true`.
 
 The `graphify_csharp.diagnostics` array reports workspace-load issues and
-recoverable declaration-identity issues. An unsupported or otherwise
-unrepresentable Roslyn declaration is skipped with its kind, display name, and
-repository-relative source location; other declarations continue to be
-emitted.
+recoverable declaration or semantic-extraction issues. An unsupported or
+otherwise unrepresentable Roslyn declaration or operation is identified with
+its kind or affected document and repository-relative source location where
+available; unaffected declarations and documents continue to be emitted.
 
 The declaration catalog covers source namespaces, named types, constructors,
 methods/operators/local functions, properties/indexers, fields/enum values,

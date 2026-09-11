@@ -7,7 +7,7 @@
 
 ## Give your LLM agent an IDE’s semantic map
 
-We humans have the luxury of Rider / Resharper.
+We humans have the luxury of Rider.
 
 When we need to understand a C# codebase, we jump to an implementation, walk
 up to a base class, follow derived types, find usages, inspect overrides, trace
@@ -15,11 +15,12 @@ a call hierarchy, and let the compiler distinguish overloaded and generic
 symbols for us. The IDE quietly answers the hard questions while we navigate.
 
 Most coding agents start somewhere very different: a terminal, text search,
-file snippets, and a name-based graph. That is useful for finding words. It is
-not the same as understanding the program. Two methods can have the same name
-and completely different contracts. An interface call can land on an override
-in another project. A generic invocation can bind to one precise method while
-other textually similar candidates remain irrelevant.
+file snippets, and a broad repository graph. That is useful for finding words
+and broad relationships. It is not the same as understanding the program. Two
+methods can have the same name and completely different contracts. An
+interface call can land on an override in another project. A generic invocation
+can bind to one precise method while other textually similar candidates remain
+irrelevant.
 
 [Graphify](https://github.com/Graphify-Labs/graphify) gives agents a useful
 repository graph, but Graphify alone is not a C# compiler. A general graph can
@@ -45,7 +46,7 @@ exports.
 | Move between base and derived types | `inherits` and `overrides` edges |
 | Disambiguate overloads and generics | Stable symbol identities with bound parameter and type information |
 | Inspect a large solution | Project, target-framework, source-location, and provenance metadata |
-| Refresh after editing | A warm watcher with an explicit, complete JSON publication barrier |
+| Keep navigating while editing | A warm watcher that prepares changes and publishes a complete JSON snapshot on demand |
 
 The result is not a text dump with better formatting. It is the semantic
 evidence an agent can use to navigate a C# program without an IDE.
@@ -56,13 +57,13 @@ The question that exposed the gap was simple:
 
 > “Which methods are actually used, and which are only reachable from tests?”
 
-Text search is not enough. Generic types, overloads, inheritance, extension
-members, generated compiler bindings, and cross-project references make
-name-based answers unreliable. Before an agent can make a useful usage or
-dead-code assessment, it needs the same symbol relationships a human gets from
-IDE navigation.
+Text search and broad graph relationships are not enough. Generic types,
+overloads, inheritance, extension members, generated compiler bindings, and
+cross-project references make name-based answers unreliable. Before an agent can
+make a useful usage or dead-code assessment, it needs the same symbol
+relationships a human gets from IDE navigation.
 
-Graphify C# loads the real MSBuild project with Roslyn and emits the semantic
+Graphify C# loads the project through MSBuild and Roslyn and emits the semantic
 facts an agent needs:
 
 - exact symbol identity instead of names that collide;
@@ -80,26 +81,26 @@ something that needs human review.
 ## What can an agent ask now?
 
 - What calls this exact overload or constructor?
-- Which code paths reference this field, property, event, type, or enum member?
+- Which source declarations reference this field, property, event, type, or enum member?
 - Which classes inherit from this type or implement this interface?
 - Which overrides satisfy this virtual or interface member?
 - Which arguments bind to which formal parameters?
 - Which declarations have zero observed inbound static references?
 - Which references originate from namespaces or projects named Tests?
-- What changed since the last index?
-- Can I refresh the graph without loading every project from scratch?
 
 That is the difference between asking an agent to search a repository and giving
 it a semantic map of the repository.
 
 ## Feature spotlight: usage and dead-code audits
 
-Every declaration has a stable identity. Every extracted relationship points from
-the declaration where it was observed to the declaration it resolved to.
+Every emitted declaration has a stable identity. Every extracted relationship
+points from the declaration where it was observed to the declaration it
+resolved to.
 
-To find callers, reverse the incoming edges. To find test-only usage, classify
-the caller’s namespace or project metadata. To find zero-reference
-declarations, compare the declaration catalog with inbound edges.
+To find callers, inspect incoming `calls` edges. To find other referencers,
+inspect incoming `references` edges. To find test-only usage, classify the
+caller’s namespace or project metadata. To find zero-reference declarations,
+compare the declaration catalog with inbound edges.
 
 No special test framework integration is required. No commercial analyzer is
 required. The output is plain Graphify-compatible JSON.
@@ -327,11 +328,11 @@ Every semantic edge is directed from its source declaration to its target and
 marked as extracted compiler evidence. Stable IDs include project and target
 framework, so overloads and multi-project symbols do not collapse into one name.
 
-If Roslyn exposes a declaration shape that cannot yet be assigned a stable
-identity, the enricher records a diagnostic with its kind, display name, and
-source location, skips only that declaration, and continues extracting the rest
-of the graph. Unsupported syntax produces visible diagnostics rather than
-crashing the run.
+If Roslyn exposes a declaration or operation that this version cannot represent,
+the tool records a diagnostic identifying the affected item or document, with a
+source location where available, and continues extracting unaffected
+declarations and documents. Any omitted evidence is therefore visible instead
+of causing the run to crash.
 
 ## Warm indexing for agent workflows
 
@@ -352,8 +353,9 @@ queues file-system hints away from the OS callback, and can prepare dirty
 projects in the background.
 
 A normal invocation is the explicit refresh barrier. It connects to a matching
-watcher, waits until indexing is ready, and atomically publishes the complete
-JSON document. Ordinary file changes do not silently rewrite the public output:
+watcher, waits until indexing is ready, and ensures that a complete JSON
+document is current, publishing it atomically when needed. Ordinary file
+changes do not silently rewrite the public output:
 
 ~~~text
 graphify-csharp \
@@ -375,8 +377,8 @@ remains readable while recovery runs, and recovery does not delete user files.
 
 ## Determinism and real-world validation
 
-The same input, configuration, and target framework produce byte-for-byte
-repeatable output:
+The same input, repository root, configuration, target framework, and toolchain
+produce byte-for-byte repeatable output:
 
 ~~~text
 ./scripts/check-deterministic-extraction.sh \
@@ -385,10 +387,12 @@ repeatable output:
   --configuration Release
 ~~~
 
-The repository also contains repeatable real-world and packaged watcher E2E
-scripts. They clone a pinned third-party C# fixture into the ignored
-`.e2e` directory, exercise complex declarations and relationships, and run
-the packaged tool through both supported runtime assets:
+The repository contains two repeatable E2E paths. The real-world script builds
+and installs a local package, clones a pinned third-party C# fixture into the
+ignored `.e2e` directory, exercises complex declarations and relationships, and
+runs both supported runtime assets. The watcher script packages and installs
+the tool in an isolated temporary directory and validates the watcher lifecycle
+for one selected asset:
 
 ~~~text
 ./scripts/run-real-world-e2e.sh
