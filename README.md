@@ -5,9 +5,9 @@
 [![NuGet downloads](https://img.shields.io/nuget/dt/Graphify.CSharp.svg)](https://www.nuget.org/packages/Graphify.CSharp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Give your C# agent an IDE’s semantic map
+## Give your LLM agent an IDE’s semantic map
 
-We humans have the luxury of Rider.
+We humans have the luxury of Rider / Resharper.
 
 When we need to understand a C# codebase, we jump to an implementation, walk
 up to a base class, follow derived types, find usages, inspect overrides, trace
