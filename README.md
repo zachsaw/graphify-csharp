@@ -79,8 +79,11 @@ The repository's SDKs, packages, and MSBuild inputs must be available locally.
 ### 3. Teach your agent to use it
 
 The included [`graphify-csharp` skill](.agents/skills/graphify-csharp/SKILL.md)
-teaches an agent when to refresh the index, how to follow semantic edges, and
-where static analysis stops.
+is a self-contained guide to using the installed CLI on your codebase: refresh
+the index, follow semantic edges, and interpret static-analysis limits. The
+NuGet installation above supplies the executable; this Markdown file supplies
+the agent's usage instructions. It contains no extractor development or
+release workflow.
 
 Install it in a Codex-compatible project:
 
@@ -92,7 +95,9 @@ curl -fsSL \
 ```
 
 For Claude Code, use `.claude/skills/graphify-csharp/SKILL.md` instead. Reload
-an agent session after installing or updating the skill.
+an agent session after installing or updating the skill. If you installed an
+earlier copy, replace it with the current consumer-only version. See
+[agent setup](docs/USAGE.md#agent-setup) for personal, machine-wide locations.
 
 If you do not use skills, add this to your project instructions:
 
@@ -170,7 +175,9 @@ graphify query "Which methods call the order service?" \
 ```
 
 Graphify remains the general graph workflow. `graphify-csharp` contributes the
-C# layer where compiler binding matters.
+C# layer where compiler binding matters. If you use Graphify's general skill,
+keep it alongside the C# skill and refresh the C# evidence before each C# graph
+query or export. Installing either skill does not install its executable.
 
 ## What gets indexed
 
@@ -260,6 +267,10 @@ The tool exposes this boundary instead of pretending static evidence is a
 runtime reachability proof.
 
 ## Development
+
+Contributing to the indexer itself? The repository's [AGENTS.md](AGENTS.md)
+contains its architecture, performance, and testing guidance. Those rules apply
+here and are separate from the consumer skill installed in your projects.
 
 ```bash
 dotnet restore Graphify.CSharp.sln

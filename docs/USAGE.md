@@ -24,6 +24,40 @@ dotnet run --project src/Graphify.CSharp.Cli --framework net10.0 -- --help
 dotnet pack src/Graphify.CSharp.Cli --configuration Release
 ```
 
+## Agent setup
+
+Install the executable using the NuGet command above. Then copy the
+[consumer skill](../.agents/skills/graphify-csharp/SKILL.md) into the agent's
+skill directory. The skill is a self-contained Markdown guide for using the
+installed tool on the repository being analyzed; no extractor source checkout
+or contributor instructions are needed.
+
+Choose the location that fits your workflow:
+
+| Agent | Project-local directory | Personal directory |
+| --- | --- | --- |
+| Codex | `.agents/skills/graphify-csharp/` | `~/.codex/skills/graphify-csharp/` |
+| Claude Code | `.claude/skills/graphify-csharp/` | `~/.claude/skills/graphify-csharp/` |
+
+For example, install the usage skill for Codex across your projects:
+
+```bash
+mkdir -p ~/.codex/skills/graphify-csharp
+curl -fsSL \
+  https://raw.githubusercontent.com/zachsaw/graphify-csharp/main/.agents/skills/graphify-csharp/SKILL.md \
+  -o ~/.codex/skills/graphify-csharp/SKILL.md
+```
+
+Use the corresponding directory for Claude Code or a project-local copy.
+Reload an agent session after installation. To update an older skill, replace
+its `SKILL.md`; updating the NuGet tool does not update copied skills.
+
+Graphify's general skill and executable are optional, separate installations.
+When using both tools, the C# skill teaches the refresh and semantic-evidence
+steps before Graphify consumes the JSON. Development rules for the extractor
+live in this repository's [AGENTS.md](../AGENTS.md); do not copy them into an
+application merely to use the tool.
+
 ## Extract a repository
 
 Use a repository-relative root so symbol keys and source files do not depend on
