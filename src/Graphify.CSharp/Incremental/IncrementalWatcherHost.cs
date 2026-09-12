@@ -128,7 +128,11 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
         lock (_lifecycleGate)
         {
             ThrowIfDisposedLocked();
-            _startTask ??= StartCoreAsync();
+            // StartCoreAsync performs synchronous lease, watcher, and inventory
+            // work before its first incomplete await. Run that coarse startup
+            // operation outside the lifecycle lock so management stop can
+            // acquire the lock and cancel it while the initial scan is running.
+            _startTask ??= Task.Run(StartCoreAsync);
             start = _startTask;
         }
 
@@ -298,15 +302,6 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
                 _stop.Cancel();
             }
 
-            try
-            {
-                managementServer?.BeginShutdown();
-            }
-            catch (Exception exception)
-            {
-                RecordCleanupFailure(exception);
-            }
-
             lock (_healthGate)
             {
                 _healthy.TrySetCanceled(_stop.Token);
@@ -393,6 +388,19 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
 
             if (managementServer is not null)
             {
+                try
+                {
+                    // Keep the endpoint accepting inspection (and idempotent
+                    // stop requests) until all workload cleanup has completed.
+                    // The stop handler relies on this barrier to return a
+                    // truthful final state to the client.
+                    managementServer.BeginShutdown();
+                }
+                catch (Exception exception)
+                {
+                    RecordCleanupFailure(exception);
+                }
+
                 RecordCleanupFailure(await CaptureCleanupFailureAsync(managementServer.DisposeAsync().AsTask()).ConfigureAwait(false));
             }
 
@@ -561,8 +569,6 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
                 _managementRegistered = false;
             }
 
-            managementServer?.BeginShutdown();
-
             DisposeWatchers();
             _stop.Cancel();
             TryReleaseRecoverySignal();
@@ -578,6 +584,20 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             if (managementRegistered && managementDescriptor is not null)
             {
                 _managementRegistry!.Remove(managementDescriptor.SessionId);
+            }
+
+            try
+            {
+                // Keep startup failure cleanup observable until the workload
+                // has released its resources, matching the normal disposal
+                // path. This also lets a concurrent stop handler inspect the
+                // real host while startup unwinds.
+                managementServer?.BeginShutdown();
+            }
+            catch
+            {
+                // Preserve the original startup failure; the best-effort
+                // server disposal below still observes the transport task.
             }
 
             await AwaitIgnoringCancellation(managementServer?.DisposeAsync().AsTask()).ConfigureAwait(false);

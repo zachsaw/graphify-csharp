@@ -223,6 +223,11 @@ internal sealed class WatcherSessionRegistry
             throw new InvalidDataException("The watcher session descriptor is incomplete.");
         }
 
+        if (!WatcherManagementProtocol.IsValidEndpoint(descriptor.ManagementEndpoint))
+        {
+            throw new InvalidDataException("The watcher session descriptor has an invalid management endpoint.");
+        }
+
         if (descriptor.TargetFramework is not null && string.IsNullOrWhiteSpace(descriptor.TargetFramework))
         {
             throw new InvalidDataException("The watcher session descriptor has an empty target framework.");

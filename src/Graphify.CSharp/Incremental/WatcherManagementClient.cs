@@ -114,16 +114,27 @@ internal sealed class WatcherManagementClient
             throw new ArgumentOutOfRangeException(nameof(timeout));
         }
 
+        if (!WatcherManagementProtocol.IsValidEndpoint(descriptor.ManagementEndpoint))
+        {
+            throw new WatcherManagementException(
+                "invalid_endpoint",
+                "The watcher session descriptor contains an invalid management endpoint.");
+        }
+
         using var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutSource.CancelAfter(timeout);
         var token = timeoutSource.Token;
-        await using var pipe = new NamedPipeClientStream(
-            ".",
-            descriptor.ManagementEndpoint,
-            PipeDirection.InOut,
-            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
         try
         {
+            // Keep construction inside the transport boundary too. A descriptor
+            // can be supplied by an external caller instead of the registry,
+            // and named-pipe implementations may reject a malformed name with
+            // ArgumentException or NotSupportedException.
+            await using var pipe = new NamedPipeClientStream(
+                ".",
+                descriptor.ManagementEndpoint,
+                PipeDirection.InOut,
+                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
             await pipe.ConnectAsync(ToTimeoutMilliseconds(timeout), token).ConfigureAwait(false);
             var request = new WatcherManagementRequest(
                 WatcherManagementProtocol.CurrentVersion,
@@ -163,6 +174,20 @@ internal sealed class WatcherManagementClient
             throw new WatcherManagementException(
                 "unreachable",
                 "The watcher management endpoint could not be reached.",
+                exception);
+        }
+        catch (ArgumentException exception)
+        {
+            throw new WatcherManagementException(
+                "invalid_endpoint",
+                "The watcher session descriptor contains an invalid management endpoint.",
+                exception);
+        }
+        catch (NotSupportedException exception)
+        {
+            throw new WatcherManagementException(
+                "invalid_endpoint",
+                "The watcher session descriptor contains an unsupported management endpoint.",
                 exception);
         }
         catch (JsonException exception)

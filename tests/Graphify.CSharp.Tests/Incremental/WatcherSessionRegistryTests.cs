@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using Graphify.CSharp.Incremental;
 
 namespace Graphify.CSharp.Tests.Incremental;
@@ -83,6 +84,37 @@ public sealed class WatcherSessionRegistryTests
             Assert.All(
                 records.Where(record => !record.IsValid),
                 record => Assert.Contains(record.ErrorCode, new[] { "invalid_descriptor" }));
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(root);
+        }
+    }
+
+    [Fact]
+    public async Task Reports_invalid_endpoint_without_discarding_valid_records()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var registry = new WatcherSessionRegistry(root);
+            var valid = CreateDescriptor(Guid.NewGuid());
+            registry.Register(valid);
+
+            var invalid = CreateDescriptor(Guid.NewGuid()) with { ManagementEndpoint = "\0" };
+            await File.WriteAllTextAsync(
+                registry.DescriptorPath(invalid.SessionId),
+                JsonSerializer.Serialize(invalid));
+
+            var records = registry.ReadAll();
+
+            Assert.Contains(records, record => record.Descriptor?.SessionId == valid.SessionId);
+            var invalidRecord = Assert.Single(
+                records,
+                record => record.Path == registry.DescriptorPath(invalid.SessionId));
+            Assert.False(invalidRecord.IsValid);
+            Assert.Equal("invalid_descriptor", invalidRecord.ErrorCode);
+            Assert.Contains("endpoint", invalidRecord.Diagnostic!, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {

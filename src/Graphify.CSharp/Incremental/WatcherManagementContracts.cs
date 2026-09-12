@@ -10,6 +10,8 @@ internal static class WatcherManagementProtocol
     public const string SchemaVersion = "graphify-csharp/management/v1";
     public const int MaximumFrameBytes = 64 * 1024;
     public const int MaximumConcurrentRequests = 8;
+    private const string EndpointPrefix = "gcm-";
+    private const int EndpointHashLength = 24;
 
     public static string ForSession(Guid sessionId, string stateDirectory)
     {
@@ -20,7 +22,29 @@ internal static class WatcherManagementProtocol
 
         ArgumentException.ThrowIfNullOrWhiteSpace(stateDirectory);
         var key = $"management\u001F{sessionId:D}\u001F{IncrementalPaths.CanonicalAbsolutePath(stateDirectory)}";
-        return $"gcm-{IncrementalHashing.Sha256(key)[..24]}";
+        return $"{EndpointPrefix}{IncrementalHashing.Sha256(key)[..EndpointHashLength]}";
+    }
+
+    public static bool IsValidEndpoint(string? endpoint)
+    {
+        if (endpoint is null
+            || endpoint.Length != EndpointPrefix.Length + EndpointHashLength
+            || !endpoint.StartsWith(EndpointPrefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        for (var index = EndpointPrefix.Length; index < endpoint.Length; index++)
+        {
+            var character = endpoint[index];
+            if (!((character >= '0' && character <= '9')
+                || (character >= 'a' && character <= 'f')))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 }
 

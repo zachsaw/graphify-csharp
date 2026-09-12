@@ -98,6 +98,27 @@ public sealed class WatcherManagementServerTests
     }
 
     [Fact]
+    public async Task Invalid_endpoint_is_reported_as_a_structured_client_failure()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var descriptor = CreateDescriptor(Guid.NewGuid(), "\0", root);
+
+            var exception = await Assert.ThrowsAsync<WatcherManagementException>(() =>
+                new WatcherManagementClient().InspectAsync(
+                    descriptor,
+                    TimeSpan.FromSeconds(2)));
+
+            Assert.Equal("invalid_endpoint", exception.ErrorCode);
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(root);
+        }
+    }
+
+    [Fact]
     public async Task Oversized_frame_gets_a_bounded_protocol_error()
     {
         var root = CreateTemporaryDirectory();

@@ -22,6 +22,7 @@ public sealed class WatcherManagementHostTests
             var start = host.StartAsync();
             var registry = new WatcherSessionRegistry(stateDirectory);
             var descriptor = await WaitForDescriptorAsync(registry);
+            await loader.LoadEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             var response = await new WatcherManagementClient().InspectAsync(
                 descriptor,
                 TimeSpan.FromSeconds(2));
@@ -48,7 +49,7 @@ public sealed class WatcherManagementHostTests
     {
         var fixture = await CreateFixtureAsync();
         var stateDirectory = Path.Combine(Path.GetDirectoryName(fixture.Root)!, $"state-{Guid.NewGuid():N}");
-        var loader = new BlockingProjectLoader(new RoslynWorkspaceLoader());
+        var loader = new NonCancellableBlockingProjectLoader(new RoslynWorkspaceLoader());
         try
         {
             await using var host = new IncrementalWatcherHost(
@@ -63,11 +64,23 @@ public sealed class WatcherManagementHostTests
             var start = host.StartAsync();
             var registry = new WatcherSessionRegistry(stateDirectory);
             var descriptor = await WaitForDescriptorAsync(registry);
+            await loader.LoadEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
             var stop = new WatcherManagementClient().StopAsync(
                 descriptor,
                 TimeSpan.FromSeconds(10));
             await host.WaitForStopRequestedAsync().WaitAsync(TimeSpan.FromSeconds(5));
             Assert.False(stop.IsCompleted);
+
+            // The real host keeps its management endpoint alive until workload
+            // cleanup reaches the barrier, so state remains inspectable while
+            // startup is unwinding.
+            await Task.Delay(100);
+            var stopping = await new WatcherManagementClient().InspectAsync(
+                descriptor,
+                TimeSpan.FromSeconds(2));
+            Assert.True(stopping.Success);
+            Assert.Equal("stopping", stopping.Inspection!.LifecycleState);
+            Assert.False(stopping.Inspection.Ready);
 
             loader.Release();
             await host.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(60));
@@ -92,6 +105,45 @@ public sealed class WatcherManagementHostTests
         finally
         {
             loader.Release();
+            DeleteTemporaryDirectory(fixture.Root);
+            DeleteTemporaryDirectory(stateDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Remote_stop_can_cancel_a_synchronous_initial_inventory_scan()
+    {
+        var fixture = await CreateFixtureAsync();
+        var stateDirectory = Path.Combine(Path.GetDirectoryName(fixture.Root)!, $"state-{Guid.NewGuid():N}");
+        var scanner = new CancellationBlockingInventoryScanner();
+        try
+        {
+            await using var host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(backupScanInterval: TimeSpan.FromHours(1)),
+                inventoryScanner: scanner,
+                managementOptions: new WatcherManagementOptions(
+                    stateDirectory,
+                    "test",
+                    stopTimeout: TimeSpan.FromSeconds(10)));
+            var start = Task.Run(() => host.StartAsync());
+            var registry = new WatcherSessionRegistry(stateDirectory);
+            var descriptor = await WaitForDescriptorAsync(registry);
+            await scanner.ScanEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            var stop = new WatcherManagementClient().StopAsync(
+                descriptor,
+                TimeSpan.FromSeconds(10));
+            var stopResponse = await stop.WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.True(stopResponse.Success);
+            Assert.Equal("stopped", stopResponse.Inspection!.LifecycleState);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => start);
+            Assert.True(scanner.CancellationObserved.Task.IsCompleted);
+        }
+        finally
+        {
             DeleteTemporaryDirectory(fixture.Root);
             DeleteTemporaryDirectory(stateDirectory);
         }
@@ -231,5 +283,58 @@ public sealed class WatcherManagementHostTests
         }
 
         public void Release() => ReleaseSignal.TrySetResult(true);
+    }
+
+    private sealed class NonCancellableBlockingProjectLoader : IProjectLoader
+    {
+        private readonly IProjectLoader _inner;
+
+        public NonCancellableBlockingProjectLoader(IProjectLoader inner)
+        {
+            _inner = inner;
+        }
+
+        public TaskCompletionSource<bool> LoadEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private TaskCompletionSource<bool> ReleaseSignal { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<LoadedSolution> LoadAsync(
+            ProjectLoadRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            LoadEntered.TrySetResult(true);
+            // Deliberately hold startup cleanup at an explicit gate. This
+            // models a synchronous or non-cancellable operation long enough
+            // to prove that inspection remains available while stopping.
+            await ReleaseSignal.Task.ConfigureAwait(false);
+            return await _inner.LoadAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+
+        public void Release() => ReleaseSignal.TrySetResult(true);
+    }
+
+    private sealed class CancellationBlockingInventoryScanner : IFileInventoryScanner
+    {
+        public TaskCompletionSource<bool> ScanEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource<bool> CancellationObserved { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<FileInventorySnapshot> ScanAsync(
+            IReadOnlyList<string> roots,
+            string repositoryRoot,
+            bool includeContentHashes = false,
+            CancellationToken cancellationToken = default,
+            WatcherInputSnapshot? inputSnapshot = null)
+        {
+            ScanEntered.TrySetResult(true);
+            cancellationToken.WaitHandle.WaitOne();
+            CancellationObserved.TrySetResult(true);
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(new FileInventorySnapshot(Array.Empty<FileInventoryEntry>()));
+        }
     }
 }
