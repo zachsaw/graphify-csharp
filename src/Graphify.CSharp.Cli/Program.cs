@@ -1,5 +1,6 @@
 using Graphify.CSharp.Incremental;
 using Graphify.CSharp.Roslyn;
+using System.Reflection;
 
 namespace Graphify.CSharp.Cli;
 
@@ -28,6 +29,22 @@ public static class Program
         string[] args,
         CancellationToken cancellationToken = default)
     {
+        if (WatcherManagementCommandLine.IsManagementCommand(args))
+        {
+            try
+            {
+                return await WatcherManagementCli
+                    .RunAsync(WatcherManagementCommandLine.Parse(args), cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (CommandLineException exception)
+            {
+                return WatcherManagementCli.WriteCommandLineFailure(
+                    args.Contains("--json", StringComparer.Ordinal),
+                    exception.Message);
+            }
+        }
+
         CommandLineOptions options;
         try
         {
@@ -58,11 +75,42 @@ public static class Program
                 await using var host = new IncrementalWatcherHost(
                     request,
                     options.OutputPath,
-                    new IncrementalWatcherOptions(options.WatchScanInterval));
-                await host.StartAsync(cancellationToken).ConfigureAwait(false);
+                    new IncrementalWatcherOptions(options.WatchScanInterval),
+                    managementOptions: new WatcherManagementOptions(
+                        WatcherSessionRegistry.ResolveStateDirectory(),
+                        GetToolVersion()));
+                var start = host.StartAsync(cancellationToken);
+                var stopRequested = host.WaitForStopRequestedAsync();
+                var startup = cancellationToken.CanBeCanceled
+                    ? start.WaitAsync(cancellationToken)
+                    : start;
+                if (await Task.WhenAny(startup, stopRequested).ConfigureAwait(false) == stopRequested)
+                {
+                    await host.DisposeAsync().ConfigureAwait(false);
+                    await IgnoreRequestedStopStartupAsync(start).ConfigureAwait(false);
+                    return 0;
+                }
+
+                await startup.ConfigureAwait(false);
+                if (stopRequested.IsCompleted)
+                {
+                    await host.DisposeAsync().ConfigureAwait(false);
+                    return 0;
+                }
+
                 Console.WriteLine(
                     $"Watching {options.RepositoryRoot}; refresh with graphify-csharp --input {options.InputPath}.");
-                await host.WaitForShutdownAsync(cancellationToken).ConfigureAwait(false);
+                var shutdown = host.WaitForShutdownAsync(cancellationToken);
+                if (await Task.WhenAny(shutdown, stopRequested).ConfigureAwait(false) == stopRequested)
+                {
+                    await host.DisposeAsync().ConfigureAwait(false);
+                    await shutdown.ConfigureAwait(false);
+                }
+                else
+                {
+                    await shutdown.ConfigureAwait(false);
+                }
+
                 return 0;
             }
 
@@ -101,6 +149,27 @@ public static class Program
         {
             Console.Error.WriteLine($"Error: {exception.Message}");
             return 1;
+        }
+    }
+
+    private static string GetToolVersion() =>
+        typeof(Program).Assembly
+            .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
+            .InformationalVersion
+        ?? typeof(Program).Assembly.GetName().Version?.ToString()
+        ?? "unknown";
+
+    private static async Task IgnoreRequestedStopStartupAsync(Task start)
+    {
+        try
+        {
+            await start.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (ObjectDisposedException)
+        {
         }
     }
 }

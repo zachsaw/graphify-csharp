@@ -138,7 +138,38 @@ overflow, bounded-queue overflow, missing roots, or an incomplete backup scan
 invalidate the session; subscriptions are recreated and a cold reconciliation
 completes before the watcher becomes healthy again. The previous complete JSON
 remains readable while recovery runs, and recovery does not delete user files.
-Stop the watcher with Ctrl-C.
+Stop the watcher with Ctrl-C, or use the management commands below.
+
+### Discover and manage watchers
+
+Watcher management is local to the current OS user and does not load a project
+or Roslyn. List sessions across repositories with:
+
+```text
+graphify-csharp ps
+graphify-csharp ps --json
+```
+
+Each session has an opaque `session_id`. Use the full ID, or a prefix only when
+it is unique, to inspect or gracefully stop one watcher:
+
+```text
+graphify-csharp inspect <session-id> --json
+graphify-csharp stop <session-id> --json
+```
+
+`inspect` reports the configured input, root, configuration, selected TFM,
+output, process identity, reachability, lifecycle state, readiness, and
+generation counters. It remains useful while the watcher is starting,
+refreshing, recovering, or stopping. `stop` returns success only after the
+identified watcher has finished its indexing/publication work and released its
+owned resources. A timeout or unreachable endpoint is not treated as a
+successful stop; retry or use Ctrl-C in the worker terminal.
+
+The registry is a small per-user discovery hint. A stale or unreachable entry
+may remain after a crash and is shown by `ps`; it is not used to terminate a PID.
+Do not use a PID or a process-name search as a management selector. Management
+does not provide a force-kill or `stop --all` command.
 
 ### What the watcher watches
 

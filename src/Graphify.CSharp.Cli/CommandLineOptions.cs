@@ -191,7 +191,11 @@ public sealed class CommandLineOptions
         + "      --rebuild                  Ignore incremental cache and rebuild all projects\n"
         + "      --watch                    Keep a warm indexer and serve local refresh requests\n"
         + "      --watch-scan-interval <t>   Backup inventory interval (default: 00:05:00)\n"
-        + "  -h, --help                      Show this help";
+        + "  -h, --help                      Show this help\n\n"
+        + "Watcher management:\n"
+        + "  graphify-csharp ps [--json]\n"
+        + "  graphify-csharp inspect <session-id|prefix> [--json]\n"
+        + "  graphify-csharp stop <session-id|prefix> [--json]";
 
     private static string? Single(IReadOnlyDictionary<string, List<string>> values, string key)
     {

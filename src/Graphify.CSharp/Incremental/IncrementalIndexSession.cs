@@ -121,6 +121,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 
     internal long EventTrustVersion => CaptureEventTrustVersion();
 
+    internal RefreshGeneration Generation => Volatile.Read(ref _generation);
+
     internal bool IsEventTrustValid(long version)
     {
         lock (_trustGate)

@@ -1,7 +1,7 @@
 # Incremental indexing and refresh design
 
-> Status: the deterministic cache, warm worker, local refresh protocol, and
-> resilient watcher are implemented. The watcher policy is intentionally
+> Status: the deterministic cache, warm worker, local refresh protocol,
+> resilient watcher, and local watcher management are implemented. The watcher policy is intentionally
 > conservative at structural and dependency boundaries; the test matrix below
 > is the release-hardening contract.
 
@@ -147,7 +147,26 @@ The exact command spelling can evolve, but the behavior is:
 graphify-csharp ... --watch       # start the long-running worker
 graphify-csharp ...               # request a foreground refresh
 graphify-csharp ... --rebuild     # request a cache-invalidating rebuild
+graphify-csharp ps [--json]       # discover current-user watcher sessions
+graphify-csharp inspect <id>      # inspect one session
+graphify-csharp stop <id>         # request and confirm graceful shutdown
 ```
+
+Management commands are client-side discovery plus a small per-session local
+named-pipe endpoint. They do not require an input path, load MSBuild/Roslyn, or
+read the graph. `ps` reads one bounded descriptor per watcher from the
+current-user application-state directory and probes valid records with bounded
+timeouts. `inspect` and `stop` accept an exact session GUID or a unique prefix;
+an ambiguous prefix fails rather than selecting an arbitrary process.
+
+The descriptor is only a discovery hint. Live state is returned by the worker
+and includes reachability, lifecycle/readiness, process-start identity, and
+event/index/published generations. A stale PID is never terminated by the
+management client. `stop` signals the existing host lifetime owner and reports
+success only after indexing/publication work and leases have completed. The
+management server keeps the completion response path alive long enough to
+reply without awaiting its own disposal, while unrelated `inspect` requests
+remain available during a pending stop.
 
 The normal foreground invocation connects to a healthy matching watcher when
 one exists. It waits for that watcher rather than opening a second MSBuild

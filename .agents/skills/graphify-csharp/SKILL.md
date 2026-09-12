@@ -138,6 +138,26 @@ Stop the watcher before manually removing its `.graphify-csharp/` directory,
 which also holds live leases. A watcher restart performs cold reconciliation;
 it cannot resume a previously trusted event stream.
 
+Use the built-in management commands to discover and control workers across
+repositories for the current OS user:
+
+~~~bash
+graphify-csharp ps --json
+graphify-csharp inspect <session-id-or-unique-prefix> --json
+graphify-csharp stop <session-id-or-unique-prefix> --json
+~~~
+
+Use the exact `session_id` returned by `ps`, or a prefix only when it is unique.
+`inspect` reports whether the worker is starting, ready, refreshing,
+recovering, or stopping. `stop` waits for confirmed graceful shutdown; an
+unreachable or timed-out worker is not considered stopped. Management does not
+kill processes by PID, search by process name, or offer `stop --all`.
+
+The management registry is only a discovery hint. A crashed worker may leave a
+stale entry, and `ps` reports that state without deleting it or contacting a
+different process that later reuses the PID. These commands are optional when
+using Ctrl-C in the watcher terminal.
+
 Membership follows evaluated MSBuild/Roslyn inputs, not `.gitignore`.
 Explicitly included generated inputs can be relevant even under `obj/`.
 Watcher errors, delivery loss, or failed backup scans trigger cold recovery.
