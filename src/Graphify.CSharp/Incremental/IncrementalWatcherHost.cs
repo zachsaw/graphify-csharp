@@ -2,7 +2,7 @@ using Graphify.CSharp.Roslyn;
 
 namespace Graphify.CSharp.Incremental;
 
-internal sealed class IncrementalWatcherHost : IAsyncDisposable
+internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagementHost
 {
     private readonly object _lifecycleGate = new();
     private readonly object _inventoryGate = new();
@@ -14,11 +14,15 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
     private readonly IFileInventoryScanner _inventoryScanner;
     private readonly IFileChangeWatcherFactory _watcherFactory;
     private readonly IncrementalWatcherOptions _options;
+    private readonly WatcherManagementOptions? _managementOptions;
+    private readonly WatcherSessionRegistry? _managementRegistry;
     private readonly IReadOnlyList<WatcherRoot> _baseWatchRoots;
     private readonly IncrementalIndexSession _session;
     private readonly SemaphoreSlim _recoverySignal = new(0);
     private readonly CancellationTokenSource _stop = new();
     private readonly TaskCompletionSource<bool> _shutdown = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<bool> _stopRequested = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource<bool> _workStopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private TaskCompletionSource<bool> _healthy = NewHealthSource();
     private List<WatcherRoot> _watchRoots;
     private List<IFileChangeWatcher> _watchers = [];
@@ -27,6 +31,9 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
     private OutputDestinationLease? _outputLease;
     private WatcherLease? _lease;
     private IncrementalRefreshControlServer? _controlServer;
+    private WatcherManagementServer? _managementServer;
+    private WatcherSessionDescriptor? _managementDescriptor;
+    private bool _managementRegistered;
     private Task? _startTask;
     private Task? _backupTask;
     private Task? _recoveryTask;
@@ -46,7 +53,8 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
         IncrementalOutputPublisher? outputPublisher = null,
         IFileInventoryScanner? inventoryScanner = null,
         IFileChangeWatcherFactory? watcherFactory = null,
-        Func<Guid>? sessionIdFactory = null)
+        Func<Guid>? sessionIdFactory = null,
+        WatcherManagementOptions? managementOptions = null)
     {
         _request = request ?? throw new ArgumentNullException(nameof(request));
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
@@ -57,6 +65,10 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
             request.Configuration,
             request.TargetFramework);
         _options = options ?? new IncrementalWatcherOptions();
+        _managementOptions = managementOptions;
+        _managementRegistry = managementOptions is null
+            ? null
+            : new WatcherSessionRegistry(managementOptions.StateDirectory);
         _inventoryScanner = inventoryScanner ?? new FileInventoryScanner();
         _watcherFactory = watcherFactory ?? new FileSystemChangeWatcherFactory();
         _baseWatchRoots = GetWatchRoots(request);
@@ -85,6 +97,14 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
 
     public string OutputLeasePath => OutputDestinationLease.ForOutput(_outputPath);
 
+    internal string ManagementPipeName => _managementOptions is null
+        ? throw new InvalidOperationException("Management is not enabled for this watcher host.")
+        : WatcherManagementProtocol.ForSession(_session.SessionId, _managementOptions.StateDirectory);
+
+    internal string ManagementDescriptorPath => _managementRegistry is null
+        ? throw new InvalidOperationException("Management is not enabled for this watcher host.")
+        : _managementRegistry.DescriptorPath(_session.SessionId);
+
     public bool IsReady
     {
         get
@@ -108,7 +128,11 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
         lock (_lifecycleGate)
         {
             ThrowIfDisposedLocked();
-            _startTask ??= StartCoreAsync();
+            // StartCoreAsync performs synchronous lease, watcher, and inventory
+            // work before its first incomplete await. Run that coarse startup
+            // operation outside the lifecycle lock so management stop can
+            // acquire the lock and cancel it while the initial scan is running.
+            _startTask ??= Task.Run(StartCoreAsync);
             start = _startTask;
         }
 
@@ -165,76 +189,246 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
         return new ValueTask(disposeTask);
     }
 
+    internal Task WaitForStopRequestedAsync(CancellationToken cancellationToken = default) =>
+        cancellationToken.CanBeCanceled
+            ? _stopRequested.Task.WaitAsync(cancellationToken)
+            : _stopRequested.Task;
+
+    internal Task WaitForWorkStoppedAsync(CancellationToken cancellationToken) =>
+        cancellationToken.CanBeCanceled
+            ? _workStopped.Task.WaitAsync(cancellationToken)
+            : _workStopped.Task;
+
+    WatcherInspectionSnapshot IWatcherManagementHost.GetInspectionSnapshot() => GetInspectionSnapshot();
+
+    void IWatcherManagementHost.RequestStop() => RequestStop();
+
+    Task IWatcherManagementHost.WaitForWorkStoppedAsync(CancellationToken cancellationToken) =>
+        WaitForWorkStoppedAsync(cancellationToken);
+
+    internal void RequestStop()
+    {
+        if (_stopRequested.TrySetResult(true))
+        {
+            // The host is the sole owner of workload and management-server
+            // cleanup. Starting the idempotent cleanup task here closes the
+            // race where startup failure handling and the CLI both try to
+            // dispose the server that is serving this stop request.
+            _ = ObserveDetachedDisposeAsync();
+        }
+    }
+
+    private async Task ObserveDetachedDisposeAsync()
+    {
+        try
+        {
+            await DisposeAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // The stop handler observes the same failure through the work
+            // completion barrier. This detached lifetime owner must still
+            // observe its task so a cleanup failure is never unobserved.
+        }
+    }
+
+    internal WatcherInspectionSnapshot GetInspectionSnapshot()
+    {
+        var generation = _session.Generation;
+        var ready = IsReady;
+        var sessionState = _session.Status switch
+        {
+            IncrementalSessionStatus.Created => "starting",
+            var status => status.ToString().ToLowerInvariant(),
+        };
+        var lifecycleState = _workStopped.Task.IsCompletedSuccessfully
+            ? "stopped"
+            : _stopRequested.Task.IsCompleted
+                ? "stopping"
+                : !ready && sessionState is "ready" or "refreshing"
+                    ? "recovering"
+                : sessionState;
+        var endpoint = _managementOptions is null
+            ? string.Empty
+            : WatcherManagementProtocol.ForSession(_session.SessionId, _managementOptions.StateDirectory);
+        return new WatcherInspectionSnapshot(
+            _session.SessionId,
+            Environment.ProcessId,
+            WatcherProcessIdentity.CurrentStartTimeUtcTicks(),
+            _request.InputPath,
+            _request.RepositoryRoot,
+            _request.Configuration,
+            _request.TargetFramework,
+            _outputPath,
+            endpoint,
+            _managementOptions?.ToolVersion ?? "unknown",
+            WatcherManagementProtocol.CurrentVersion,
+            lifecycleState,
+            ready,
+            generation.EventGeneration,
+            generation.IndexedGeneration,
+            generation.PublishedGeneration);
+    }
+
     private async Task DisposeCoreAsync()
     {
-        Task? start;
-        IncrementalRefreshControlServer? controlServer;
-        lock (_lifecycleGate)
+        try
         {
-            start = _startTask;
-            controlServer = TakeControlServerLocked();
-            _stop.Cancel();
-        }
+            Exception? cleanupFailure = null;
+            void RecordCleanupFailure(Exception? exception)
+            {
+                cleanupFailure ??= exception;
+            }
 
-        lock (_healthGate)
+            Task? start;
+            IncrementalRefreshControlServer? controlServer;
+            WatcherManagementServer? managementServer;
+            WatcherSessionDescriptor? managementDescriptor;
+            var managementRegistered = false;
+            lock (_lifecycleGate)
+            {
+                start = _startTask;
+                controlServer = TakeControlServerLocked();
+                // Take management ownership in the same critical section as the
+                // stop signal. Startup failure cleanup cannot race this handoff
+                // and dispose the server that may be serving the stop request.
+                managementServer = _managementServer;
+                _managementServer = null;
+                managementDescriptor = _managementDescriptor;
+                _managementDescriptor = null;
+                managementRegistered = _managementRegistered;
+                _managementRegistered = false;
+                _stopRequested.TrySetResult(true);
+                _stop.Cancel();
+            }
+
+            lock (_healthGate)
+            {
+                _healthy.TrySetCanceled(_stop.Token);
+            }
+
+            RecordCleanupFailure(TryDisposeWatchers());
+            TryReleaseRecoverySignal();
+            if (controlServer is not null)
+            {
+                RecordCleanupFailure(await CaptureCleanupFailureAsync(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false));
+            }
+
+            // A faulted start task is the startup error already observed by
+            // StartAsync, not a cleanup failure. Observe it so it cannot become
+            // unhandled, while allowing a host that never acquired ownership
+            // to be disposed normally by an await-using scope.
+            await AwaitIgnoringCancellation(start).ConfigureAwait(false);
+
+            Task? backup;
+            Task? recovery;
+            lock (_lifecycleGate)
+            {
+                backup = _backupTask;
+                recovery = _recoveryTask;
+                controlServer = TakeControlServerLocked();
+            }
+
+            if (controlServer is not null)
+            {
+                RecordCleanupFailure(await CaptureCleanupFailureAsync(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false));
+            }
+
+            RecordCleanupFailure(await CaptureCleanupFailureAsync(backup).ConfigureAwait(false));
+            RecordCleanupFailure(await CaptureCleanupFailureAsync(recovery).ConfigureAwait(false));
+
+            // Recovery can be between creating and publishing a watcher set when
+            // shutdown starts. All producer tasks are stopped now, so this final
+            // pass closes anything that was published after the first pass.
+            RecordCleanupFailure(TryDisposeWatchers());
+
+            WatcherLease? lease;
+            OutputDestinationLease? outputLease;
+            lock (_lifecycleGate)
+            {
+                controlServer = TakeControlServerLocked();
+                lease = _lease;
+                _lease = null;
+                outputLease = _outputLease;
+                _outputLease = null;
+            }
+
+            if (controlServer is not null)
+            {
+                RecordCleanupFailure(await CaptureCleanupFailureAsync(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false));
+            }
+
+            RecordCleanupFailure(TryDispose(lease));
+            RecordCleanupFailure(await CaptureCleanupFailureAsync(_session.DisposeAsync().AsTask()).ConfigureAwait(false));
+            RecordCleanupFailure(TryDispose(outputLease));
+
+            if (managementRegistered && managementDescriptor is not null)
+            {
+                try
+                {
+                    _managementRegistry!.Remove(managementDescriptor.SessionId);
+                }
+                catch (Exception exception)
+                {
+                    RecordCleanupFailure(exception);
+                }
+            }
+
+            // The stop handler awaits this barrier and must not be made to await
+            // disposal of the server that is executing that request. The endpoint
+            // stays alive long enough to send the final response below.
+            if (cleanupFailure is null)
+            {
+                _workStopped.TrySetResult(true);
+            }
+            else
+            {
+                _workStopped.TrySetException(cleanupFailure);
+            }
+
+            if (managementServer is not null)
+            {
+                try
+                {
+                    // Keep the endpoint accepting inspection (and idempotent
+                    // stop requests) until all workload cleanup has completed.
+                    // The stop handler relies on this barrier to return a
+                    // truthful final state to the client.
+                    managementServer.BeginShutdown();
+                }
+                catch (Exception exception)
+                {
+                    RecordCleanupFailure(exception);
+                }
+
+                RecordCleanupFailure(await CaptureCleanupFailureAsync(managementServer.DisposeAsync().AsTask()).ConfigureAwait(false));
+            }
+
+            try
+            {
+                _recoverySignal.Dispose();
+                _stop.Dispose();
+            }
+            catch (Exception exception)
+            {
+                RecordCleanupFailure(exception);
+            }
+
+            _shutdown.TrySetResult(true);
+
+            if (cleanupFailure is not null)
+            {
+                throw cleanupFailure;
+            }
+        }
+        catch (Exception exception)
         {
-            _healthy.TrySetCanceled(_stop.Token);
+            // Never strand a management stop handler if an unexpected cleanup
+            // failure occurs before the normal completion point.
+            _workStopped.TrySetException(exception);
+            _shutdown.TrySetResult(true);
+            throw;
         }
-
-        DisposeWatchers();
-        TryReleaseRecoverySignal();
-        if (controlServer is not null)
-        {
-            await AwaitIgnoringCancellation(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false);
-        }
-
-        await AwaitIgnoringCancellation(start).ConfigureAwait(false);
-
-        Task? backup;
-        Task? recovery;
-        lock (_lifecycleGate)
-        {
-            backup = _backupTask;
-            recovery = _recoveryTask;
-            controlServer = TakeControlServerLocked();
-        }
-
-        if (controlServer is not null)
-        {
-            await AwaitIgnoringCancellation(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false);
-        }
-
-        await AwaitIgnoringCancellation(backup).ConfigureAwait(false);
-        await AwaitIgnoringCancellation(recovery).ConfigureAwait(false);
-
-        // Recovery can be between creating and publishing a watcher set when
-        // shutdown starts. All producer tasks are stopped now, so this final
-        // pass closes anything that was published after the first pass.
-        DisposeWatchers();
-
-        WatcherLease? lease;
-        OutputDestinationLease? outputLease;
-        lock (_lifecycleGate)
-        {
-            controlServer = TakeControlServerLocked();
-            lease = _lease;
-            _lease = null;
-            outputLease = _outputLease;
-            _outputLease = null;
-        }
-
-        if (controlServer is not null)
-        {
-            await AwaitIgnoringCancellation(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false);
-        }
-
-        lease?.Dispose();
-        await AwaitIgnoringCancellation(_session.DisposeAsync().AsTask()).ConfigureAwait(false);
-        outputLease?.Dispose();
-
-        _recoverySignal.Dispose();
-        _stop.Dispose();
-        _shutdown.TrySetResult(true);
     }
 
     private async Task StartCoreAsync()
@@ -263,6 +457,14 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
                 _outputLease = outputLease;
                 lease = null;
                 outputLease = null;
+            }
+
+            // The management endpoint is published only after ownership has
+            // been acquired, but before any Roslyn/MSBuild work begins. This
+            // makes startup observable without exposing an unmanaged owner.
+            if (_managementOptions is not null)
+            {
+                await StartManagementAsync(_stop.Token).ConfigureAwait(false);
             }
 
             CreateAndStartWatchers();
@@ -350,12 +552,21 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
 
             WatcherLease? activeLease;
             OutputDestinationLease? activeOutputLease;
+            WatcherManagementServer? managementServer;
+            WatcherSessionDescriptor? managementDescriptor;
+            var managementRegistered = false;
             lock (_lifecycleGate)
             {
                 activeLease = _lease;
                 _lease = null;
                 activeOutputLease = _outputLease;
                 _outputLease = null;
+                managementServer = _managementServer;
+                _managementServer = null;
+                managementDescriptor = _managementDescriptor;
+                _managementDescriptor = null;
+                managementRegistered = _managementRegistered;
+                _managementRegistered = false;
             }
 
             DisposeWatchers();
@@ -370,6 +581,78 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
             activeOutputLease?.Dispose();
             lease?.Dispose();
             outputLease?.Dispose();
+            if (managementRegistered && managementDescriptor is not null)
+            {
+                _managementRegistry!.Remove(managementDescriptor.SessionId);
+            }
+
+            try
+            {
+                // Keep startup failure cleanup observable until the workload
+                // has released its resources, matching the normal disposal
+                // path. This also lets a concurrent stop handler inspect the
+                // real host while startup unwinds.
+                managementServer?.BeginShutdown();
+            }
+            catch
+            {
+                // Preserve the original startup failure; the best-effort
+                // server disposal below still observes the transport task.
+            }
+
+            await AwaitIgnoringCancellation(managementServer?.DisposeAsync().AsTask()).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private async Task StartManagementAsync(CancellationToken cancellationToken)
+    {
+        var options = _managementOptions
+            ?? throw new InvalidOperationException("Management options were not configured.");
+        var registry = _managementRegistry
+            ?? throw new InvalidOperationException("Management registry was not configured.");
+        var server = new WatcherManagementServer(_session.SessionId, this, options);
+        try
+        {
+            await server.StartAsync(cancellationToken).ConfigureAwait(false);
+            var descriptor = new WatcherSessionDescriptor(
+                WatcherSessionRegistry.DescriptorSchemaVersion,
+                _session.SessionId,
+                Environment.ProcessId,
+                WatcherProcessIdentity.CurrentStartTimeUtcTicks(),
+                server.PipeName,
+                _request.InputPath,
+                _request.RepositoryRoot,
+                _request.Configuration,
+                _request.TargetFramework,
+                _outputPath,
+                options.ToolVersion,
+                WatcherManagementProtocol.CurrentVersion);
+
+            var disposeLocalServer = false;
+            lock (_lifecycleGate)
+            {
+                if (Volatile.Read(ref _disposed) != 0)
+                {
+                    disposeLocalServer = true;
+                }
+                else
+                {
+                    _managementServer = server;
+                    _managementDescriptor = descriptor;
+                    registry.Register(descriptor);
+                    _managementRegistered = true;
+                }
+            }
+
+            if (disposeLocalServer)
+            {
+                await AwaitIgnoringCancellation(server.DisposeAsync().AsTask()).ConfigureAwait(false);
+            }
+        }
+        catch
+        {
+            await AwaitIgnoringCancellation(server.DisposeAsync().AsTask()).ConfigureAwait(false);
             throw;
         }
     }
@@ -657,11 +940,55 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
 
     private void DisposeWatcherList(IEnumerable<IFileChangeWatcher> watchers)
     {
+        Exception? firstFailure = null;
         foreach (var watcher in watchers)
         {
-            watcher.PathChanged -= OnWatcherPathChanged;
-            watcher.Failed -= OnWatcherFailed;
-            watcher.Dispose();
+            try
+            {
+                watcher.PathChanged -= OnWatcherPathChanged;
+                watcher.Failed -= OnWatcherFailed;
+                watcher.Dispose();
+            }
+            catch (Exception exception)
+            {
+                firstFailure ??= exception;
+            }
+        }
+
+        if (firstFailure is not null)
+        {
+            throw firstFailure;
+        }
+    }
+
+    private Exception? TryDisposeWatchers()
+    {
+        try
+        {
+            DisposeWatchers();
+            return null;
+        }
+        catch (Exception exception)
+        {
+            return exception;
+        }
+    }
+
+    private static Exception? TryDispose(IDisposable? disposable)
+    {
+        if (disposable is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            disposable.Dispose();
+            return null;
+        }
+        catch (Exception exception)
+        {
+            return exception;
         }
     }
 
@@ -1100,6 +1427,28 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable
             // Disposal must continue releasing resources when a producer
             // task has already faulted. Its original caller observes the
             // startup/refresh failure; cleanup should not strand the host.
+        }
+    }
+
+    private static async Task<Exception?> CaptureCleanupFailureAsync(Task? task)
+    {
+        if (task is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            await task.ConfigureAwait(false);
+            return null;
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+        catch (Exception exception)
+        {
+            return exception;
         }
     }
 }
