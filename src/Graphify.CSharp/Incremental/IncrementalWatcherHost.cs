@@ -468,22 +468,15 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             }
 
             CreateAndStartWatchers();
+            // Keep the refresh endpoint available throughout startup. A
+            // requester that arrives before the first trusted publication must
+            // receive a structured not-ready response instead of waiting for a
+            // pipe that does not exist or reading a stale output file.
+            await StartControlServerAsync().ConfigureAwait(false);
             await RefreshInventoryBaselineAsync(
                     _stop.Token,
                     allowBootstrap: true)
                 .ConfigureAwait(false);
-
-            // Start recovery and backup loops before Roslyn initialization so
-            // failures during the cold start are not lost.
-            lock (_lifecycleGate)
-            {
-                if (Volatile.Read(ref _disposed) != 0)
-                {
-                    return;
-                }
-
-                _recoveryTask = Task.Run(() => RecoveryLoopAsync(_stop.Token));
-            }
 
             await _session.StartAsync(_stop.Token).ConfigureAwait(false);
             await RefreshInventoryBaselineAsync(
@@ -496,37 +489,15 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
                 if (Volatile.Read(ref _disposed) == 0)
                 {
                     _backupTask = Task.Run(() => BackupScanLoopAsync(_stop.Token));
+                    _recoveryTask = Task.Run(() => RecoveryLoopAsync(_stop.Token));
                 }
-            }
-
-            var controlServer = new IncrementalRefreshControlServer(
-                PipeName,
-                _requestIdentity,
-                _outputPath,
-                (rebuild, cancellationToken) => RefreshAsync(rebuild, cancellationToken));
-            var installed = false;
-            lock (_lifecycleGate)
-            {
-                if (Volatile.Read(ref _disposed) == 0)
-                {
-                    _controlServer = controlServer;
-                    controlServer.Start();
-                    installed = true;
-                }
-            }
-
-            if (!installed)
-            {
-                await AwaitIgnoringCancellation(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false);
-                return;
             }
 
             MarkHealthy();
             // Startup is a foreground readiness barrier too. A watcher error
-            // or uncertain bootstrap event may have queued recovery while the
-            // initial Roslyn load was running; do not let StartAsync return
-            // until that recovery has either completed or the host has been
-            // stopped.
+            // may have queued recovery while the initial Roslyn load was
+            // running; do not let StartAsync return until that recovery has
+            // either completed or the host has been stopped.
             await WaitUntilHealthyAsync(_stop.Token).ConfigureAwait(false);
         }
         catch (Exception exception)
@@ -657,6 +628,31 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
         }
     }
 
+    private async Task StartControlServerAsync()
+    {
+        var controlServer = new IncrementalRefreshControlServer(
+            PipeName,
+            _requestIdentity,
+            _outputPath,
+            (rebuild, cancellationToken) => RefreshAsync(rebuild, cancellationToken),
+            GetInspectionSnapshot);
+        var installed = false;
+        lock (_lifecycleGate)
+        {
+            if (Volatile.Read(ref _disposed) == 0)
+            {
+                _controlServer = controlServer;
+                controlServer.Start();
+                installed = true;
+            }
+        }
+
+        if (!installed)
+        {
+            await AwaitIgnoringCancellation(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false);
+        }
+    }
+
     private async Task BackupScanLoopAsync(CancellationToken cancellationToken)
     {
         using var timer = new PeriodicTimer(_options.BackupScanInterval);
@@ -769,15 +765,15 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
         {
             try
             {
-                // The previously evaluated snapshot may contain linked roots
-                // that have since been deleted. Re-establish only the stable
-                // request coverage first; the reload below will publish the
-                // new evaluated roots after MSBuild has had a chance to remove
-                // obsolete links.
+                // Validate the stable request coverage before reloading, but
+                // preserve the previous inventory as the comparison baseline.
+                // Replacing it here would erase edits made while the old
+                // watcher was being torn down and the new one was starting.
                 CreateAndStartWatchers(_baseWatchRoots);
                 await RefreshInventoryBaselineAsync(
                         cancellationToken,
-                        allowBootstrap: true)
+                        allowBootstrap: true,
+                        preserveExistingBaseline: true)
                     .ConfigureAwait(false);
                 // Recovery restores the in-memory Roslyn/catalog state and
                 // trust boundary, but it must not publish a new public graph.
@@ -1058,6 +1054,10 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
 
     private void ReportBootstrapUncertainty(FileChangeEvent change)
     {
+        // A source/project/build input event during a cold load invalidates the
+        // current boundary. Coalesce the transition's first uncertainty into
+        // one cold recovery; later events are covered by that full load and
+        // the post-load scan rather than filling the event queue.
         if (Interlocked.Exchange(ref _bootstrapUncertaintyReported, 1) == 0)
         {
             SignalWatcherFailure(
@@ -1246,12 +1246,17 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
         CancellationToken cancellationToken,
         bool reconcileDifferences = false,
         bool allowBootstrap = false,
-        bool publishOutput = true)
+        bool publishOutput = true,
+        bool preserveExistingBaseline = false)
     {
         while (true)
         {
             var scan = await ScanInventoryAsync(includeContentHashes: false, cancellationToken).ConfigureAwait(false);
-            if (!TrySetInventory(scan, out var previous, allowBootstrap))
+            if (!TrySetInventory(
+                    scan,
+                    out var previous,
+                    allowBootstrap,
+                    preserveExistingBaseline))
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 continue;
@@ -1299,7 +1304,8 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
     private bool TrySetInventory(
         InventoryScanResult scan,
         out FileInventorySnapshot? previous,
-        bool allowBootstrap = false)
+        bool allowBootstrap = false,
+        bool preserveExistingBaseline = false)
     {
         ArgumentNullException.ThrowIfNull(scan);
         previous = null;
@@ -1328,7 +1334,10 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
                 }
 
                 previous = _inventory;
-                _inventory = scan.Snapshot ?? throw new ArgumentNullException(nameof(scan));
+                if (!preserveExistingBaseline || _inventory is null)
+                {
+                    _inventory = scan.Snapshot ?? throw new ArgumentNullException(nameof(scan));
+                }
             }
         }
 

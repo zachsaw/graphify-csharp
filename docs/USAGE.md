@@ -109,8 +109,9 @@ workspace alive, and queues file-system paths without doing extraction in an
 OS callback. It may index dirty projects in the background, but ordinary file
 changes do not publish a new JSON document. Run the normal command when a
 consumer needs a fresh snapshot; it connects only to a watcher with the
-matching analysis configuration and exact output path, then waits until the
-complete document is atomically published:
+matching analysis configuration and exact output path. If that watcher is
+still starting or recovering, the command returns a `not_ready` error and does
+not write JSON; retry after `inspect` reports `ready: true`:
 
 ```text
 graphify-csharp \
@@ -205,14 +206,17 @@ default globs remain authoritative. The reload may be broader than the one
 file that changed; that is the deliberate correctness boundary.
 
 During a cold reload, the watcher briefly enters a conservative transition
-state. It retains known viable coverage and treats uncertain in-scope events as
-requiring cold recovery. Once MSBuild/Roslyn has evaluated the new inputs, the
-new immutable snapshot is published before extraction continues, and watcher
-coverage is extended or replaced from that snapshot. Scans captured against an
-old or transitional snapshot are discarded; existing inventory changes,
-including newly discovered exact inputs, are reconciled before a post-load
-baseline is accepted. This closes the edit window around project membership
-changes without resurrecting deleted external roots.
+state. It retains known viable coverage and coalesces uncertain in-scope events
+into cold recovery. Conventional `obj/` and `bin/` build-output events are
+ignored during this transition; exact evaluated files in those directories are
+added to the inventory once MSBuild has established membership. Once
+MSBuild/Roslyn has evaluated the new inputs, the new immutable snapshot is
+published before extraction continues, and watcher coverage is extended or
+replaced from that snapshot. Scans captured against an old or transitional
+snapshot are discarded; existing inventory changes, including newly discovered
+exact inputs, are reconciled before a post-load baseline is accepted. This
+closes the edit window around project membership changes without resurrecting
+deleted external roots.
 
 If auxiliary MSBuild input discovery is incomplete, the watcher reports a
 diagnostic and treats the warm view as untrusted for foreground refreshes. The

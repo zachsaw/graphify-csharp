@@ -40,6 +40,58 @@ public sealed class IncrementalRefreshControlServerTests
     }
 
     [Fact]
+    public async Task Rejects_refresh_while_watcher_is_not_ready_without_running_refresh()
+    {
+        var expectedRequest = CreateRequest("Release");
+        var outputPath = Path.Combine(Path.GetTempPath(), "graphify-csharp-control", "canonical.json");
+        var refreshCalls = 0;
+        var sessionId = Guid.NewGuid();
+        var pipeName = $"gcf-test-{Guid.NewGuid():N}";
+        await using var server = new IncrementalRefreshControlServer(
+            pipeName,
+            expectedRequest,
+            outputPath,
+            (_, _) =>
+            {
+                Interlocked.Increment(ref refreshCalls);
+                return Task.FromException<IncrementalRefreshResult>(
+                    new InvalidOperationException("The refresh callback must not run."));
+            },
+            () => new WatcherInspectionSnapshot(
+                sessionId,
+                Environment.ProcessId,
+                WatcherProcessIdentity.CurrentStartTimeUtcTicks(),
+                expectedRequest.InputPath,
+                expectedRequest.RepositoryRoot,
+                expectedRequest.Configuration,
+                expectedRequest.TargetFramework,
+                outputPath,
+                pipeName,
+                "test",
+                WatcherManagementProtocol.CurrentVersion,
+                "recovering",
+                Ready: false,
+                EventGeneration: 1,
+                IndexedGeneration: 1,
+                PublishedGeneration: 1));
+        server.Start();
+
+        var response = await SendRequestAsync(
+            pipeName,
+            new
+            {
+                command = "refresh",
+                request_digest = expectedRequest.Digest,
+                output_path_identity = IncrementalRefreshControlChannel.OutputPathIdentity(outputPath),
+            });
+
+        Assert.False(response.GetProperty("success").GetBoolean());
+        Assert.Equal("not_ready", response.GetProperty("error_code").GetString());
+        Assert.Contains("no JSON graph was generated", response.GetProperty("message").GetString());
+        Assert.Equal(0, Volatile.Read(ref refreshCalls));
+    }
+
+    [Fact]
     public async Task Rejects_output_identity_mismatch_before_running_refresh()
     {
         var expectedRequest = CreateRequest("Release");

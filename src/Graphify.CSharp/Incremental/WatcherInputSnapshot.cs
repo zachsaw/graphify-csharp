@@ -802,6 +802,8 @@ internal sealed class WatcherInputSnapshot
         ImmutableHashSet.Create(
             StringComparer.OrdinalIgnoreCase,
             ".git",
+            "bin",
+            "obj",
             "node_modules",
             ".e2e",
             "graphify-out",

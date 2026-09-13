@@ -90,6 +90,87 @@ public sealed class IncrementalWatcherHostTests
     }
 
     [Fact]
+    public async Task Build_output_events_during_startup_do_not_enter_recovery()
+    {
+        var fixture = await CreateFixtureAsync();
+        var factory = new FakeWatcherFactory();
+        var loader = new PostCompilationGateLoader(new RoslynWorkspaceLoader());
+        loader.ArmNextLoad();
+        try
+        {
+            await using var host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(backupScanInterval: TimeSpan.FromHours(1)),
+                projectLoader: loader,
+                watcherFactory: factory);
+
+            var start = host.StartAsync();
+            await loader.GatedLoadCompleted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+            factory.Current.TriggerChange(new FileChangeEvent(
+                FileChangeKind.Changed,
+                Path.Combine(fixture.Root, "obj", "Release", "net10.0", "ILLink.Substitutions.xml")));
+
+            Assert.Equal("starting", host.GetInspectionSnapshot().LifecycleState);
+            loader.ReleaseGatedLoad();
+            await start.WaitAsync(TimeSpan.FromSeconds(60));
+
+            Assert.True(host.IsReady);
+            Assert.NotEqual("recovering", host.GetInspectionSnapshot().LifecycleState);
+        }
+        finally
+        {
+            loader.ReleaseGatedLoad();
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task A_source_edit_during_startup_is_reconciled_before_readiness()
+    {
+        var fixture = await CreateFixtureAsync();
+        var factory = new FakeWatcherFactory();
+        var loader = new PostCompilationGateLoader(new RoslynWorkspaceLoader());
+        loader.ArmNextLoad();
+        try
+        {
+            await using var host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(backupScanInterval: TimeSpan.FromHours(1)),
+                projectLoader: loader,
+                watcherFactory: factory);
+
+            var start = host.StartAsync();
+            await loader.GatedLoadCompleted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+            await File.AppendAllTextAsync(
+                fixture.SourcePath,
+                "\npublic sealed class ChangedDuringStartup { }\n");
+            factory.Current.TriggerChange(new FileChangeEvent(
+                FileChangeKind.Changed,
+                fixture.SourcePath));
+
+            Assert.Equal("starting", host.GetInspectionSnapshot().LifecycleState);
+            loader.ReleaseGatedLoad();
+            await start.WaitAsync(TimeSpan.FromSeconds(60));
+
+            Assert.True(host.IsReady);
+            Assert.Contains(
+                "ReferenceFixture.Production.ChangedDuringStartup",
+                await File.ReadAllTextAsync(fixture.OutputPath),
+                StringComparison.Ordinal);
+            Assert.NotEqual("recovering", host.GetInspectionSnapshot().LifecycleState);
+        }
+        finally
+        {
+            loader.ReleaseGatedLoad();
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
     public async Task Watcher_failure_recreates_the_watcher_and_cold_reconciles()
     {
         var fixture = await CreateFixtureAsync();
@@ -340,6 +421,92 @@ public sealed class IncrementalWatcherHostTests
         }
         finally
         {
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task Refresh_request_during_startup_fails_without_writing_json()
+    {
+        var fixture = await CreateFixtureAsync();
+        var loader = new PostCompilationGateLoader(new RoslynWorkspaceLoader());
+        loader.ArmNextLoad();
+        try
+        {
+            await using var host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(backupScanInterval: TimeSpan.FromHours(1)),
+                projectLoader: loader,
+                watcherFactory: new FakeWatcherFactory());
+
+            var start = host.StartAsync();
+            await loader.GatedLoadCompleted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            var identity = new RefreshRequestIdentity(
+                fixture.Request.InputPath,
+                fixture.Request.RepositoryRoot,
+                fixture.Request.Configuration,
+                fixture.Request.TargetFramework);
+
+            var failure = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                new IncrementalRefreshControlClient()
+                    .TryRefreshAsync(identity, fixture.OutputPath, rebuild: false));
+
+            Assert.Contains("not_ready", failure.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(fixture.OutputPath));
+
+            loader.ReleaseGatedLoad();
+            await start.WaitAsync(TimeSpan.FromSeconds(60));
+            Assert.True(host.IsReady);
+        }
+        finally
+        {
+            loader.ReleaseGatedLoad();
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task Refresh_request_during_recovery_fails_without_writing_json()
+    {
+        var fixture = await CreateFixtureAsync();
+        var factory = new FakeWatcherFactory();
+        var loader = new GatedRecoveryLoader(new RoslynWorkspaceLoader());
+        try
+        {
+            await using var host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(
+                    backupScanInterval: TimeSpan.FromHours(1),
+                    recoveryRetryDelay: TimeSpan.FromMilliseconds(25)),
+                projectLoader: loader,
+                watcherFactory: factory);
+            await host.StartAsync().WaitAsync(TimeSpan.FromSeconds(60));
+            var before = await File.ReadAllBytesAsync(fixture.OutputPath);
+            loader.ArmNextRecovery();
+            factory.Current.TriggerFailure(new IOException("synthetic recovery request"));
+            await loader.RecoveryLoadEntered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+            var identity = new RefreshRequestIdentity(
+                fixture.Request.InputPath,
+                fixture.Request.RepositoryRoot,
+                fixture.Request.Configuration,
+                fixture.Request.TargetFramework);
+            var failure = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                new IncrementalRefreshControlClient()
+                    .TryRefreshAsync(identity, fixture.OutputPath, rebuild: false));
+
+            Assert.False(host.IsReady);
+            Assert.Contains("not_ready", failure.Message, StringComparison.Ordinal);
+            Assert.Equal(before, await File.ReadAllBytesAsync(fixture.OutputPath));
+
+            loader.ReleaseRecovery();
+            await WaitUntilAsync(() => host.IsReady, TimeSpan.FromSeconds(60));
+        }
+        finally
+        {
+            loader.ReleaseRecovery();
             DeleteTemporaryDirectory(fixture.Root);
         }
     }

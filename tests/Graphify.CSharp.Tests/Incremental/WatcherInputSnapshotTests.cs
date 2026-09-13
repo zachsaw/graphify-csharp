@@ -84,7 +84,7 @@ public sealed class WatcherInputSnapshotTests
     }
 
     [Fact]
-    public void Bootstrap_does_not_assume_obj_or_arbitrary_extensions_are_irrelevant()
+    public void Bootstrap_ignores_conventional_build_output_and_keeps_other_paths_conservative()
     {
         var root = CreateTemporaryDirectory();
         try
@@ -99,14 +99,14 @@ public sealed class WatcherInputSnapshotTests
                 Path.Combine(root, "obj", "Generated.cs")));
             var arbitraryInput = bootstrap.Classify(new FileChangeEvent(
                 FileChangeKind.Changed,
-                Path.Combine(root, "obj", "generator.data")));
+                Path.Combine(root, "generated", "generator.data")));
             var gitNoise = bootstrap.Classify(new FileChangeEvent(
                 FileChangeKind.Changed,
                 Path.Combine(root, ".git", "index")));
 
             Assert.True(bootstrap.IsBootstrap);
-            Assert.True(generatedSource.Accepted);
-            Assert.True(generatedSource.RequiresColdReconciliation);
+            Assert.False(generatedSource.Accepted);
+            Assert.False(generatedSource.RequiresColdReconciliation);
             Assert.True(arbitraryInput.Accepted);
             Assert.True(arbitraryInput.RequiresColdReconciliation);
             Assert.False(gitNoise.Accepted);

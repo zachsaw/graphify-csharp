@@ -12,9 +12,12 @@ Incremental indexing is an internal implementation detail that reduces the
 amount of Roslyn work needed before that document is refreshed.
 
 The long-running watcher owns the warm Roslyn state, the incremental index, and
-JSON publication. A manual refresh is a foreground barrier: it waits until the
-requested state has been indexed, serialized, validated, and atomically
-published.
+JSON publication. A request accepted by a ready watcher is a foreground
+barrier: it waits until the requested state has been indexed, serialized,
+validated, and atomically published. A request that arrives while the watcher
+is starting or recovering receives a structured `not_ready` failure and does
+not invoke extraction or modify JSON; the caller can retry after readiness is
+observed.
 
 The watcher is trusted only for the lifetime of its current healthy session. A
 new or restarted watcher must perform a cold reconciliation before it becomes
@@ -168,10 +171,12 @@ management server keeps the completion response path alive long enough to
 reply without awaiting its own disposal, while unrelated `inspect` requests
 remain available during a pending stop.
 
-The normal foreground invocation connects to a healthy matching watcher when
-one exists. It waits for that watcher rather than opening a second MSBuild
-workspace. If no matching watcher exists, it performs the cold reconciliation
-itself and waits for completion.
+The normal foreground invocation connects to a matching watcher when one exists.
+The watcher exposes its refresh channel throughout startup, but accepts JSON
+requests only after it is healthy. A request during `starting` or `recovering`
+returns `not_ready` without writing JSON; callers should inspect or retry after
+the watcher reports `ready`. If no matching watcher exists, the invocation
+performs the cold reconciliation itself and waits for completion.
 
 There is one watcher per canonical analysis-and-output identity. The analysis
 identity includes the input path, repository root, configuration, selected
@@ -297,9 +302,22 @@ entries and newly observed exact inputs, are reconciled through the serialized
 ### Ready and watching
 
 Once the initial complete graph has been published, the session enters
-`Ready`. File events add paths to the dirty set and increment the in-memory
-event generation. Duplicate events are harmless because the set is keyed by
-canonical path or project.
+`Ready`. `Ready` describes a healthy watcher and a trustworthy completed
+initial boundary; it does not mean that the repository is frozen or that the
+latest event has already been indexed. File events add paths to the dirty set
+and increment the in-memory event generation. Duplicate events are harmless
+because the set is keyed by canonical path or project.
+
+An ordinary edit to an existing source document stays in the healthy session.
+The watcher may report `ready: true` while its session briefly reports
+`refreshing`, with `indexed_generation` or `published_generation` behind
+`event_generation`. Low-priority background indexing catches up in memory, and
+an explicit refresh serializes behind it and publishes the requested point-in-
+time generation. Structural, project, dependency, watcher-error, or otherwise
+uncertain changes enter recovery instead; readiness is withheld until that cold
+boundary has been reconciled. If edits continue without a quiet boundary,
+recovery correctly remains pending; a definitive snapshot cannot be claimed
+while its input boundary is continuously invalidated.
 
 There is no correctness dependency on a time-based debounce. Background work
 may coalesce project requests for efficiency, but events are recorded
@@ -321,10 +339,12 @@ being built. Automatic recovery does not replace it; it only prepares trusted
 in-memory state. An explicit refresh must publish that state before reporting
 success.
 
-If a load fails after the transition snapshot is published, recovery resets
-inventory under the stable base/ancestor coverage and retries the cold load.
-This prevents a failed transition from leaving the backup scanner spinning on
-an untrusted snapshot.
+If a load fails after the transition snapshot is published, recovery validates
+the stable base/ancestor coverage but preserves the prior inventory as the
+comparison baseline. The post-load scan then detects edits made while watcher
+subscriptions were being replaced and retries the cold load. This prevents a
+failed transition from erasing changes or leaving the backup scanner spinning
+on an untrusted snapshot.
 
 ## Invalidation granularity
 
@@ -358,16 +378,20 @@ required.
 
 ## Refresh protocol
 
-A refresh request captures the current event generation as its target. The
-watcher then:
+A refresh request is accepted only while the watcher reports `ready=true` and
+captures the current event generation as its target. The watcher then:
 
-1. waits for the initial cold load if the session is still starting;
-2. promotes pending work for the requested generation to foreground priority;
-3. finishes or rebuilds the required project/TFM contributions;
-4. merges cached and rebuilt contributions deterministically;
-5. validates nodes, edges, endpoints, diagnostics, and output identity;
-6. serializes the complete Graphify document; and
-7. atomically replaces `csharp.json` before returning success.
+1. promotes pending work for the requested generation to foreground priority;
+2. finishes or rebuilds the required project/TFM contributions;
+3. merges cached and rebuilt contributions deterministically;
+4. validates nodes, edges, endpoints, diagnostics, and output identity;
+5. serializes the complete Graphify document; and
+6. atomically replaces `csharp.json` before returning success.
+
+The control channel returns `not_ready` for a request observed during startup or
+recovery. It includes the current lifecycle state and explicitly reports that
+no JSON graph was generated. This is a failure of the request, not a fallback
+to the previous file or to a second workspace.
 
 If the graph is already clean at the requested generation, the request returns
 the existing published generation without loading Roslyn or rewriting JSON.
@@ -418,10 +442,12 @@ MSBuild, or SDK caches.
 
 If a refresh is requested without a matching live watcher, the standalone
 process performs the cold reconciliation described above after acquiring the
-destination lease. A matching watcher is waited on through its control channel;
-an occupied destination owned by a different request fails with an ownership
-conflict. The command must not claim a warm incremental refresh based solely on
-a persisted last-update timestamp.
+destination lease. A matching ready watcher is used through its control
+channel; a matching watcher that is still starting or recovering returns
+`not_ready` rather than blocking or publishing an unverified graph. An occupied
+destination owned by a different request fails with an ownership conflict. The
+command must not claim a warm incremental refresh based solely on a persisted
+last-update timestamp.
 
 ## Output consistency and failure handling
 

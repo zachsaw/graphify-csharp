@@ -15,6 +15,7 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
     private readonly string _requestDigest;
     private readonly string _outputPathIdentity;
     private readonly Func<bool, CancellationToken, Task<IncrementalRefreshResult>> _refresh;
+    private readonly Func<WatcherInspectionSnapshot>? _inspection;
     private readonly CancellationTokenSource _stop = new();
     private readonly object _gate = new();
     private Task? _serverTask;
@@ -26,7 +27,8 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
         string pipeName,
         RefreshRequestIdentity requestIdentity,
         string outputPath,
-        Func<bool, CancellationToken, Task<IncrementalRefreshResult>> refresh)
+        Func<bool, CancellationToken, Task<IncrementalRefreshResult>> refresh,
+        Func<WatcherInspectionSnapshot>? inspection = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(pipeName);
         ArgumentNullException.ThrowIfNull(requestIdentity);
@@ -35,6 +37,7 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
         _requestDigest = requestIdentity.Digest;
         _outputPathIdentity = IncrementalRefreshControlChannel.OutputPathIdentity(outputPath);
         _refresh = refresh ?? throw new ArgumentNullException(nameof(refresh));
+        _inspection = inspection;
     }
 
     public void Start()
@@ -225,6 +228,21 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
                     "The refresh request does not match the watcher's output path."),
                 cancellationToken).ConfigureAwait(false);
             return;
+        }
+
+        if (_inspection is not null)
+        {
+            var inspection = _inspection();
+            if (!inspection.Ready)
+            {
+                await WriteResponseAsync(
+                    writer,
+                    ControlResponse.Error(
+                        "not_ready",
+                        $"The watcher is not ready (state '{inspection.LifecycleState}'); no JSON graph was generated. Retry after the watcher reports ready."),
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
         }
 
         try
