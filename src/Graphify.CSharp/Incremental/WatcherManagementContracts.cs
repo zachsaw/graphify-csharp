@@ -237,6 +237,12 @@ internal sealed class WatcherManagementServiceProvider : ISwitchMediatorServiceP
 
 internal static class WatcherProcessIdentity
 {
+    // Process.StartTime on Linux is reconstructed from the process clock and
+    // wall-clock time. Separate processes can therefore observe the same
+    // process with a small sub-second difference. Exact tick equality makes a
+    // live watcher look like a PID-reused process.
+    private static readonly TimeSpan StartTimeComparisonTolerance = TimeSpan.FromSeconds(1);
+
     public static long? CurrentStartTimeUtcTicks()
     {
         try
@@ -269,7 +275,7 @@ internal static class WatcherProcessIdentity
                 return new ProcessIdentityProbe(ProcessLiveness.Unknown, "The process start identity could not be read.");
             }
 
-            return startTime == descriptor.ProcessStartTimeUtcTicks
+            return IsSameProcessStart(startTime, descriptor.ProcessStartTimeUtcTicks.Value)
                 ? new ProcessIdentityProbe(ProcessLiveness.Live, null)
                 : new ProcessIdentityProbe(ProcessLiveness.Stale, "The descriptor's PID has been reused by another process.");
         }
@@ -296,6 +302,14 @@ internal static class WatcherProcessIdentity
             or System.ComponentModel.Win32Exception
             or UnauthorizedAccessException
             or NotSupportedException;
+
+    private static bool IsSameProcessStart(long actual, long recorded)
+    {
+        var difference = actual >= recorded
+            ? actual - recorded
+            : recorded - actual;
+        return difference <= StartTimeComparisonTolerance.Ticks;
+    }
 }
 
 internal enum ProcessLiveness
