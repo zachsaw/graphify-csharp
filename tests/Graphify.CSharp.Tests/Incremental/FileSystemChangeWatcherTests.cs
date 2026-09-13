@@ -101,6 +101,7 @@ public sealed class FileSystemChangeWatcherTests
         {
             Directory.CreateDirectory(Path.GetDirectoryName(oldPath)!);
             await File.WriteAllTextAsync(oldPath, "class Renamed { }");
+            var warmupPath = Path.Combine(root, "src", "WatcherReady.cs");
             var snapshot = WatcherInputSnapshot.CreateForTests(
                 [oldPath],
                 [],
@@ -109,12 +110,35 @@ public sealed class FileSystemChangeWatcherTests
                 Path.Combine(root, "graphify-out", "csharp.json"),
                 Path.Combine(root, "graphify-out", ".graphify-csharp", "manifest.json"));
             var received = new TaskCompletionSource<FileChangeEvent>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var watcherReady = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             watcher = new FileSystemChangeWatcher(
                 new WatcherRoot(root, IncludeSubdirectories: true),
-                change => change.Kind == FileChangeKind.Renamed && snapshot.Classify(change).Accepted);
+                change =>
+                {
+                    if (string.Equals(
+                        IncrementalPaths.CanonicalAbsolutePath(change.Path),
+                        IncrementalPaths.CanonicalAbsolutePath(warmupPath),
+                        IncrementalPaths.PathComparison))
+                    {
+                        watcherReady.TrySetResult(true);
+                        return false;
+                    }
+
+                    return change.Kind == FileChangeKind.Renamed && snapshot.Classify(change).Accepted;
+                });
             watcher.PathChanged += change => received.TrySetResult(change);
             watcher.Start();
 
+            // FileSystemWatcher enables recursive native watches asynchronously.
+            // Establish that the specific source directory is being observed
+            // before issuing the rename whose two endpoints this test verifies.
+            for (var attempt = 0; attempt < 40 && !watcherReady.Task.IsCompleted; attempt++)
+            {
+                await File.WriteAllTextAsync(warmupPath, $"class WatcherReady{attempt} {{ }}");
+                await Task.Delay(25);
+            }
+
+            await watcherReady.Task.WaitAsync(TimeSpan.FromSeconds(5));
             File.Move(oldPath, newPath);
 
             var change = await received.Task.WaitAsync(TimeSpan.FromSeconds(5));

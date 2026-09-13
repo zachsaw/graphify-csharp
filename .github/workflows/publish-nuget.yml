@@ -66,8 +66,11 @@ jobs:
       - name: Build
         run: dotnet build Graphify.CSharp.sln --configuration Release --no-restore
 
-      - name: Test
-        run: dotnet test Graphify.CSharp.sln --configuration Release --no-build --no-restore
+      - name: Test .NET 10 asset
+        run: dotnet test Graphify.CSharp.sln --configuration Release --framework net10.0 --no-build --no-restore
+
+      - name: Test .NET 11 asset
+        run: dotnet test Graphify.CSharp.sln --configuration Release --framework net11.0 --no-build --no-restore
 
       - name: Build C# 15 fixture
         run: dotnet build tests/Fixtures/CSharp15Fixture/CSharp15Fixture.csproj --configuration Release
