@@ -63,8 +63,10 @@ jobs:
           dotnet restore tests/Fixtures/MultiTargetFixture/MultiTargetFixture.csproj
           dotnet restore tests/Fixtures/CSharp15Fixture/CSharp15Fixture.csproj
 
-      - name: Build
-        run: dotnet build Graphify.CSharp.sln --configuration Release --no-restore
+      - name: Build tagged version
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.value }}
+        run: dotnet build Graphify.CSharp.sln --configuration Release --no-restore -p:Version="$PACKAGE_VERSION"
 
       - name: Test .NET 10 asset
         run: dotnet test Graphify.CSharp.sln --configuration Release --framework net10.0 --no-build --no-restore
