@@ -79,8 +79,6 @@ public sealed class SemanticQueryHostTests
     public async Task Cancelled_cold_semantic_work_wakes_shared_recovery_for_the_next_request(bool export)
     {
         var fixture = await CreateFixtureAsync();
-        var importPath = Path.Combine(fixture.Root, "build", "Custom.props");
-        Directory.CreateDirectory(Path.GetDirectoryName(importPath)!);
         await File.WriteAllTextAsync(
             fixture.Request.InputPath,
             """
@@ -90,10 +88,14 @@ public sealed class SemanticQueryHostTests
                 <ImplicitUsings>enable</ImplicitUsings>
                 <Nullable>enable</Nullable>
               </PropertyGroup>
-              <Import Project="build/Custom.props" />
+              <ItemGroup>
+                <!-- Keep the project valid while making watcher input
+                     discovery conservatively incomplete. The test is about
+                     cancellation/recovery, not MSBuild XML error recovery. -->
+                <Compile Include="@(UnresolvedCompileItems)" />
+              </ItemGroup>
             </Project>
             """);
-        await File.WriteAllTextAsync(importPath, "<Project />");
 
         var stateDirectory = Path.Combine(
             Path.GetTempPath(),
@@ -108,9 +110,7 @@ public sealed class SemanticQueryHostTests
                 fixture.Request,
                 outputPath: null,
                 new IncrementalWatcherOptions(backupScanInterval: TimeSpan.FromHours(1)),
-                projectLoader: new CorruptFirstDiscoveryLoader(
-                    loader,
-                    importPath),
+                projectLoader: loader,
                 watcherFactory: watcherFactory,
                 managementOptions: new WatcherManagementOptions(stateDirectory, "test"));
             await host.StartAsync().WaitAsync(TimeSpan.FromSeconds(60));
@@ -285,32 +285,6 @@ public sealed class SemanticQueryHostTests
         }
 
         public void Release() => _release.TrySetResult(true);
-    }
-
-    private sealed class CorruptFirstDiscoveryLoader : IProjectLoader
-    {
-        private readonly IProjectLoader _inner;
-        private readonly string _importPath;
-        private int _corrupted;
-
-        public CorruptFirstDiscoveryLoader(IProjectLoader inner, string importPath)
-        {
-            _inner = inner;
-            _importPath = importPath;
-        }
-
-        public async Task<LoadedSolution> LoadAsync(
-            ProjectLoadRequest request,
-            CancellationToken cancellationToken = default)
-        {
-            var loaded = await _inner.LoadAsync(request, cancellationToken);
-            if (Interlocked.Exchange(ref _corrupted, 1) == 0)
-            {
-                await File.WriteAllTextAsync(_importPath, "<Project><PropertyGroup>", cancellationToken);
-            }
-
-            return loaded;
-        }
     }
 
     private sealed class CancelledColdLoadLoader : IProjectLoader
