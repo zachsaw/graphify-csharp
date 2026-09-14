@@ -3,7 +3,7 @@
 The package is published as the `Graphify.CSharp` .NET global tool. Releases
 are driven by a published GitHub release: a release whose tag is `v0.1.5`
 publishes package version `0.1.5` after the same build, test, vulnerability,
-package-smoke, and determinism gates used by CI.
+semantic-query, watcher, package-smoke, and determinism gates used by CI.
 
 ## One-time setup
 
@@ -51,10 +51,11 @@ release tag, validates the version, runs the build/test/vulnerability gates,
 packs with that exact version, installs the local package into a temporary tool
 path, runs the fixture smoke test, checks repeatability, obtains a short-lived
 Trusted Publishing credential, and then pushes the package to NuGet.org. Before
-the credential step it also runs the packaged watcher lifecycle against the
-exact release `.nupkg` through both the net10.0 and net11.0 tool assets, with
-the backup scan interval extended so the event-driven path is exercised. The
-package artifact is retained on the workflow run for inspection.
+the credential step it also runs the packaged semantic-query and watcher
+lifecycles against the exact release `.nupkg` through both the net10.0 and
+net11.0 tool assets. The watcher backup scan interval is extended so its
+event-driven path is exercised. The package artifact is retained on the
+workflow run for inspection.
 
 NuGet package versions are immutable. If a publish needs to be retried, rerun
 the same workflow only when the package contents are unchanged; otherwise use
@@ -71,7 +72,10 @@ dotnet pack src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj \
 ```
 
 The existing CI workflow also installs the generated package from the local
-`artifacts` folder and runs it against the reference fixture.
+`artifacts` folder and runs both the semantic-query and watcher E2E scripts
+against the reference fixture. To run those checks locally against an existing
+package, set `GRAPHIFY_CSHARP_QUERY_E2E_PACKAGE_PATH` or
+`GRAPHIFY_CSHARP_WATCH_E2E_PACKAGE_PATH` and invoke the corresponding script.
 
 Install a local package explicitly for either runtime asset:
 

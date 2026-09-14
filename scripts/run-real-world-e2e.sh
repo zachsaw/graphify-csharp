@@ -25,7 +25,17 @@ dotnet restore "$repository_root/tests/Fixtures/ReferenceFixture/ReferenceFixtur
 dotnet restore "$repository_root/tests/Fixtures/CSharp14Fixture/CSharp14Fixture.csproj"
 dotnet restore "$repository_root/tests/Fixtures/CSharp15Fixture/CSharp15Fixture.csproj"
 dotnet build "$repository_root/Graphify.CSharp.sln" --configuration "$configuration" --no-restore
-dotnet test "$repository_root/Graphify.CSharp.sln" --configuration "$configuration" --no-build --no-restore
+for test_framework in net10.0 net11.0; do
+  # Keep the two Roslyn test hosts independent. Running both target frameworks
+  # concurrently makes this intentionally cold-recovery gate contend for the
+  # same MSBuild/Roslyn resources and turns a valid stress test into a timing
+  # failure on busy machines.
+  dotnet test "$repository_root/Graphify.CSharp.sln" \
+    --configuration "$configuration" \
+    --framework "$test_framework" \
+    --no-build \
+    --no-restore
+done
 dotnet pack "$repository_root/src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj" \
   --configuration "$configuration" \
   --no-build \

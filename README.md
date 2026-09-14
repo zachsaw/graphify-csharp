@@ -43,7 +43,7 @@ an agent can see one compiler-resolved incoming call:
 
 ```text
 Graphify.CSharp.Roslyn.DeclarationCatalogBuilder.ForTesting(...)
-└── called by Graphify.CSharp.Tests.Roslyn.CSharp14FeatureTests
+└── called by Graphify.CSharp.Tests.Roslyn.CSharp14FeatureTests.Reports_identity_failures_and_keeps_serializing_the_remaining_graph()
     at tests/Graphify.CSharp.Tests/Roslyn/CSharp14FeatureTests.cs:143
 ```
 
@@ -130,6 +130,46 @@ Now ask your agent:
 The extractor supplies the facts. Your agent or downstream consumer decides
 what those facts mean: test-only usage, zero observed references, a deletion
 candidate, or something requiring human review.
+
+## Ask targeted questions without a JSON dump
+
+The same semantic evidence is available as bounded CLI queries. This is useful
+when an agent needs one answer—or when a large complete JSON document would be
+more data than the question requires. Start a watcher without `--output` to
+keep the workspace warm without publishing a graph file:
+
+```bash
+graphify-csharp \
+  --input ./src/MyProduct.sln \
+  --root . \
+  --configuration Release \
+  --watch
+
+graphify-csharp ps --json
+graphify-csharp query symbols OrderService --instance <session-id> --kind class --json
+graphify-csharp query callers --instance <session-id> --symbol <symbol-id> --json
+graphify-csharp query usage-summary --instance <session-id> --kind method --group-by project,namespace --json
+```
+
+Queries return small, deterministic pages and include the snapshot and scope
+used to answer them. `callers`, `usages`, `hierarchy`, `signature`, and
+`arguments` take an exact symbol ID; use `symbols` first to choose between
+overloads. A query can also run cold with `--input` instead of `--instance`,
+but cursors and snapshots require a live watcher. The semantic query commands
+do not require Graphify and do not create `csharp.json`.
+
+When a complete Graphify document is needed, request it explicitly from a live
+worker:
+
+```bash
+graphify-csharp export \
+  --instance <session-id> \
+  --output ./graphify-out/csharp.json \
+  --json
+```
+
+This keeps the targeted-query path and the optional whole-graph export as two
+clear workflows.
 
 ## Where it fits
 
@@ -220,11 +260,17 @@ graphify-csharp \
 ```
 
 The watcher keeps the Roslyn workspace warm and prepares changed projects in
-the background. A normal `graphify-csharp` invocation acts as an explicit
-refresh barrier and returns only after a complete JSON snapshot is current.
+the background. For an output-backed watcher, the normal `graphify-csharp`
+invocation is the explicit JSON refresh command. It requires the watcher to
+report `ready=true`; while the watcher is starting or recovering it returns a
+structured `not_ready` error, so retry after `inspect` reports ready. The
+separate `query` commands wait for semantic readiness and return targeted
+evidence without publishing JSON.
 
 If no matching watcher is running, the same command performs a one-shot
-refresh. Use `--rebuild` to invalidate the incremental cache.
+refresh. Use `--rebuild` to invalidate the incremental cache. A watcher started
+without `--output` is query-only and has no canonical JSON refresh destination;
+use `export` when you explicitly want a complete document.
 
 See [Usage](docs/USAGE.md) and
 [Incremental indexing](docs/INCREMENTAL_INDEXING.md) for watcher ownership,

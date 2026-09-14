@@ -1593,9 +1593,9 @@ public sealed class IncrementalWatcherHostTests
             factory.Current.TriggerPath(fixture.SourcePath);
             // The transition journal handles ordinary edits without turning
             // them into watcher failure/recovery. The previously published
-            // graph remains a valid snapshot while the background reload is
-            // in flight.
-            Assert.True(host.IsReady);
+            // graph remains available while the background reload is in
+            // flight, but the bootstrap boundary is not ready for requests.
+            Assert.False(host.IsReady);
             Assert.Equal("refreshing", host.GetInspectionSnapshot().LifecycleState);
 
             loader.ReleaseGatedLoad();
@@ -1660,7 +1660,10 @@ public sealed class IncrementalWatcherHostTests
             factory.Current.TriggerPath(fixture.ProjectPath);
             await loader.GatedLoadCompleted.Task.WaitAsync(TimeSpan.FromSeconds(60));
 
-            Assert.True(host.IsReady);
+            // A cold reload has replaced the usable boundary with a bootstrap
+            // snapshot. The watcher is not ready until the evaluated snapshot
+            // has been published again.
+            Assert.False(host.IsReady);
             var queuedRefresh = host.RefreshAsync();
             Assert.False(queuedRefresh.IsCompleted);
 

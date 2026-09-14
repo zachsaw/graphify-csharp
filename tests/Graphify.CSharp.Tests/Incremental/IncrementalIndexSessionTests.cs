@@ -212,6 +212,37 @@ public sealed class IncrementalIndexSessionTests
     }
 
     [Fact]
+    public async Task Disposing_session_cancels_an_active_semantic_query_without_orphaning_it()
+    {
+        var fixture = await CreateFixtureAsync();
+        var loader = new BlockingReloadLoader(new RoslynWorkspaceLoader());
+        var session = new IncrementalIndexSession(
+            fixture.Request,
+            outputPath: null,
+            projectLoader: loader,
+            semanticMode: "instance");
+        try
+        {
+            await session.StartAsync();
+            session.ReportFileChanged(fixture.ProjectPath);
+            var query = session.ExecuteSemanticQueryAsync(
+                new SemanticQuerySpec("symbols", Limit: 10));
+            await loader.ReloadEntered.Task.WaitAsync(TimeSpan.FromSeconds(60));
+
+            var dispose = session.DisposeAsync().AsTask();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => query.WaitAsync(TimeSpan.FromSeconds(5)));
+            await dispose.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        finally
+        {
+            loader.ReleaseReload();
+            await session.DisposeAsync();
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
     public async Task A_project_file_event_takes_the_cold_reload_path()
     {
         var fixture = await CreateFixtureAsync();

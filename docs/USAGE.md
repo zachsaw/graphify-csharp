@@ -58,6 +58,111 @@ steps before Graphify consumes the JSON. Development rules for the extractor
 live in this repository's [AGENTS.md](../AGENTS.md); do not copy them into an
 application merely to use the tool.
 
+## Query semantic evidence
+
+Use the query commands when the agent needs a bounded answer rather than the
+complete Graphify document. They use the same Roslyn-backed workspace and are
+available with or without Graphify:
+
+```text
+# Start a warm semantic worker. No JSON output or output lease is created.
+graphify-csharp \
+  --input ./src/Product/Product.sln \
+  --root . \
+  --configuration Release \
+  --watch
+
+# Find the session ID, then choose an exact overload.
+graphify-csharp ps --json
+graphify-csharp query symbols Submit --instance <session-id> --kind method --json
+
+# Use the selected node ID for exact navigation and call-site questions.
+graphify-csharp query signature --instance <session-id> --symbol <symbol-id> --json
+graphify-csharp query callers --instance <session-id> --symbol <symbol-id> --json
+graphify-csharp query usages --instance <session-id> --symbol <symbol-id> --json
+graphify-csharp query hierarchy --instance <session-id> --symbol <symbol-id> --direction implementations --json
+graphify-csharp query arguments --instance <session-id> --symbol <symbol-id> --json
+```
+
+The query verbs are `symbols`, `signature`, `usages`, `callers`, `hierarchy`,
+`arguments`, and `usage-summary`. `symbols` and `usage-summary` accept an
+optional positional case-insensitive substring search. The other verbs use an
+exact graph node ID, so overloads and generic instantiations cannot be confused
+by a matching name. `usage-summary` returns fixed counts for inbound calls,
+references, inheritance, implementations, and overrides. Add
+`--group-by project,namespace` for flat origin groups; it does not classify
+results as dead or test-only.
+
+For a summary, `edge_count` counts distinct merged relationships while
+`occurrence_count` counts their source locations; a relationship with no
+location counts as one edge and zero occurrences. Scope filters select target
+declarations for `symbols` and `usage-summary`, origin/caller declarations for
+`usages` and `callers`, returned neighbors for `hierarchy`, and caller
+documents for `arguments`.
+
+Each response is a bounded JSON object when `--json` is supplied. It includes
+the snapshot, selected scope, diagnostics, and page state. Use the returned
+`next_cursor` with the same verb, symbol, filters, and direction to continue a
+live-watcher query; the limit may change:
+
+```text
+graphify-csharp query callers \
+  --instance <session-id> \
+  --symbol <symbol-id> \
+  --limit 100 \
+  --json
+graphify-csharp query callers \
+  --instance <session-id> \
+  --symbol <symbol-id> \
+  --cursor <next-cursor> \
+  --limit 250 \
+  --json
+```
+
+An evidence revision or trust-loss recovery invalidates cursors and pinned
+snapshots with a structured error. Cold queries use the same handlers without
+starting a persistent worker, pipe, or JSON export:
+
+```text
+graphify-csharp query symbols Submit \
+  --input ./src/Product/Product.sln \
+  --root . \
+  --configuration Release \
+  --kind method \
+  --json
+```
+
+Cold results do not support `--cursor` or `--snapshot`. If a cold result is
+truncated by the response limit, it reports that continuation is unavailable;
+narrow the filters or use a watcher. A query sent to an explicit `--instance`
+never falls back to cold analysis when that session is missing or incompatible.
+Argument spans use Roslyn text offsets in UTF-16 code units. Line and column
+locations are one-based and repository-relative. A successful response is
+current for the worker's accepted, indexed evidence snapshot; it does not
+promise that a disk edit occurring after that event boundary has already been
+indexed.
+
+The `query` command is distinct from the optional `graphify` executable and
+from `graphify query`: the former asks this tool for compiler-bound C# facts,
+while the latter consumes a complete graph document. To create that document
+from a warm worker, use explicit export:
+
+```text
+graphify-csharp export \
+  --instance <session-id> \
+  --output ./graphify-out/csharp.json \
+  --json
+```
+
+Export writes one complete Graphify-compatible JSON file only when requested.
+It does not change the query-only worker into an output-backed watcher or
+reserve the export directory. A query-only worker has no output-derived
+persistent cache; its descriptor is only a discovery hint and may remain as a
+stale record after an abnormal exit. For the legacy output workflow, start the
+watcher with `--output` as shown below; the ordinary no-subcommand invocation
+then refreshes that canonical output and retains its existing `not_ready`
+behavior during startup or recovery.
+
 ## Extract a repository
 
 Use a repository-relative root so symbol keys and source files do not depend on

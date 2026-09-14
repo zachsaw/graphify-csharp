@@ -6,7 +6,7 @@ internal sealed class IncrementalRefreshResult
 {
     public IncrementalRefreshResult(
         GraphSnapshot graph,
-        string outputDigest,
+        string? outputDigest,
         IncrementalCacheLoadStatus cacheStatus,
         int extractedProjectCount,
         int reusedProjectCount,
@@ -14,7 +14,6 @@ internal sealed class IncrementalRefreshResult
         RefreshGeneration? generation = null)
     {
         Graph = graph ?? throw new ArgumentNullException(nameof(graph));
-        ArgumentException.ThrowIfNullOrWhiteSpace(outputDigest);
         OutputDigest = outputDigest;
         CacheStatus = cacheStatus;
         ExtractedProjectCount = extractedProjectCount;
@@ -25,7 +24,7 @@ internal sealed class IncrementalRefreshResult
 
     public GraphSnapshot Graph { get; }
 
-    public string OutputDigest { get; }
+    public string? OutputDigest { get; }
 
     public IncrementalCacheLoadStatus CacheStatus { get; }
 

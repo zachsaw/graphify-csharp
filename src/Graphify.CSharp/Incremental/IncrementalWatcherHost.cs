@@ -10,7 +10,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
     private readonly object _healthGate = new();
     private readonly object _transitionGate = new();
     private readonly ProjectLoadRequest _request;
-    private readonly string _outputPath;
+    private readonly string? _outputPath;
     private readonly RefreshRequestIdentity _requestIdentity;
     private readonly IFileInventoryScanner _inventoryScanner;
     private readonly IFileChangeWatcherFactory _watcherFactory;
@@ -25,6 +25,8 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
     private readonly TaskCompletionSource<bool> _stopRequested = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<bool> _workStopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TransitionEventJournal _transitionEvents = new(TransitionEventJournalCapacity);
+    private readonly SemaphoreSlim _exportGate = new(1, 1);
+    private readonly HashSet<string> _explicitExportPaths = new(IncrementalPaths.PathComparer);
     private TaskCompletionSource<bool> _healthy = NewHealthSource();
     private List<WatcherRoot> _watchRoots;
     private List<IFileChangeWatcher> _watchers = [];
@@ -34,6 +36,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
     private OutputDestinationLease? _outputLease;
     private WatcherLease? _lease;
     private IncrementalRefreshControlServer? _controlServer;
+    private SemanticQueryServer? _semanticServer;
     private WatcherManagementServer? _managementServer;
     private WatcherSessionDescriptor? _managementDescriptor;
     private bool _managementRegistered;
@@ -53,7 +56,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
 
     public IncrementalWatcherHost(
         ProjectLoadRequest request,
-        string outputPath,
+        string? outputPath,
         IncrementalWatcherOptions? options = null,
         IProjectLoader? projectLoader = null,
         IncrementalCacheStore? cacheStore = null,
@@ -64,8 +67,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
         WatcherManagementOptions? managementOptions = null)
     {
         _request = request ?? throw new ArgumentNullException(nameof(request));
-        ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
-        _outputPath = Path.GetFullPath(outputPath);
+        _outputPath = string.IsNullOrWhiteSpace(outputPath) ? null : Path.GetFullPath(outputPath);
         _requestIdentity = new RefreshRequestIdentity(
             request.InputPath,
             request.RepositoryRoot,
@@ -83,7 +85,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
         _inputSnapshot = WatcherInputSnapshot.CreateBootstrap(
             _watchRoots.Select(root => root.CanonicalPath),
             _outputPath,
-            IncrementalCachePath.ForOutput(_outputPath),
+            _outputPath is null ? null : IncrementalCachePath.ForOutput(_outputPath),
             _watchRoots,
             knownInputPaths: [request.InputPath]);
         _session = new IncrementalIndexSession(
@@ -99,11 +101,21 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
 
     public IncrementalIndexSession Session => _session;
 
-    public string PipeName => IncrementalRefreshControlChannel.ForRequest(_requestIdentity, _outputPath);
+    public string PipeName => _outputPath is null
+        ? throw new InvalidOperationException("A query-only watcher has no legacy refresh endpoint.")
+        : IncrementalRefreshControlChannel.ForRequest(_requestIdentity, _outputPath);
 
-    public string LeasePath => WatcherLease.ForOutput(_outputPath, _requestIdentity);
+    public string LeasePath => _outputPath is null
+        ? throw new InvalidOperationException("A query-only watcher has no output lease.")
+        : WatcherLease.ForOutput(_outputPath, _requestIdentity);
 
-    public string OutputLeasePath => OutputDestinationLease.ForOutput(_outputPath);
+    public string OutputLeasePath => _outputPath is null
+        ? throw new InvalidOperationException("A query-only watcher has no output lease.")
+        : OutputDestinationLease.ForOutput(_outputPath);
+
+    internal string SemanticPipeName => _managementOptions is null
+        ? throw new InvalidOperationException("Semantic queries require management state to be configured.")
+        : SemanticQueryProtocol.ForSession(_session.SessionId, _managementOptions.StateDirectory);
 
     internal string ManagementPipeName => _managementOptions is null
         ? throw new InvalidOperationException("Management is not enabled for this watcher host.")
@@ -124,12 +136,12 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
 
             lock (_healthGate)
             {
+                var inputSnapshot = Volatile.Read(ref _inputSnapshot);
                 var sessionStatus = _session.Status;
                 return Volatile.Read(ref _disposed) == 0
                     && _healthy.Task.IsCompletedSuccessfully
-                    && (sessionStatus == IncrementalSessionStatus.Refreshing
-                        || (sessionStatus == IncrementalSessionStatus.Ready
-                            && !Volatile.Read(ref _inputSnapshot).IsBootstrap));
+                    && !inputSnapshot.IsBootstrap
+                    && sessionStatus is IncrementalSessionStatus.Refreshing or IncrementalSessionStatus.Ready;
             }
         }
     }
@@ -280,7 +292,9 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             ready,
             generation.EventGeneration,
             generation.IndexedGeneration,
-            generation.PublishedGeneration);
+            _outputPath is null ? null : generation.PublishedGeneration,
+            _managementOptions is null ? null : SemanticPipeName,
+            _managementOptions is null ? null : SemanticQueryProtocol.CurrentVersion);
     }
 
     private async Task DisposeCoreAsync()
@@ -295,6 +309,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
 
             Task? start;
             IncrementalRefreshControlServer? controlServer;
+            SemanticQueryServer? semanticServer;
             WatcherManagementServer? managementServer;
             WatcherSessionDescriptor? managementDescriptor;
             var managementRegistered = false;
@@ -302,6 +317,8 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             {
                 start = _startTask;
                 controlServer = TakeControlServerLocked();
+                semanticServer = _semanticServer;
+                _semanticServer = null;
                 // Take management ownership in the same critical section as the
                 // stop signal. Startup failure cleanup cannot race this handoff
                 // and dispose the server that may be serving the stop request.
@@ -326,6 +343,10 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             {
                 RecordCleanupFailure(await CaptureCleanupFailureAsync(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false));
             }
+            if (semanticServer is not null)
+            {
+                RecordCleanupFailure(await CaptureCleanupFailureAsync(semanticServer.DisposeAsync().AsTask()).ConfigureAwait(false));
+            }
 
             // A faulted start task is the startup error already observed by
             // StartAsync, not a cleanup failure. Observe it so it cannot become
@@ -340,11 +361,17 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
                 backup = _backupTask;
                 recovery = _recoveryTask;
                 controlServer = TakeControlServerLocked();
+                semanticServer ??= _semanticServer;
+                _semanticServer = null;
             }
 
             if (controlServer is not null)
             {
                 RecordCleanupFailure(await CaptureCleanupFailureAsync(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false));
+            }
+            if (semanticServer is not null)
+            {
+                RecordCleanupFailure(await CaptureCleanupFailureAsync(semanticServer.DisposeAsync().AsTask()).ConfigureAwait(false));
             }
 
             RecordCleanupFailure(await CaptureCleanupFailureAsync(backup).ConfigureAwait(false));
@@ -360,6 +387,8 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             lock (_lifecycleGate)
             {
                 controlServer = TakeControlServerLocked();
+                semanticServer ??= _semanticServer;
+                _semanticServer = null;
                 lease = _lease;
                 _lease = null;
                 outputLease = _outputLease;
@@ -370,10 +399,15 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             {
                 RecordCleanupFailure(await CaptureCleanupFailureAsync(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false));
             }
+            if (semanticServer is not null)
+            {
+                RecordCleanupFailure(await CaptureCleanupFailureAsync(semanticServer.DisposeAsync().AsTask()).ConfigureAwait(false));
+            }
 
             RecordCleanupFailure(TryDispose(lease));
             RecordCleanupFailure(await CaptureCleanupFailureAsync(_session.DisposeAsync().AsTask()).ConfigureAwait(false));
             RecordCleanupFailure(TryDispose(outputLease));
+            RecordCleanupFailure(TryDispose(_exportGate));
 
             if (managementRegistered && managementDescriptor is not null)
             {
@@ -448,19 +482,26 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
     {
         WatcherLease? lease = null;
         OutputDestinationLease? outputLease = null;
+        SemanticQueryServer? semanticServer = null;
         try
         {
-            // Publish the request-specific lease first so a matching client
-            // waits for this startup, then acquire the destination-only lease
-            // atomically before any cache or output operation can begin.
-            lease = WatcherLease.Acquire(_outputPath, _requestIdentity);
-            outputLease = OutputDestinationLease.Acquire(_outputPath);
+            // Output-backed watchers retain both ownership barriers. Query-only
+            // watchers deliberately acquire neither: their semantic state is
+            // independent and has no canonical publication destination.
+            if (_outputPath is not null)
+            {
+                // Publish the request-specific lease first so a matching client
+                // waits for this startup, then acquire the destination-only lease
+                // atomically before any cache or output operation can begin.
+                lease = WatcherLease.Acquire(_outputPath, _requestIdentity);
+                outputLease = OutputDestinationLease.Acquire(_outputPath);
+            }
             lock (_lifecycleGate)
             {
                 if (Volatile.Read(ref _disposed) != 0)
                 {
-                    lease.Dispose();
-                    outputLease.Dispose();
+                    lease?.Dispose();
+                    outputLease?.Dispose();
                     lease = null;
                     outputLease = null;
                     return;
@@ -477,6 +518,22 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             // makes startup observable without exposing an unmanaged owner.
             if (_managementOptions is not null)
             {
+                semanticServer = new SemanticQueryServer(
+                    SemanticPipeName,
+                    _session.SessionId,
+                    _requestIdentity,
+                    ExecuteSemanticQueryAsync,
+                    ExportSemanticAsync);
+                await semanticServer.StartAsync(_stop.Token).ConfigureAwait(false);
+                lock (_lifecycleGate)
+                {
+                    if (Volatile.Read(ref _disposed) == 0)
+                    {
+                        _semanticServer = semanticServer;
+                        semanticServer = null;
+                    }
+                }
+
                 await StartManagementAsync(_stop.Token).ConfigureAwait(false);
             }
 
@@ -485,7 +542,10 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             // requester that arrives before the first trusted publication must
             // receive a structured not-ready response instead of waiting for a
             // pipe that does not exist or reading a stale output file.
-            await StartControlServerAsync().ConfigureAwait(false);
+            if (_outputPath is not null)
+            {
+                await StartControlServerAsync().ConfigureAwait(false);
+            }
             await RefreshInventoryBaselineAsync(
                     _stop.Token,
                     allowBootstrap: true)
@@ -494,7 +554,8 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             await _session.StartAsync(_stop.Token).ConfigureAwait(false);
             await RefreshInventoryBaselineAsync(
                     _stop.Token,
-                    reconcileDifferences: true)
+                    reconcileDifferences: true,
+                    publishOutput: _outputPath is not null)
                 .ConfigureAwait(false);
 
             lock (_lifecycleGate)
@@ -524,15 +585,19 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             }
 
             IncrementalRefreshControlServer? controlServer;
+            SemanticQueryServer? activeSemanticServer;
             lock (_lifecycleGate)
             {
                 controlServer = TakeControlServerLocked();
+                activeSemanticServer = _semanticServer;
+                _semanticServer = null;
             }
 
             if (controlServer is not null)
             {
                 await AwaitIgnoringCancellation(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false);
             }
+            await AwaitIgnoringCancellation(activeSemanticServer?.DisposeAsync().AsTask()).ConfigureAwait(false);
 
             WatcherLease? activeLease;
             OutputDestinationLease? activeOutputLease;
@@ -565,6 +630,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             activeOutputLease?.Dispose();
             lease?.Dispose();
             outputLease?.Dispose();
+            await AwaitIgnoringCancellation(semanticServer?.DisposeAsync().AsTask()).ConfigureAwait(false);
             if (managementRegistered && managementDescriptor is not null)
             {
                 _managementRegistry!.Remove(managementDescriptor.SessionId);
@@ -600,7 +666,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
         {
             await server.StartAsync(cancellationToken).ConfigureAwait(false);
             var descriptor = new WatcherSessionDescriptor(
-                WatcherSessionRegistry.DescriptorSchemaVersion,
+                WatcherSessionRegistry.CurrentDescriptorSchemaVersion,
                 _session.SessionId,
                 Environment.ProcessId,
                 WatcherProcessIdentity.CurrentStartTimeUtcTicks(),
@@ -611,7 +677,9 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
                 _request.TargetFramework,
                 _outputPath,
                 options.ToolVersion,
-                WatcherManagementProtocol.CurrentVersion);
+                WatcherManagementProtocol.CurrentVersion,
+                SemanticPipeName,
+                SemanticQueryProtocol.CurrentVersion);
 
             var disposeLocalServer = false;
             lock (_lifecycleGate)
@@ -643,10 +711,12 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
 
     private async Task StartControlServerAsync()
     {
+        var outputPath = _outputPath
+            ?? throw new InvalidOperationException("A query-only watcher has no legacy refresh endpoint.");
         var controlServer = new IncrementalRefreshControlServer(
             PipeName,
             _requestIdentity,
-            _outputPath,
+            outputPath,
             (rebuild, cancellationToken) => RefreshAsync(rebuild, cancellationToken),
             GetInspectionSnapshot);
         var installed = false;
@@ -1001,6 +1071,254 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
         }
     }
 
+    private async Task<SemanticQueryResponse> ExecuteSemanticQueryAsync(
+        SemanticQuerySpec specification,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            await WaitUntilHealthyAsync(cancellationToken).ConfigureAwait(false);
+            var trustVersion = _session.EventTrustVersion;
+            Task<SemanticQueryResponse> query;
+            lock (_transitionGate)
+            {
+                query = _session.ExecuteSemanticQueryAsync(specification, cancellationToken);
+            }
+
+            var response = await query.ConfigureAwait(false);
+            await WaitUntilHealthyAsync(cancellationToken).ConfigureAwait(false);
+            if (_session.IsEventTrustValid(trustVersion))
+            {
+                return response;
+            }
+
+            // The response may have been computed from the old workspace while
+            // a watcher delivery loss was queued. Discard it and retry after
+            // the host has completed its trusted recovery boundary.
+        }
+    }
+
+    private async Task<SemanticQueryResponse> ExportSemanticAsync(
+        string outputPath,
+        CancellationToken cancellationToken)
+    {
+        string canonicalOutputPath;
+        try
+        {
+            canonicalOutputPath = IncrementalPaths.CanonicalAbsolutePath(outputPath);
+            _ = OutputDestinationLease.ForOutput(canonicalOutputPath);
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException)
+        {
+            return SemanticQueryResponse.Failure(
+                _session.SessionId,
+                "instance",
+                "export",
+                "invalid_arguments",
+                exception.Message,
+                _requestIdentity.CanonicalKey);
+        }
+
+        await WaitUntilHealthyAsync(cancellationToken).ConfigureAwait(false);
+        await _exportGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        OutputDestinationLease? temporaryLease = null;
+        try
+        {
+            var trustVersion = _session.EventTrustVersion;
+            WatcherInputSnapshot snapshot;
+            lock (_transitionGate)
+            {
+                snapshot = Volatile.Read(ref _inputSnapshot);
+                var conflict = GetExportConflict(snapshot, canonicalOutputPath);
+                if (conflict is not null)
+                {
+                    return SemanticQueryResponse.Failure(
+                        _session.SessionId,
+                        "instance",
+                        "export",
+                        "output_conflict",
+                        conflict,
+                        _requestIdentity.CanonicalKey);
+                }
+            }
+
+            var usesCanonicalLease = _outputPath is not null
+                && string.Equals(
+                    canonicalOutputPath,
+                    _outputPath,
+                    IncrementalPaths.PathComparison);
+            if (!usesCanonicalLease)
+            {
+                temporaryLease = OutputDestinationLease.Acquire(canonicalOutputPath);
+            }
+
+            // Recheck membership after acquiring the destination lease. The
+            // project boundary can be replaced while this request is waiting
+            // for another export to finish; an evaluated input must always
+            // win over the export exclusion.
+            lock (_transitionGate)
+            {
+                snapshot = Volatile.Read(ref _inputSnapshot);
+                var conflict = GetExportConflict(snapshot, canonicalOutputPath);
+                if (conflict is not null)
+                {
+                    return SemanticQueryResponse.Failure(
+                        _session.SessionId,
+                        "instance",
+                        "export",
+                        "output_conflict",
+                        conflict,
+                        _requestIdentity.CanonicalKey);
+                }
+
+                _explicitExportPaths.Add(canonicalOutputPath);
+                Volatile.Write(
+                    ref _inputSnapshot,
+                    snapshot.WithAdditionalToolPath(canonicalOutputPath));
+            }
+
+            var response = await _session
+                .ExportAsync(canonicalOutputPath, cancellationToken)
+                .ConfigureAwait(false);
+            await WaitUntilHealthyAsync(cancellationToken).ConfigureAwait(false);
+            if (!_session.IsEventTrustValid(trustVersion))
+            {
+                return SemanticQueryResponse.Failure(
+                    _session.SessionId,
+                    "instance",
+                    "export",
+                    "stale_snapshot",
+                    "Watcher delivery was lost while exporting; retry the export.",
+                    _requestIdentity.CanonicalKey);
+            }
+
+            return response;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (InvalidOperationException exception)
+        {
+            return SemanticQueryResponse.Failure(
+                _session.SessionId,
+                "instance",
+                "export",
+                "output_conflict",
+                exception.Message,
+                _requestIdentity.CanonicalKey);
+        }
+        catch (IOException exception)
+        {
+            return SemanticQueryResponse.Failure(
+                _session.SessionId,
+                "instance",
+                "export",
+                "io_error",
+                exception.Message,
+                _requestIdentity.CanonicalKey);
+        }
+        finally
+        {
+            temporaryLease?.Dispose();
+            _exportGate.Release();
+        }
+    }
+
+    private string? GetExportConflict(
+        WatcherInputSnapshot snapshot,
+        string canonicalOutputPath)
+    {
+        if (snapshot.IsKnownInput(canonicalOutputPath)
+            || snapshot.IsKnownInputOnFileSystem(canonicalOutputPath))
+        {
+            return "The export destination is an evaluated project input and cannot be overwritten.";
+        }
+
+        // The lexical path is sufficient for normal watcher operations, but an
+        // explicit export is allowed to name an existing parent through a
+        // symlink or junction. Reject a destination whose physical identity
+        // cannot be established rather than allowing the atomic publisher to
+        // replace an input through an alias.
+        if (!IncrementalPaths.TryResolvePhysicalPath(canonicalOutputPath, out var physicalOutputPath))
+        {
+            return "The export destination could not be resolved safely and cannot be overwritten.";
+        }
+
+        if (_managementOptions is not null
+            && IncrementalPaths.IsPathOrUnder(
+                canonicalOutputPath,
+                _managementOptions.StateDirectory))
+        {
+            return "The export destination is inside the watcher state directory.";
+        }
+
+        if (_outputPath is not null
+            && IncrementalPaths.IsPathOrUnder(
+                canonicalOutputPath,
+                GetInternalStateDirectory(_outputPath)))
+        {
+            return "The export destination is inside the watcher internal state directory.";
+        }
+
+        if (_managementOptions is not null)
+        {
+            if (!TryIsPhysicalPathOrUnder(
+                    physicalOutputPath,
+                    _managementOptions.StateDirectory,
+                    out var isUnderStateDirectory))
+            {
+                return "The export destination could not be resolved safely and cannot be overwritten.";
+            }
+
+            if (isUnderStateDirectory)
+            {
+                return "The export destination is inside the watcher state directory.";
+            }
+        }
+
+        if (_outputPath is not null)
+        {
+            if (!TryIsPhysicalPathOrUnder(
+                    physicalOutputPath,
+                    GetInternalStateDirectory(_outputPath),
+                    out var isUnderInternalStateDirectory))
+            {
+                return "The export destination could not be resolved safely and cannot be overwritten.";
+            }
+
+            if (isUnderInternalStateDirectory)
+            {
+                return "The export destination is inside the watcher internal state directory.";
+            }
+        }
+
+        return null;
+    }
+
+    private static bool TryIsPhysicalPathOrUnder(
+        string path,
+        string parent,
+        out bool isUnder)
+    {
+        isUnder = false;
+        if (!IncrementalPaths.TryResolvePhysicalPath(parent, out var physicalParent))
+        {
+            return false;
+        }
+
+        isUnder = IncrementalPaths.IsPathOrUnder(path, physicalParent);
+        return true;
+    }
+
+    private static string GetInternalStateDirectory(string outputPath)
+    {
+        var outputDirectory = Path.GetDirectoryName(outputPath)
+            ?? throw new InvalidOperationException("The output path has no parent directory.");
+        return IncrementalPaths.CanonicalAbsolutePath(
+            Path.Combine(outputDirectory, ".graphify-csharp"));
+    }
+
     private void OnWatcherPathChanged(FileChangeEvent change)
     {
         var journalOverflowed = false;
@@ -1068,20 +1386,22 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
                         capturedAgainstPreviousPolicy = capturedByWatcher;
                     }
                 }
-            }
 
-            // Keep session callbacks and recovery signaling outside the
-            // policy handoff gate. The gate protects the journal/snapshot
-            // boundary; the session owns its own serialized command queue.
-            if (sessionChange is not null)
-            {
-                if (capturedAgainstPreviousPolicy)
+                // Deliver an accepted event while the same handoff gate is
+                // held. Semantic requests use this gate when they capture
+                // their target, so a callback that has crossed the watcher
+                // predicate cannot be left in a race window between
+                // classification and session enqueueing.
+                if (sessionChange is not null)
                 {
-                    _session.ReportCapturedFileChanged(sessionChange);
-                }
-                else
-                {
-                    _session.ReportFileChanged(sessionChange);
+                    if (capturedAgainstPreviousPolicy)
+                    {
+                        _session.ReportCapturedFileChanged(sessionChange);
+                    }
+                    else
+                    {
+                        _session.ReportFileChanged(sessionChange);
+                    }
                 }
             }
 
@@ -1148,13 +1468,20 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
     {
         ArgumentNullException.ThrowIfNull(snapshot);
         IReadOnlyList<FileChangeEvent> deferredEvents;
+        WatcherInputSnapshot effectiveSnapshot;
         lock (_transitionGate)
         {
-            Volatile.Write(ref _inputSnapshot, snapshot);
+            effectiveSnapshot = snapshot;
+            foreach (var exportPath in _explicitExportPaths)
+            {
+                effectiveSnapshot = effectiveSnapshot.WithAdditionalToolPath(exportPath);
+            }
+
+            Volatile.Write(ref _inputSnapshot, effectiveSnapshot);
             _inputSnapshotEpoch++;
             _transitionInProgress = true;
             Interlocked.Exchange(ref _transitionJournalOverflowReported, 0);
-            if (snapshot.IsBootstrap)
+            if (effectiveSnapshot.IsBootstrap)
             {
                 // Do not clear the journal here. Events already observed in
                 // this transition must survive until the evaluated policy is
@@ -1168,7 +1495,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
         var coverageChanged = false;
         try
         {
-            coverageChanged = ReplaceWatchersForSnapshot(snapshot);
+            coverageChanged = ReplaceWatchersForSnapshot(effectiveSnapshot);
         }
         catch (Exception exception)
         {
@@ -1325,10 +1652,10 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
                 }
 
                 var sessionStatus = _session.Status;
+                var inputSnapshot = Volatile.Read(ref _inputSnapshot);
                 if (_healthy.Task.IsCompletedSuccessfully
-                    && (sessionStatus == IncrementalSessionStatus.Refreshing
-                        || (sessionStatus == IncrementalSessionStatus.Ready
-                            && !Volatile.Read(ref _inputSnapshot).IsBootstrap)))
+                    && !inputSnapshot.IsBootstrap
+                    && sessionStatus is IncrementalSessionStatus.Refreshing or IncrementalSessionStatus.Ready)
                 {
                     return;
                 }
