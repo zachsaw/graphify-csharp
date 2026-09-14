@@ -180,23 +180,27 @@ project directory belongs to the compilation. Evaluated source documents,
 additional files, analyzer configuration, project/solution files, evaluated
 imports, references, and other discovered inputs are kept as exact paths.
 
-For performance, ordinary traversal prunes conventional noise directories such
-as `obj/`, `bin/`, `.git/`, `TestResults/`, and `artifacts/`. An exact evaluated
-input wins over that pruning, so a physical generated file explicitly included
-from `obj/` still refreshes correctly while unrelated generated files beside it
-are ignored. The same policy is used by the native watcher and the backup
-inventory scan. Exact non-source inputs outside the repository are scanned by
-path; only source/additional-input roots that need live coverage add external
-watch roots, avoiding a recursive watch over SDK or package installation
-trees.
+For performance, ordinary traversal prunes only roots identified by evaluated
+MSBuild output/intermediate properties, candidate-glob coverage that cannot
+admit a descendant, and the tool's exact output/cache paths. A project
+directory name is not a filter. An exact evaluated input wins over root
+pruning, and an evaluated candidate glob can reopen a root when its
+include/exclude rules admit the path. This means a physical generated file
+explicitly included from any directory still refreshes correctly while
+unrelated generated files beside it are ignored. If input discovery is
+incomplete, traversal stays conservative. The same policy is used by the native
+watcher and the backup inventory scan. Exact non-source inputs outside the
+repository are scanned by path; only source/additional-input roots that need
+live coverage add external watch roots, avoiding a recursive watch over SDK or
+package installation trees.
 
 Evaluated wildcard inputs are also retained as candidate rules. A new file with
 an arbitrary extension that matches an existing `Compile` or `AdditionalFiles`
-    glob is therefore considered by both the native watcher and the backup scan;
-    the project is re-evaluated before the change is published. A default glob does
-    not reopen conventional noise directories, but an evaluated candidate rule
-    whose include/exclude semantics admit a path there does. This includes broad
-    custom globs; the rule does not need to spell out the excluded directory name.
+glob is therefore considered by both the native watcher and the backup scan;
+the project is re-evaluated before the change is published. An evaluated
+candidate rule whose include/exclude semantics admit a path inside a prunable
+root reopens that part of the root. This includes broad custom globs; the rule
+does not need to spell out a conventional directory name.
 
 Content edits to an existing evaluated source document use the warm Roslyn
 path. A created, deleted, or renamed source, a project-membership change, or
@@ -206,14 +210,15 @@ default globs remain authoritative. The reload may be broader than the one
 file that changed; that is the deliberate correctness boundary.
 
 During a cold reload, the watcher briefly enters a conservative transition
-state. It retains known viable coverage and coalesces uncertain in-scope events
-into cold recovery. Conventional `obj/` and `bin/` build-output events are
-ignored during this transition; exact evaluated files in those directories are
-added to the inventory once MSBuild has established membership. Once
-MSBuild/Roslyn has evaluated the new inputs, the new immutable snapshot is
-published before extraction continues, and watcher coverage is extended or
-replaced from that snapshot. Scans captured against an old or transitional
-snapshot are discarded; existing inventory changes, including newly discovered
+state. It retains known viable coverage and coalesces events in a bounded
+journal. Once MSBuild has evaluated the next project boundary, each event is
+reclassified against exact inputs, candidate globs, and evaluated output roots;
+unrelated build output is discarded, while relevant edits are replayed through
+the normal warm/cold path. Once MSBuild/Roslyn has evaluated the new inputs, the
+new immutable snapshot is published before extraction continues, and watcher
+coverage is extended or replaced from that snapshot. Scans captured against an
+old or transitional snapshot are discarded; existing inventory changes,
+including newly discovered
 exact inputs, are reconciled before a post-load baseline is accepted. This
 closes the edit window around project membership changes without resurrecting
 deleted external roots.

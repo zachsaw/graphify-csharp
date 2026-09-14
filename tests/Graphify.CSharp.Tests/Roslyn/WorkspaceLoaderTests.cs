@@ -39,6 +39,82 @@ public sealed class WorkspaceLoaderTests
 
         Assert.Contains(discovery.Paths, path => string.Equals(path, assetsPath, IncrementalPaths.PathComparison));
         Assert.Contains(discovery.Paths, path => string.Equals(path, absentCandidate, IncrementalPaths.PathComparison));
+        Assert.Contains(
+            discovery.OutputRoots,
+            path => string.Equals(
+                path,
+                IncrementalPaths.CanonicalAbsolutePath(Path.Combine(projectDirectory, "obj")),
+                IncrementalPaths.PathComparison));
+        Assert.Contains(
+            discovery.OutputRoots,
+            path => IncrementalPaths.IsUnderDirectory(
+                path,
+                IncrementalPaths.CanonicalAbsolutePath(Path.Combine(projectDirectory, "bin"))));
+    }
+
+    [Fact]
+    public async Task Input_discovery_uses_evaluated_output_and_restore_paths()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "graphify-csharp-evaluated-path-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var projectPath = Path.Combine(root, "CustomPaths.csproj");
+        await File.WriteAllTextAsync(
+            projectPath,
+            """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+                <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+                <BaseOutputPath>build-output/</BaseOutputPath>
+                <BaseIntermediateOutputPath>intermediates/</BaseIntermediateOutputPath>
+                <ProjectAssetsFile>restore-state/custom.assets.json</ProjectAssetsFile>
+              </PropertyGroup>
+              <ItemGroup>
+                <Compile Include="Source.cs" />
+              </ItemGroup>
+            </Project>
+            """);
+        await File.WriteAllTextAsync(
+            Path.Combine(root, "Source.cs"),
+            "namespace CustomPaths; public sealed class Source { }");
+
+        try
+        {
+            using var loaded = await new RoslynWorkspaceLoader().LoadAsync(
+                new ProjectLoadRequest(projectPath, root, configuration: "Release", targetFramework: "net10.0"));
+            var project = Assert.Single(loaded.Projects);
+            var discovery = loaded.GetInputDiscovery(project);
+
+            Assert.Contains(
+                discovery.Paths,
+                path => string.Equals(
+                    path,
+                    IncrementalPaths.CanonicalAbsolutePath(
+                        Path.Combine(root, "restore-state", "custom.assets.json")),
+                    IncrementalPaths.PathComparison));
+            Assert.Contains(
+                discovery.OutputRoots,
+                path => string.Equals(
+                    path,
+                    IncrementalPaths.CanonicalAbsolutePath(Path.Combine(root, "build-output")),
+                    IncrementalPaths.PathComparison));
+            Assert.Contains(
+                discovery.OutputRoots,
+                path => string.Equals(
+                    path,
+                    IncrementalPaths.CanonicalAbsolutePath(Path.Combine(root, "intermediates")),
+                    IncrementalPaths.PathComparison));
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
     }
 
     [Fact]

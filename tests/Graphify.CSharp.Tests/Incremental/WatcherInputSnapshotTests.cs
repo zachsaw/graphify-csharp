@@ -6,7 +6,7 @@ namespace Graphify.CSharp.Tests.Incremental;
 public sealed class WatcherInputSnapshotTests
 {
     [Fact]
-    public void Exact_evaluated_source_wins_over_obj_filter_without_forcing_reload_for_content_edits()
+    public void Exact_evaluated_source_wins_over_project_output_root_without_forcing_reload_for_content_edits()
     {
         var root = CreateTemporaryDirectory();
         try
@@ -15,7 +15,8 @@ public sealed class WatcherInputSnapshotTests
             var snapshot = CreateSnapshot(
                 sources: [explicitGenerated],
                 dependencies: [],
-                discoveryRoots: [root]);
+                discoveryRoots: [root],
+                outputRoots: [Path.Combine(root, "obj")]);
 
             var exactChange = snapshot.Classify(new FileChangeEvent(FileChangeKind.Changed, explicitGenerated));
             var noiseChange = snapshot.Classify(new FileChangeEvent(
@@ -25,6 +26,7 @@ public sealed class WatcherInputSnapshotTests
             Assert.True(exactChange.Accepted);
             Assert.False(exactChange.RequiresColdReconciliation);
             Assert.False(noiseChange.Accepted);
+            Assert.True(snapshot.ShouldTraverseDirectory(Path.Combine(root, "obj")));
         }
         finally
         {
@@ -33,7 +35,64 @@ public sealed class WatcherInputSnapshotTests
     }
 
     [Fact]
-    public void Conventional_excluded_directory_ancestor_does_not_override_the_noise_filter()
+    public void Evaluated_globs_prune_directories_they_cannot_admit_without_name_filters()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var snapshot = CreateSnapshot(
+                sources: [],
+                dependencies: [],
+                discoveryRoots: [root],
+                inputGlobs: [new ProjectInputGlob("Compile", root, "src/**/*.cs")]);
+
+            Assert.True(snapshot.ShouldTraverseDirectory(Path.Combine(root, "src")));
+            Assert.True(snapshot.ShouldTraverseDirectory(Path.Combine(root, "src", "nested")));
+            Assert.False(snapshot.ShouldTraverseDirectory(Path.Combine(root, "packages")));
+            Assert.False(snapshot.ShouldTraverseDirectory(Path.Combine(root, "metadata")));
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void A_known_file_must_match_a_glob_instead_of_only_sharing_its_prefix()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var snapshot = CreateSnapshot(
+                sources: [],
+                dependencies: [],
+                discoveryRoots: [root],
+                inputGlobs: [new ProjectInputGlob("Compile", root, "src/**/*.cs")]);
+            var unrelatedFile = Path.Combine(root, "src", "build.log");
+            var matchingFile = Path.Combine(root, "src", "nested", "Source.cs");
+
+            Assert.False(snapshot.ShouldIncludeInInventory(unrelatedFile));
+            Assert.False(snapshot.Classify(new FileChangeEvent(
+                FileChangeKind.Changed,
+                unrelatedFile,
+                IsDirectory: false)).Accepted);
+            Assert.True(snapshot.Classify(new FileChangeEvent(
+                FileChangeKind.Changed,
+                matchingFile,
+                IsDirectory: false)).Accepted);
+            Assert.True(snapshot.Classify(new FileChangeEvent(
+                FileChangeKind.Created,
+                Path.Combine(root, "src", "nested"),
+                IsDirectory: true)).Accepted);
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void Restore_metadata_directory_creation_does_not_override_the_evaluated_output_root()
     {
         var root = CreateTemporaryDirectory();
         try
@@ -42,7 +101,8 @@ public sealed class WatcherInputSnapshotTests
                 sources: [],
                 dependencies: [Path.Combine(root, "obj", "project.assets.json")],
                 discoveryRoots: [root],
-                infrastructurePaths: [Path.Combine(root, "obj", "project.assets.json")]);
+                infrastructurePaths: [Path.Combine(root, "obj", "project.assets.json")],
+                outputRoots: [Path.Combine(root, "obj")]);
 
             var classification = snapshot.Classify(new FileChangeEvent(
                 FileChangeKind.Created,
@@ -84,7 +144,7 @@ public sealed class WatcherInputSnapshotTests
     }
 
     [Fact]
-    public void Bootstrap_ignores_conventional_build_output_and_keeps_other_paths_conservative()
+    public void Bootstrap_defers_directory_policy_until_project_evaluation()
     {
         var root = CreateTemporaryDirectory();
         try
@@ -100,16 +160,54 @@ public sealed class WatcherInputSnapshotTests
             var arbitraryInput = bootstrap.Classify(new FileChangeEvent(
                 FileChangeKind.Changed,
                 Path.Combine(root, "generated", "generator.data")));
-            var gitNoise = bootstrap.Classify(new FileChangeEvent(
+            var arbitraryPath = bootstrap.Classify(new FileChangeEvent(
                 FileChangeKind.Changed,
                 Path.Combine(root, ".git", "index")));
 
             Assert.True(bootstrap.IsBootstrap);
-            Assert.False(generatedSource.Accepted);
-            Assert.False(generatedSource.RequiresColdReconciliation);
+            Assert.True(generatedSource.Accepted);
+            Assert.True(generatedSource.RequiresColdReconciliation);
             Assert.True(arbitraryInput.Accepted);
             Assert.True(arbitraryInput.RequiresColdReconciliation);
-            Assert.False(gitNoise.Accepted);
+            Assert.True(arbitraryPath.Accepted);
+            Assert.True(arbitraryPath.RequiresColdReconciliation);
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void Directory_names_are_not_filters_when_the_evaluated_project_says_otherwise()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var snapshot = CreateSnapshot(
+                sources: [],
+                dependencies: [],
+                discoveryRoots: [root],
+                inputGlobs:
+                [
+                    new ProjectInputGlob("Compile", root, "**/*.cs")
+                    {
+                        ExcludePatterns = ["build-output/**"],
+                    },
+                ],
+                outputRoots: [Path.Combine(root, "build-output")]);
+
+            var sourceInObj = Path.Combine(root, "obj", "Intentional.cs");
+            var outputNoise = Path.Combine(root, "build-output", "Noise.cs");
+
+            Assert.True(snapshot.ShouldIncludeInInventory(sourceInObj));
+            Assert.True(snapshot.Classify(new FileChangeEvent(
+                FileChangeKind.Created,
+                sourceInObj)).Accepted);
+            Assert.False(snapshot.ShouldIncludeInInventory(outputNoise));
+            Assert.False(snapshot.Classify(new FileChangeEvent(
+                FileChangeKind.Created,
+                outputNoise)).Accepted);
         }
         finally
         {
@@ -186,7 +284,8 @@ public sealed class WatcherInputSnapshotTests
             var snapshot = CreateSnapshot(
                 sources: [],
                 dependencies: [],
-                discoveryRoots: [root]);
+                discoveryRoots: [root],
+                inputDiscoveryComplete: false);
 
             var source = snapshot.Classify(new FileChangeEvent(
                 FileChangeKind.Created,
@@ -292,7 +391,8 @@ public sealed class WatcherInputSnapshotTests
             var snapshot = CreateSnapshot(
                 sources: [explicitGenerated],
                 dependencies: [dependency],
-                discoveryRoots: [root]);
+                discoveryRoots: [root],
+                outputRoots: [obj]);
 
             var inventory = await new FileInventoryScanner().ScanAsync(
                 [root],
@@ -334,7 +434,8 @@ public sealed class WatcherInputSnapshotTests
                     {
                         ExcludePatterns = ["obj/**"],
                     },
-                ]);
+                ],
+                outputRoots: [obj]);
             var nonrecursive = CreateSnapshot(
                 sources: [],
                 dependencies: [],
@@ -345,14 +446,15 @@ public sealed class WatcherInputSnapshotTests
                     {
                         ExcludePatterns = ["obj/*"],
                     },
-                ]);
+                ],
+                outputRoots: [obj]);
 
             Assert.False(recursive.ShouldTraverseDirectory(obj));
             Assert.True(nonrecursive.ShouldTraverseDirectory(obj));
             Assert.True(nonrecursive.ShouldTraverseDirectory(Path.Combine(obj, "Release")));
             Assert.True(nonrecursive.ShouldIncludeInInventory(Path.Combine(nested, "Added.csharp")));
             Assert.False(nonrecursive.ShouldIncludeInInventory(Path.Combine(obj, "Direct.csharp")));
-            Assert.True(nonrecursive.ShouldTraverseDirectory(source));
+            Assert.False(nonrecursive.ShouldTraverseDirectory(source));
         }
         finally
         {
@@ -414,7 +516,8 @@ public sealed class WatcherInputSnapshotTests
                     {
                         ExcludePatterns = ["obj/bin/**"],
                     },
-                ]);
+                ],
+                outputRoots: [Path.Combine(root, "obj")]);
 
             var uncertain = snapshot.Classify(new FileChangeEvent(FileChangeKind.Created, source));
             var file = snapshot.Classify(new FileChangeEvent(
@@ -441,7 +544,9 @@ public sealed class WatcherInputSnapshotTests
         IEnumerable<string> dependencies,
         IEnumerable<string> discoveryRoots,
         IEnumerable<ProjectInputGlob>? inputGlobs = null,
-        IEnumerable<string>? infrastructurePaths = null)
+        IEnumerable<string>? infrastructurePaths = null,
+        IEnumerable<string>? outputRoots = null,
+        bool inputDiscoveryComplete = true)
     {
         var root = discoveryRoots.First();
         var output = Path.Combine(root, "graphify-out", "csharp.json");
@@ -456,7 +561,9 @@ public sealed class WatcherInputSnapshotTests
             output,
             cache,
             inputGlobs: inputGlobs,
-            infrastructurePaths: infrastructurePaths);
+            infrastructurePaths: infrastructurePaths,
+            outputRoots: outputRoots,
+            inputDiscoveryComplete: inputDiscoveryComplete);
     }
 
     private static string CreateTemporaryDirectory()

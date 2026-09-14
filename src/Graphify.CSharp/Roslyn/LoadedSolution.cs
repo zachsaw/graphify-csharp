@@ -66,7 +66,8 @@ public sealed class LoadedSolution : IDisposable
             _ => RoslynProjectInputDiscovery.Discover(
                 project.Project,
                 GetProjectDirectory(project),
-                Request));
+                Request,
+                project.Identity.TargetFramework));
         if (TransientRoots.Length == 0)
         {
             return discovery;
@@ -84,6 +85,9 @@ public sealed class LoadedSolution : IDisposable
                 .Where(path => !IsTransientPath(path))
                 .ToImmutableArray(),
             ExplicitSemanticPaths = discovery.ExplicitSemanticPaths
+                .Where(path => !IsTransientPath(path))
+                .ToImmutableArray(),
+            OutputRoots = discovery.OutputRoots
                 .Where(path => !IsTransientPath(path))
                 .ToImmutableArray(),
         };

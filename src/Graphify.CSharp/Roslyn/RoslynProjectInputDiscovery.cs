@@ -26,6 +26,7 @@ internal sealed record ProjectInputDiscoveryResult(
     ImmutableArray<ProjectInputGlob> Globs,
     ImmutableArray<string> InfrastructurePaths,
     ImmutableArray<string> ExplicitSemanticPaths,
+    ImmutableArray<string> OutputRoots,
     ImmutableArray<string> Diagnostics);
 
 internal static class RoslynProjectInputDiscovery
@@ -33,7 +34,8 @@ internal static class RoslynProjectInputDiscovery
     public static ProjectInputDiscoveryResult Discover(
         RoslynProject project,
         string projectDirectory,
-        ProjectLoadRequest? request = null)
+        ProjectLoadRequest? request = null,
+        string? targetFramework = null)
     {
         ArgumentNullException.ThrowIfNull(project);
         ArgumentException.ThrowIfNullOrWhiteSpace(projectDirectory);
@@ -41,6 +43,7 @@ internal static class RoslynProjectInputDiscovery
         var paths = new HashSet<string>(IncrementalPaths.PathComparer);
         var infrastructurePaths = new HashSet<string>(IncrementalPaths.PathComparer);
         var explicitSemanticPaths = new HashSet<string>(IncrementalPaths.PathComparer);
+        var outputRoots = new HashSet<string>(IncrementalPaths.PathComparer);
         var globs = new HashSet<ProjectInputGlob>();
         var diagnostics = new HashSet<string>(StringComparer.Ordinal);
         foreach (var document in project.AdditionalDocuments)
@@ -70,17 +73,6 @@ internal static class RoslynProjectInputDiscovery
             }
         }
 
-        // Restore metadata is not a Roslyn document or import, but it can
-        // change the resolved references and analyzers used by the evaluated
-        // project. Keep the conventional path even when it does not exist yet
-        // so a later restore/create invalidates the warm boundary.
-        var restoreMetadataPath = Path.Combine(
-            IncrementalPaths.CanonicalAbsolutePath(projectDirectory),
-            "obj",
-            "project.assets.json");
-        AddPath(restoreMetadataPath, paths);
-        AddPath(restoreMetadataPath, infrastructurePaths);
-
         foreach (var path in GetConventionalConfigurationPaths(projectDirectory))
         {
             AddPath(path, paths);
@@ -103,7 +95,7 @@ internal static class RoslynProjectInputDiscovery
             {
                 try
                 {
-                    var evaluated = EvaluateProjectInputs(projectPath, request);
+                    var evaluated = EvaluateProjectInputs(projectPath, request, targetFramework);
                     isComplete &= evaluated.IsComplete;
                     diagnostics.UnionWith(evaluated.Diagnostics);
                     foreach (var path in evaluated.ImportPaths)
@@ -115,6 +107,17 @@ internal static class RoslynProjectInputDiscovery
                     {
                         AddPath(path, paths);
                         AddPath(path, explicitSemanticPaths);
+                    }
+
+                    foreach (var path in evaluated.RestoreMetadataPaths)
+                    {
+                        AddPath(path, paths);
+                        AddPath(path, infrastructurePaths);
+                    }
+
+                    foreach (var path in evaluated.OutputRoots)
+                    {
+                        AddPath(path, outputRoots);
                     }
 
                     foreach (var glob in evaluated.Globs)
@@ -152,6 +155,9 @@ internal static class RoslynProjectInputDiscovery
             explicitSemanticPaths
                 .OrderBy(path => path, IncrementalPaths.PathComparer)
                 .ToImmutableArray(),
+            outputRoots
+                .OrderBy(path => path, IncrementalPaths.PathComparer)
+                .ToImmutableArray(),
             diagnostics
                 .OrderBy(diagnostic => diagnostic, StringComparer.Ordinal)
                 .ToImmutableArray());
@@ -159,7 +165,8 @@ internal static class RoslynProjectInputDiscovery
 
     private static EvaluatedProjectInputs EvaluateProjectInputs(
         string projectPath,
-        ProjectLoadRequest request)
+        ProjectLoadRequest request,
+        string? targetFramework)
     {
         MsBuildEnvironment.EnsureRegistered();
         var globalProperties = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -168,9 +175,16 @@ internal static class RoslynProjectInputDiscovery
             ["DesignTimeBuild"] = "true",
             ["BuildingProject"] = "false",
         };
-        if (request.TargetFramework is not null)
+        // ProjectIdentity uses "unknown" for projects that do not expose a
+        // TargetFramework property. Do not turn that display value into an
+        // MSBuild global property; it would change conditional evaluation.
+        var selectedTargetFramework = targetFramework is not null
+            && !string.Equals(targetFramework, "unknown", StringComparison.OrdinalIgnoreCase)
+            ? targetFramework
+            : request.TargetFramework;
+        if (selectedTargetFramework is not null)
         {
-            globalProperties["TargetFramework"] = request.TargetFramework;
+            globalProperties["TargetFramework"] = selectedTargetFramework;
         }
 
         using var projectCollection = new ProjectCollection(globalProperties);
@@ -183,13 +197,142 @@ internal static class RoslynProjectInputDiscovery
         var projectDirectory = Path.GetDirectoryName(Path.GetFullPath(projectPath))
             ?? Directory.GetCurrentDirectory();
         var globDiscovery = DiscoverGlobs(evaluatedProject, projectDirectory);
+        var restoreMetadataDiscovery = GetRestoreMetadataPaths(evaluatedProject, projectDirectory);
+        var outputRootDiscovery = GetOutputRoots(
+            evaluatedProject,
+            projectDirectory,
+            request.RepositoryRoot);
+        var diagnostics = globDiscovery.Diagnostics
+            .Concat(restoreMetadataDiscovery.Diagnostics)
+            .Concat(outputRootDiscovery.Diagnostics)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
         return new EvaluatedProjectInputs(
             importPaths,
             GetExplicitSemanticPaths(evaluatedProject, projectDirectory).ToArray(),
+            restoreMetadataDiscovery.Paths,
+            outputRootDiscovery.Paths,
             globDiscovery.Globs,
-            globDiscovery.IsComplete,
-            globDiscovery.Diagnostics);
+            globDiscovery.IsComplete
+                && restoreMetadataDiscovery.IsComplete
+                && outputRootDiscovery.IsComplete,
+            diagnostics);
     }
+
+    private static EvaluatedPathDiscoveryResult GetRestoreMetadataPaths(
+        BuildProject evaluatedProject,
+        string projectDirectory)
+    {
+        var assetsPath = evaluatedProject.GetPropertyValue("ProjectAssetsFile");
+        if (!string.IsNullOrWhiteSpace(assetsPath))
+        {
+            if (ContainsDynamicReference(assetsPath))
+            {
+                return IncompletePathDiscovery(
+                    "ProjectAssetsFile contains an unresolved MSBuild expression.");
+            }
+
+            return CompletePathDiscovery([ResolveEvaluatedPath(assetsPath, projectDirectory)]);
+        }
+
+        // SDK projects normally evaluate ProjectAssetsFile from this property.
+        // If a project customizes that property away, use the evaluated
+        // extensions directory as the narrow, MSBuild-owned fallback. Do not
+        // guess an obj directory from the project name.
+        var extensionsPath = evaluatedProject.GetPropertyValue("MSBuildProjectExtensionsPath");
+        if (string.IsNullOrWhiteSpace(extensionsPath))
+        {
+            return IncompletePathDiscovery(
+                "neither ProjectAssetsFile nor MSBuildProjectExtensionsPath was evaluated.");
+        }
+
+        if (ContainsDynamicReference(extensionsPath))
+        {
+            return IncompletePathDiscovery(
+                "MSBuildProjectExtensionsPath contains an unresolved MSBuild expression.");
+        }
+
+        return IncompletePathDiscovery(
+            "ProjectAssetsFile was not evaluated; using the evaluated MSBuild extensions directory as a fallback.",
+            [ResolveEvaluatedPath(Path.Combine(extensionsPath, "project.assets.json"), projectDirectory)]);
+    }
+
+    private static EvaluatedPathDiscoveryResult GetOutputRoots(
+        BuildProject evaluatedProject,
+        string projectDirectory,
+        string repositoryRoot)
+    {
+        var roots = new HashSet<string>(IncrementalPaths.PathComparer);
+        var diagnostics = new HashSet<string>(StringComparer.Ordinal);
+        var isComplete = true;
+        foreach (var propertyName in OutputRootProperties)
+        {
+            var value = evaluatedProject.GetPropertyValue(propertyName);
+            if (ContainsDynamicReference(value))
+            {
+                isComplete = false;
+                diagnostics.Add(
+                    $"Watcher output-root discovery was incomplete for property '{propertyName}': its value contains an unresolved MSBuild expression.");
+            }
+
+            foreach (var candidate in SplitEvaluatedPathList(value))
+            {
+                if (ContainsDynamicReference(candidate))
+                {
+                    continue;
+                }
+
+                var path = ResolveEvaluatedPath(candidate, projectDirectory);
+                // Never prune a project/repository root or an ancestor of one.
+                // A malformed property must not turn the inventory into an
+                // empty scan. Roots below those boundaries remain safe to
+                // prune, and exact Roslyn inputs still override them later.
+                if (IsFileSystemRoot(path)
+                    || IncrementalPaths.IsPathOrUnder(projectDirectory, path)
+                    || IncrementalPaths.IsPathOrUnder(repositoryRoot, path))
+                {
+                    continue;
+                }
+
+                roots.Add(path);
+            }
+        }
+
+        return new EvaluatedPathDiscoveryResult(
+            roots.OrderBy(path => path, IncrementalPaths.PathComparer).ToArray(),
+            isComplete,
+            diagnostics.OrderBy(diagnostic => diagnostic, StringComparer.Ordinal).ToArray());
+    }
+
+    private static EvaluatedPathDiscoveryResult CompletePathDiscovery(IReadOnlyList<string> paths) =>
+        new(paths, IsComplete: true, Diagnostics: Array.Empty<string>());
+
+    private static EvaluatedPathDiscoveryResult IncompletePathDiscovery(
+        string reason,
+        IReadOnlyList<string>? paths = null) =>
+        new(
+            paths ?? Array.Empty<string>(),
+            IsComplete: false,
+            Diagnostics:
+            [
+                $"Watcher input discovery was incomplete: {reason}",
+            ]);
+
+    private static bool IsFileSystemRoot(string path) =>
+        string.Equals(
+            IncrementalPaths.CanonicalAbsolutePath(path),
+            IncrementalPaths.CanonicalAbsolutePath(Path.GetPathRoot(path) ?? path),
+            IncrementalPaths.PathComparison);
+
+    private static IEnumerable<string> SplitEvaluatedPathList(string value) =>
+        value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(path => !string.IsNullOrWhiteSpace(path));
+
+    private static string ResolveEvaluatedPath(string path, string baseDirectory) =>
+        IncrementalPaths.CanonicalAbsolutePath(
+            Path.IsPathRooted(path)
+                ? path
+                : Path.Combine(baseDirectory, path));
 
     private static GlobDiscoveryResult DiscoverGlobs(
         BuildProject evaluatedProject,
@@ -561,7 +704,14 @@ internal static class RoslynProjectInputDiscovery
     private sealed record EvaluatedProjectInputs(
         IReadOnlyList<string> ImportPaths,
         IReadOnlyList<string> ExplicitSemanticPaths,
+        IReadOnlyList<string> RestoreMetadataPaths,
+        IReadOnlyList<string> OutputRoots,
         IReadOnlyList<ProjectInputGlob> Globs,
+        bool IsComplete,
+        IReadOnlyList<string> Diagnostics);
+
+    private sealed record EvaluatedPathDiscoveryResult(
+        IReadOnlyList<string> Paths,
         bool IsComplete,
         IReadOnlyList<string> Diagnostics);
 
@@ -581,4 +731,15 @@ internal static class RoslynProjectInputDiscovery
         IReadOnlyList<ProjectInputGlob> Globs,
         bool IsComplete,
         IReadOnlyList<string> Diagnostics);
+
+    private static readonly ImmutableArray<string> OutputRootProperties =
+    [
+        "BaseOutputPath",
+        "OutputPath",
+        "OutDir",
+        "BaseIntermediateOutputPath",
+        "IntermediateOutputPath",
+        "MSBuildProjectExtensionsPath",
+        "PublishDir",
+    ];
 }

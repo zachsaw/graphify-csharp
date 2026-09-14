@@ -38,7 +38,11 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     private readonly SemaphoreSlim _workSignal = new(0);
     private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly CancellationTokenSource _stop = new();
-    private readonly Dictionary<string, DirtyPathState> _dirtyPaths = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DirtyPathState> _dirtyPaths = new(IncrementalPaths.PathComparer);
+    private readonly Dictionary<string, SourceFingerprint> _consumedDependencyBaselines =
+        new(IncrementalPaths.PathComparer);
+    private readonly Dictionary<string, SourceFingerprint> _dependencyLoadStartBaselines =
+        new(IncrementalPaths.PathComparer);
     private long _eventClock;
     private long _eventTrustVersion;
     private int _queuedEventCount;
@@ -63,6 +67,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     private string? _publishedOutputDigest;
     private int _requiresColdReconciliation;
     private WatcherInputSnapshot _inputSnapshot;
+    private long _dependencyLoadTargetGeneration;
 
     public IncrementalIndexSession(
         ProjectLoadRequest request,
@@ -107,7 +112,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             bootstrapRoots,
             _outputPath,
             _cachePath,
-            bootstrapRoots.Select(root => new WatcherRoot(root, IncludeSubdirectories: true)));
+            bootstrapRoots.Select(root => new WatcherRoot(root, IncludeSubdirectories: true)),
+            knownInputPaths: [request.InputPath]);
     }
 
     public IncrementalSessionStatus Status =>
@@ -180,18 +186,29 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         ReportFileChanged(new FileChangeEvent(FileChangeKind.Changed, path));
 
     public void ReportFileChanged(FileChangeEvent change)
+        => ReportFileChangedCore(change, alreadyClassified: false);
+
+    internal void ReportCapturedFileChanged(FileChangeEvent change)
+        => ReportFileChangedCore(change, alreadyClassified: true);
+
+    private void ReportFileChangedCore(FileChangeEvent change, bool alreadyClassified)
     {
         ArgumentNullException.ThrowIfNull(change);
-        WatcherEventClassification classification;
-        try
+        var classification = new WatcherEventClassification(
+            Accepted: alreadyClassified,
+            RequiresColdReconciliation: alreadyClassified && change.RequiresColdReconciliation);
+        if (!alreadyClassified)
         {
-            classification = Volatile.Read(ref _inputSnapshot).Classify(change);
-        }
-        catch (ArgumentException)
-        {
-            Volatile.Write(ref _requiresColdReconciliation, 1);
-            MarkEventDeliveryUntrusted("An invalid file-system event path was received.");
-            return;
+            try
+            {
+                classification = Volatile.Read(ref _inputSnapshot).Classify(change);
+            }
+            catch (ArgumentException)
+            {
+                Volatile.Write(ref _requiresColdReconciliation, 1);
+                MarkEventDeliveryUntrusted("An invalid file-system event path was received.");
+                return;
+            }
         }
 
         if (!classification.Accepted)
@@ -214,6 +231,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                     : IncrementalPaths.CanonicalAbsolutePath(change.OldPath),
                 RequiresColdReconciliation = change.RequiresColdReconciliation
                     || classification.RequiresColdReconciliation,
+                CaptureEpoch = null,
             };
             accepted = !string.IsNullOrWhiteSpace(normalizedChange.Path)
                 && queued <= EventQueueCapacity
@@ -483,9 +501,12 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     {
         await LoadAndExtractAllAsync(cancellationToken).ConfigureAwait(false);
         DrainFileEvents();
+        CaptureConsumedDependencyBaselines();
+        DiscardAlreadyConsumedDependencyChanges();
         var target = new RefreshTarget(_sessionId, Volatile.Read(ref _eventClock));
-        var duePaths = DueDirtyPaths(target.EventGeneration);
-        if (IsEventDeliveryUntrusted() || duePaths.Count > 0)
+        var dueStates = DueDirtyPathStates(target.EventGeneration);
+        var duePaths = dueStates.Select(state => state.Path).ToArray();
+        if (IsEventDeliveryUntrusted() || duePaths.Length > 0)
         {
             await ReconcileAsync(
                     target,
@@ -496,6 +517,9 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             return;
         }
 
+        _generation = _generation.AdvanceEventsThrough(
+            Math.Max(_generation.EventGeneration, target.EventGeneration));
+        _generation = MarkGenerationIndexed(target.EventGeneration);
         await PublishCurrentAsync(
             target,
             extractedProjectCount: _contributions.Count,
@@ -560,10 +584,13 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     {
         ValidateTarget(target);
         DrainFileEvents();
+        DiscardAlreadyConsumedDependencyChanges();
         forceCold |= IsEventDeliveryUntrusted()
             || Volatile.Read(ref _requiresColdReconciliation) != 0
             || !Volatile.Read(ref _inputSnapshot).InputDiscoveryComplete;
-        var duePaths = DueDirtyPaths(target.EventGeneration);
+        var dueStates = DueDirtyPathStates(target.EventGeneration);
+        forceCold |= dueStates.Any(state => state.RequiresColdReconciliation);
+        var duePaths = dueStates.Select(state => state.Path).ToArray();
         var dirtyProjectKeys = forceCold
             ? _fingerprints.Keys.ToHashSet(StringComparer.Ordinal)
             : ResolveDirtyProjects(duePaths);
@@ -605,6 +632,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         {
             var trustVersionAtStart = CaptureEventTrustVersion();
             await LoadAndExtractAllAsync(cancellationToken).ConfigureAwait(false);
+            DrainFileEvents();
+            CaptureConsumedDependencyBaselines();
             extractedProjectCount = _contributions.Count;
             Volatile.Write(
                 ref _requiresColdReconciliation,
@@ -620,6 +649,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             if (updated is null)
             {
                 await LoadAndExtractAllAsync(cancellationToken).ConfigureAwait(false);
+                DrainFileEvents();
+                CaptureConsumedDependencyBaselines();
                 extractedProjectCount = _contributions.Count;
                 Volatile.Write(
                     ref _requiresColdReconciliation,
@@ -834,13 +865,21 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 
     private async Task<bool> LoadAndExtractAllOnceAsync(CancellationToken cancellationToken)
     {
+        // Capture only dependencies already implicated by the current event
+        // set. Comparing this affected-path baseline with the post-load bytes
+        // lets us distinguish an equivalent generated rewrite from a change
+        // that arrived while Roslyn was reading the project. No repository-
+        // wide hash scan is introduced.
+        _dependencyLoadTargetGeneration = Volatile.Read(ref _eventClock);
+        CaptureDependencyLoadStartBaselines();
         Volatile.Write(ref _requiresColdReconciliation, 1);
 
         // Keep the last known coverage alive, but temporarily stop treating
-        // project membership and conventional exclusions as authoritative.
+        // project membership and evaluated output roots as authoritative.
         // This closes the interval between the old Roslyn load and publication
-        // of the next evaluated input snapshot. An uncertain event causes a
-        // cold recovery; it is deliberately not pushed through the warm path.
+        // of the next evaluated input snapshot. Events observed in this
+        // transition are journaled and reclassified once MSBuild has produced
+        // the new boundary; only actual delivery loss requires recovery.
         var previousSnapshot = Volatile.Read(ref _inputSnapshot);
         var transitionSnapshot = WatcherInputSnapshot.CreateBootstrap(
             previousSnapshot.DiscoveryRoots.Length > 0
@@ -850,7 +889,9 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             _cachePath,
             previousSnapshot.WatchRoots.Length > 0
                 ? previousSnapshot.WatchRoots
-                : [new WatcherRoot(_request.RepositoryRoot, IncludeSubdirectories: true)]);
+                : [new WatcherRoot(_request.RepositoryRoot, IncludeSubdirectories: true)],
+            knownInputPaths: previousSnapshot.KnownInputPaths
+                .Append(_request.InputPath));
         Volatile.Write(ref _inputSnapshot, transitionSnapshot);
         NotifyInputSnapshotChanged(transitionSnapshot, out _);
 
@@ -976,11 +1017,6 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     {
         try
         {
-            if (fileEvent.Change.RequiresColdReconciliation)
-            {
-                Volatile.Write(ref _requiresColdReconciliation, 1);
-            }
-
             foreach (var endpoint in fileEvent.Change.Endpoints)
             {
                 var path = IncrementalPaths.CanonicalAbsolutePath(endpoint);
@@ -989,11 +1025,19 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                     _dirtyPaths[path] = existing with
                     {
                         LastGeneration = Math.Max(existing.LastGeneration, fileEvent.Generation),
+                        RequiresColdReconciliation = existing.RequiresColdReconciliation
+                            || fileEvent.Change.RequiresColdReconciliation,
                     };
                 }
                 else
                 {
-                    _dirtyPaths.Add(path, new DirtyPathState(path, fileEvent.Generation, fileEvent.Generation));
+                    _dirtyPaths.Add(
+                        path,
+                        new DirtyPathState(
+                            path,
+                            fileEvent.Generation,
+                            fileEvent.Generation,
+                            fileEvent.Change.RequiresColdReconciliation));
                 }
             }
 
@@ -1128,11 +1172,115 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             IncrementalPaths.CanonicalAbsolutePath(second),
             IncrementalPaths.PathComparison);
 
-    private IReadOnlyList<string> DueDirtyPaths(long targetGeneration) => _dirtyPaths.Values
+    private IReadOnlyList<DirtyPathState> DueDirtyPathStates(long targetGeneration) => _dirtyPaths.Values
         .Where(path => path.FirstGeneration <= targetGeneration)
-        .Select(path => path.Path)
-        .OrderBy(path => path, StringComparer.Ordinal)
+        .OrderBy(path => path.Path, IncrementalPaths.PathComparer)
         .ToArray();
+
+    private void CaptureConsumedDependencyBaselines()
+    {
+        foreach (var path in _dirtyPaths.Keys.ToArray())
+        {
+            if (!Volatile.Read(ref _inputSnapshot).IsKnownDependency(path))
+            {
+                continue;
+            }
+
+            try
+            {
+                _consumedDependencyBaselines[path] = SourceFingerprint.FromFile(
+                    path,
+                    _request.RepositoryRoot,
+                    includeContentHash: true);
+            }
+            catch (IOException)
+            {
+                _consumedDependencyBaselines.Remove(path);
+            }
+            catch (UnauthorizedAccessException)
+            {
+                _consumedDependencyBaselines.Remove(path);
+            }
+        }
+    }
+
+    private void CaptureDependencyLoadStartBaselines()
+    {
+        _dependencyLoadStartBaselines.Clear();
+        var snapshot = Volatile.Read(ref _inputSnapshot);
+        foreach (var path in _dirtyPaths.Keys.ToArray())
+        {
+            if (!snapshot.IsKnownDependency(path))
+            {
+                continue;
+            }
+
+            try
+            {
+                _dependencyLoadStartBaselines[path] = SourceFingerprint.FromFile(
+                    path,
+                    _request.RepositoryRoot,
+                    includeContentHash: true);
+            }
+            catch (IOException)
+            {
+                // A missing/unreadable baseline cannot prove equivalence. The
+                // corresponding event remains dirty and takes the cold path.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // See the IOException case above.
+            }
+        }
+    }
+
+    private void DiscardAlreadyConsumedDependencyChanges()
+    {
+        foreach (var state in _dirtyPaths.Values.ToArray())
+        {
+            if (!Volatile.Read(ref _inputSnapshot).IsKnownDependency(state.Path)
+                || !_consumedDependencyBaselines.TryGetValue(state.Path, out var baseline))
+            {
+                continue;
+            }
+
+            var eventArrivedDuringLoad = state.LastGeneration > _dependencyLoadTargetGeneration;
+            _dependencyLoadStartBaselines.TryGetValue(state.Path, out var loadStart);
+            if (eventArrivedDuringLoad && loadStart is null)
+            {
+                // A missing pre-load fingerprint cannot prove that Roslyn
+                // consumed the bytes represented by this event. Retain the
+                // event until a subsequent load can establish a trustworthy
+                // before/after comparison, even when the event was queued
+                // before the load's generation boundary was captured.
+                continue;
+            }
+
+            try
+            {
+                var current = SourceFingerprint.FromFile(
+                    state.Path,
+                    _request.RepositoryRoot,
+                    includeContentHash: true);
+                var equivalent = eventArrivedDuringLoad
+                    ? loadStart!.ContentEquals(current)
+                    : baseline.ContentEquals(current);
+                if (equivalent)
+                {
+                    _dirtyPaths.Remove(state.Path);
+                }
+            }
+            catch (IOException)
+            {
+                // If equivalence cannot be established, retain the dirty
+                // path and take the conservative cold path.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // See the IOException case above.
+            }
+        }
+    }
 
     private void ClearDirtyPaths(IReadOnlyList<string> paths, long targetGeneration)
     {
@@ -1305,5 +1453,9 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 
     private sealed record FileChangeCommand(FileChangeEvent Change, long Generation);
 
-    private sealed record DirtyPathState(string Path, long FirstGeneration, long LastGeneration);
+    private sealed record DirtyPathState(
+        string Path,
+        long FirstGeneration,
+        long LastGeneration,
+        bool RequiresColdReconciliation);
 }

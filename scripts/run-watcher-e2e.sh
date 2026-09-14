@@ -27,6 +27,9 @@ temporary_root="$(mktemp -d "$temporary_base/graphify-csharp-watcher-e2e.XXXXXX"
 fixture_root="$temporary_root/fixture"
 feed_directory="$temporary_root/feed"
 tool_directory="$temporary_root/tool"
+build_state_directory="$fixture_root/build-state"
+compiled_output_directory="$fixture_root/compiled-output"
+restore_state_directory="$fixture_root/restore-state"
 output_path="$fixture_root/graphify-out/csharp.json"
 alternate_output_path="$fixture_root/graphify-out/alternate.json"
 watcher_log="$temporary_root/watcher.log"
@@ -58,7 +61,7 @@ on_exit() {
     sed -n '1,200p' "$second_watcher_log" >&2 2>/dev/null || true
     echo '--- client log ---' >&2
     sed -n '1,200p' "$client_log" >&2 2>/dev/null || true
-    for evidence_path in "$temporary_root/ps.json" "$temporary_root/inspect.json" "$temporary_root/stop.json"; do
+    for evidence_path in "$temporary_root/ps.json" "$temporary_root/inspect.json" "$temporary_root/stop.json" "$temporary_root/noise-before.json" "$temporary_root/noise-after.json"; do
       if [[ -f "$evidence_path" ]]; then
         echo "--- $(basename "$evidence_path") ---" >&2
         sed -n '1,200p' "$evidence_path" >&2 || true
@@ -73,18 +76,36 @@ trap on_exit EXIT
 cp -R "$repository_root/tests/Fixtures/ReferenceFixture/." "$fixture_root/"
 # Keep the fixture copy clean even when the contributor's checkout has local
 # build output from another test run.
-rm -rf "$fixture_root/bin" "$fixture_root/obj"
+rm -rf "$fixture_root/bin" "$fixture_root/obj" "$build_state_directory" \
+  "$compiled_output_directory" "$restore_state_directory"
 
-mkdir -p "$fixture_root/obj"
+mkdir -p "$build_state_directory" "$fixture_root/artifacts" "$fixture_root/bin" \
+  "$fixture_root/.e2e" "$fixture_root/graphify-out"
 printf '%s\n' \
   'namespace ReferenceFixture.Production;' \
-  'public sealed class ExplicitObjGenerated { }' \
-  > "$fixture_root/obj/ExplicitObjGenerated.cs"
+  'public sealed class ExplicitBuildStateGenerated { }' \
+  > "$build_state_directory/ExplicitBuildStateGenerated.cs"
 printf '%s\n' \
   'namespace ReferenceFixture.Production;' \
-  'public sealed class ObjNoise { }' \
-  > "$fixture_root/obj/ObjNoise.cs"
-perl -0pi -e 's#</Project>#  <ItemGroup>\n    <Compile Include="obj/ExplicitObjGenerated.cs" />\n  </ItemGroup>\n</Project>#' \
+  'public sealed class BuildStateNoise { }' \
+  > "$build_state_directory/BuildStateNoise.cs"
+printf '%s\n' \
+  'namespace ReferenceFixture.Production;' \
+  'public sealed class ArtifactNamedSource { }' \
+  > "$fixture_root/artifacts/ArtifactNamedSource.cs"
+printf '%s\n' \
+  'namespace ReferenceFixture.Production;' \
+  'public sealed class BinNamedSource { }' \
+  > "$fixture_root/bin/BinNamedSource.cs"
+printf '%s\n' \
+  'namespace ReferenceFixture.Production;' \
+  'public sealed class E2eNamedSource { }' \
+  > "$fixture_root/.e2e/E2eNamedSource.cs"
+printf '%s\n' \
+  'namespace ReferenceFixture.Production;' \
+  'public sealed class GraphifyOutNamedSource { }' \
+  > "$fixture_root/graphify-out/GraphifyOutNamedSource.cs"
+perl -0pi -e 's#</Project>#  <PropertyGroup>\n    <BaseOutputPath>compiled-output/</BaseOutputPath>\n    <BaseIntermediateOutputPath>build-state/</BaseIntermediateOutputPath>\n    <MSBuildProjectExtensionsPath>restore-state/</MSBuildProjectExtensionsPath>\n    <ProjectAssetsFile>restore-state/project.assets.json</ProjectAssetsFile>\n  </PropertyGroup>\n  <ItemGroup>\n    <Compile Remove="build-state/**/*.cs" />\n    <Compile Remove="artifacts/**/*.cs" />\n    <Compile Remove="bin/**/*.cs" />\n    <Compile Remove=".e2e/**/*.cs" />\n    <Compile Remove="graphify-out/**/*.cs" />\n    <Compile Include="build-state/ExplicitBuildStateGenerated.cs" />\n    <Compile Include="artifacts/ArtifactNamedSource.cs" />\n    <Compile Include="bin/BinNamedSource.cs" />\n    <Compile Include=".e2e/E2eNamedSource.cs" />\n    <Compile Include="graphify-out/GraphifyOutNamedSource.cs" />\n  </ItemGroup>\n</Project>#' \
   "$fixture_root/ReferenceFixture.csproj"
 
 dotnet restore "$fixture_root/ReferenceFixture.csproj"
@@ -157,7 +178,27 @@ run_tool_at_output_for_configuration() {
 }
 
 run_tool() {
-  run_tool_at_output "$output_path" "$@"
+  local request_log="$temporary_root/request.log"
+  local status=0
+  for _ in {1..120}; do
+    wait_for_watcher_ready "$watcher_session_id"
+    if run_tool_at_output "$output_path" "$@" > "$request_log" 2>&1; then
+      cat "$request_log"
+      return 0
+    else
+      status=$?
+      if grep -Fq 'Watcher request failed (not_ready)' "$request_log"; then
+        sleep 1
+        continue
+      fi
+
+      cat "$request_log"
+      return "$status"
+    fi
+  done
+
+  cat "$request_log"
+  return 1
 }
 
 resolve_session_id() {
@@ -175,6 +216,43 @@ resolve_session_id() {
     sleep 1
   done
   echo "Could not resolve the management session for '$requested_output_path'." >&2
+  return 1
+}
+
+wait_for_watcher_ready() {
+  local session_id="$1"
+  local readiness_path="$temporary_root/readiness.json"
+  for _ in {1..120}; do
+    if "$tool_directory/graphify-csharp" inspect "$session_id" --json > "$readiness_path" 2>/dev/null \
+      && jq -e '.success == true and .inspection.ready == true' "$readiness_path" >/dev/null; then
+      return
+    fi
+    sleep 1
+  done
+
+  sed -n '1,160p' "$readiness_path" >&2 2>/dev/null || true
+  echo "Watcher session '$session_id' did not become ready within two minutes." >&2
+  return 1
+}
+
+wait_for_watcher_quiescent() {
+  local session_id="$1"
+  local quiescence_path="$temporary_root/quiescence.json"
+  for _ in {1..120}; do
+    if "$tool_directory/graphify-csharp" inspect "$session_id" --json > "$quiescence_path" 2>/dev/null \
+      && jq -e \
+        '.success == true
+         and .inspection.ready == true
+         and .inspection.lifecycle_state == "ready"
+         and .inspection.event_generation == .inspection.indexed_generation' \
+        "$quiescence_path" >/dev/null; then
+      return
+    fi
+    sleep 1
+  done
+
+  sed -n '1,160p' "$quiescence_path" >&2 2>/dev/null || true
+  echo "Watcher session '$session_id' did not become quiescent within two minutes." >&2
   return 1
 }
 
@@ -208,6 +286,7 @@ start_watcher_instance() {
       else
         second_watcher_session_id="$resolved_session_id"
       fi
+      wait_for_watcher_ready "$resolved_session_id"
       return
     fi
 
@@ -282,7 +361,14 @@ run_tool > "$client_log"
 grep -Fq '(watcher,' "$client_log"
 jq -e '.nodes | length > 0' "$output_path" >/dev/null
 jq -e '.edges | length > 0' "$output_path" >/dev/null
-grep -Fq 'ReferenceFixture.Production.ExplicitObjGenerated' "$output_path"
+grep -Fq 'ReferenceFixture.Production.ExplicitBuildStateGenerated' "$output_path"
+for source_label in \
+  'ReferenceFixture.Production.ArtifactNamedSource' \
+  'ReferenceFixture.Production.BinNamedSource' \
+  'ReferenceFixture.Production.E2eNamedSource' \
+  'ReferenceFixture.Production.GraphifyOutNamedSource'; do
+  grep -Fq "$source_label" "$output_path"
+done
 
 cp "$output_path" "$temporary_root/before-configuration-conflict.json"
 cache_path="$(find "$fixture_root/graphify-out/.graphify-csharp" -maxdepth 1 -type f -name 'manifest-*.json' -print -quit)"
@@ -329,42 +415,81 @@ fi
 test -s "$alternate_output_path"
 cmp -s "$temporary_root/before-change.json" "$output_path"
 
-e2e_stage="ignored build-output noise"
+e2e_stage="ignored evaluated build-state noise"
+wait_for_watcher_quiescent "$watcher_session_id"
+"$tool_directory/graphify-csharp" inspect "$watcher_session_id" --json > "$temporary_root/noise-before.json"
+noise_before_event_generation="$(jq -r '.inspection.event_generation' "$temporary_root/noise-before.json")"
+noise_before_indexed_generation="$(jq -r '.inspection.indexed_generation' "$temporary_root/noise-before.json")"
 printf '%s\n' \
   'namespace ReferenceFixture.Production;' \
-  'public sealed class IgnoredObjNoise { }' \
-  > "$fixture_root/obj/IgnoredObjNoise.cs"
+  'public sealed class IgnoredBuildStateNoise { }' \
+  > "$build_state_directory/IgnoredBuildStateNoise.cs"
 sleep 1
 cmp -s "$temporary_root/before-change.json" "$output_path"
+"$tool_directory/graphify-csharp" inspect "$watcher_session_id" --json > "$temporary_root/noise-after.json"
+jq -e \
+  --argjson event_generation "$noise_before_event_generation" \
+  --argjson indexed_generation "$noise_before_indexed_generation" \
+  '.inspection.event_generation == $event_generation
+   and .inspection.indexed_generation == $indexed_generation' \
+  "$temporary_root/noise-after.json" >/dev/null
 
 e2e_stage="explicit generated source refresh"
-printf '\npublic sealed class ExplicitObjChange { }\n' >> "$fixture_root/obj/ExplicitObjGenerated.cs"
+printf '\npublic sealed class ExplicitBuildStateChange { }\n' >> "$build_state_directory/ExplicitBuildStateGenerated.cs"
 run_tool > "$client_log"
 grep -Fq '(watcher,' "$client_log"
-grep -Fq 'ReferenceFixture.Production.ExplicitObjChange' "$output_path"
+grep -Fq 'ReferenceFixture.Production.ExplicitBuildStateChange' "$output_path"
+
+e2e_stage="arbitrary named source refresh"
+printf '\npublic sealed class ArtifactNamedSourceChange { }\n' >> "$fixture_root/artifacts/ArtifactNamedSource.cs"
+run_tool > "$client_log"
+grep -Fq '(watcher,' "$client_log"
+grep -Fq 'ReferenceFixture.Production.ArtifactNamedSourceChange' "$output_path"
 
 e2e_stage="future membership reconciliation"
 printf '%s\n' \
   'namespace ReferenceFixture.Production;' \
-  'public sealed class FutureObjSource { }' \
-  > "$fixture_root/obj/FutureObjSource.cs"
+  'public sealed class FutureBuildStateSource { }' \
+  > "$build_state_directory/FutureBuildStateSource.cs"
 run_tool > "$client_log"
-if grep -Fq 'ReferenceFixture.Production.FutureObjSource' "$output_path"; then
-  echo 'A new unlisted obj source was indexed without an MSBuild membership change.' >&2
+if grep -Fq 'ReferenceFixture.Production.FutureBuildStateSource' "$output_path"; then
+  echo 'A new unlisted build-state source was indexed without an MSBuild membership change.' >&2
   exit 1
 fi
 
 e2e_stage="membership addition"
-perl -0pi -e 's#<Compile Include="obj/ExplicitObjGenerated.cs" />#<Compile Include="obj/ExplicitObjGenerated.cs" />\n    <Compile Include="obj/FutureObjSource.cs" />#' \
+perl -0pi -e 's#<Compile Include="build-state/ExplicitBuildStateGenerated.cs" />#<Compile Include="build-state/ExplicitBuildStateGenerated.cs" />\n    <Compile Include="build-state/FutureBuildStateSource.cs" />#' \
   "$fixture_root/ReferenceFixture.csproj"
 run_tool > "$client_log"
-grep -Fq 'ReferenceFixture.Production.FutureObjSource' "$output_path"
+grep -Fq 'ReferenceFixture.Production.FutureBuildStateSource' "$output_path"
+
+e2e_stage="custom restore metadata refresh"
+"$tool_directory/graphify-csharp" inspect "$watcher_session_id" --json > "$temporary_root/restore-before.json"
+restore_before_event_generation="$(jq -r '.inspection.event_generation' "$temporary_root/restore-before.json")"
+printf '\n' >> "$restore_state_directory/project.assets.json"
+for _ in {1..30}; do
+  "$tool_directory/graphify-csharp" inspect "$watcher_session_id" --json > "$temporary_root/restore-after.json"
+  if jq -e \
+    --argjson before_event_generation "$restore_before_event_generation" \
+    '.inspection.event_generation > $before_event_generation' \
+    "$temporary_root/restore-after.json" >/dev/null; then
+    break
+  fi
+  sleep 1
+done
+run_tool > "$client_log"
+grep -Fq '(watcher,' "$client_log"
+"$tool_directory/graphify-csharp" inspect "$watcher_session_id" --json > "$temporary_root/restore-after.json"
+jq -e \
+  --argjson before_event_generation "$restore_before_event_generation" \
+  '.inspection.event_generation > $before_event_generation' \
+  "$temporary_root/restore-after.json" >/dev/null
 
 e2e_stage="membership removal"
-perl -0pi -e 's#\s*<Compile Include="obj/ExplicitObjGenerated.cs" />##' \
+perl -0pi -e 's#\s*<Compile Include="build-state/ExplicitBuildStateGenerated.cs" />##' \
   "$fixture_root/ReferenceFixture.csproj"
 run_tool > "$client_log"
-if grep -Fq 'ReferenceFixture.Production.ExplicitObjGenerated' "$output_path"; then
+if grep -Fq 'ReferenceFixture.Production.ExplicitBuildStateGenerated' "$output_path"; then
   echo 'A source removed from the evaluated project remained in the graph.' >&2
   exit 1
 fi

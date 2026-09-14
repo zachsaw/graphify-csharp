@@ -153,7 +153,10 @@ internal sealed class FileInventoryScanner : IFileInventoryScanner
             return false;
         }
 
-        return inputSnapshot?.ShouldTraverseDirectory(path) ?? !IsExcludedDirectory(path);
+        // Without an evaluated project there is no authoritative directory
+        // policy. Scan conservatively; the snapshot-aware path above is where
+        // MSBuild-derived output/intermediate roots are pruned.
+        return inputSnapshot?.ShouldTraverseDirectory(path) ?? true;
     }
 
     internal static bool IsRelevantFilePath(string path)
@@ -164,20 +167,6 @@ internal sealed class FileInventoryScanner : IFileInventoryScanner
 
     private static bool IsRelevantFile(string path)
         => WatcherInputSnapshot.IsConventionalRelevantFilePath(path);
-
-    private static bool IsExcludedDirectory(string path)
-    {
-        var name = Path.GetFileName(path);
-        return name.Equals(".git", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("bin", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("obj", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("node_modules", StringComparison.OrdinalIgnoreCase)
-            || name.Equals(".e2e", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("graphify-out", StringComparison.OrdinalIgnoreCase)
-            || name.Equals(".vs", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("TestResults", StringComparison.OrdinalIgnoreCase)
-            || name.Equals("artifacts", StringComparison.OrdinalIgnoreCase);
-    }
 
     private static void AddFileEntry(
         string path,
