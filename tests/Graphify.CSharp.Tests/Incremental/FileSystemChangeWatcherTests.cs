@@ -5,7 +5,7 @@ namespace Graphify.CSharp.Tests.Incremental;
 public sealed class FileSystemChangeWatcherTests
 {
     [Fact]
-    public async Task Native_watcher_filters_obj_noise_and_delivers_a_relevant_source_event()
+    public async Task Native_watcher_filters_evaluated_output_noise_and_delivers_a_relevant_source_event()
     {
         var root = CreateTemporaryDirectory();
         var sourcePath = Path.Combine(root, "src", "Relevant.cs");
@@ -21,7 +21,8 @@ public sealed class FileSystemChangeWatcherTests
                 [new KeyValuePair<string, IEnumerable<string>>(sourcePath, ["project=Fixture|tfm=net10.0"])],
                 [root],
                 Path.Combine(root, "graphify-out", "csharp.json"),
-                Path.Combine(root, "graphify-out", ".graphify-csharp", "manifest.json"));
+                Path.Combine(root, "graphify-out", ".graphify-csharp", "manifest.json"),
+                outputRoots: [Path.Combine(root, "obj")]);
             var captureObservations = new System.Collections.Concurrent.ConcurrentQueue<(FileChangeEvent Change, bool Accepted)>();
             var delivered = new System.Collections.Concurrent.ConcurrentQueue<FileChangeEvent>();
             var received = new TaskCompletionSource<FileChangeEvent>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -37,7 +38,7 @@ public sealed class FileSystemChangeWatcherTests
                 {
                     var accepted = snapshot.Classify(change).Accepted;
                     captureObservations.Enqueue((change, accepted));
-                    return accepted;
+                    return accepted ? change : null;
                 });
             watcher.PathChanged += change =>
             {
@@ -121,10 +122,12 @@ public sealed class FileSystemChangeWatcherTests
                         IncrementalPaths.PathComparison))
                     {
                         watcherReady.TrySetResult(true);
-                        return false;
+                        return null;
                     }
 
-                    return change.Kind == FileChangeKind.Renamed && snapshot.Classify(change).Accepted;
+                    return change.Kind == FileChangeKind.Renamed && snapshot.Classify(change).Accepted
+                        ? change
+                        : null;
                 });
             watcher.PathChanged += change => received.TrySetResult(change);
             watcher.Start();
@@ -175,7 +178,9 @@ public sealed class FileSystemChangeWatcherTests
             var received = new TaskCompletionSource<FileChangeEvent>(TaskCreationOptions.RunContinuationsAsynchronously);
             watcher = new FileSystemChangeWatcher(
                 new WatcherRoot(root, IncludeSubdirectories: true),
-                change => change.Kind == FileChangeKind.Renamed && snapshot.Classify(change).Accepted);
+                change => change.Kind == FileChangeKind.Renamed && snapshot.Classify(change).Accepted
+                    ? change
+                    : null);
             watcher.PathChanged += change =>
             {
                 if (string.Equals(change.Path, newDirectory, IncrementalPaths.PathComparison)
@@ -209,7 +214,7 @@ public sealed class FileSystemChangeWatcherTests
         try
         {
             var completed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-            watcher = new FileSystemChangeWatcher(new WatcherRoot(root, IncludeSubdirectories: true), _ => true);
+            watcher = new FileSystemChangeWatcher(new WatcherRoot(root, IncludeSubdirectories: true), change => change);
             watcher.PathChanged += _ =>
             {
                 watcher!.Dispose();
@@ -241,7 +246,7 @@ public sealed class FileSystemChangeWatcherTests
             {
                 entered.Set();
                 release.Wait();
-                return false;
+                return null;
             });
             watcher.Start();
             await File.WriteAllTextAsync(Path.Combine(root, "Gated.cs"), "class Gated { }");
@@ -269,7 +274,7 @@ public sealed class FileSystemChangeWatcherTests
         {
             using var watcher = new FileSystemChangeWatcher(
                 new WatcherRoot(root, IncludeSubdirectories: true),
-                _ => false);
+                _ => null);
             watcher.Start();
 
             var disposals = Enumerable.Range(0, 8)

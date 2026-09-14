@@ -8,6 +8,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
     private readonly object _inventoryGate = new();
     private readonly object _recoveryGate = new();
     private readonly object _healthGate = new();
+    private readonly object _transitionGate = new();
     private readonly ProjectLoadRequest _request;
     private readonly string _outputPath;
     private readonly RefreshRequestIdentity _requestIdentity;
@@ -23,10 +24,12 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
     private readonly TaskCompletionSource<bool> _shutdown = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<bool> _stopRequested = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<bool> _workStopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TransitionEventJournal _transitionEvents = new(TransitionEventJournalCapacity);
     private TaskCompletionSource<bool> _healthy = NewHealthSource();
     private List<WatcherRoot> _watchRoots;
     private List<IFileChangeWatcher> _watchers = [];
     private FileInventorySnapshot? _inventory;
+    private bool _inventoryBaselineWasBootstrap;
     private WatcherInputSnapshot _inputSnapshot;
     private OutputDestinationLease? _outputLease;
     private WatcherLease? _lease;
@@ -34,6 +37,8 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
     private WatcherManagementServer? _managementServer;
     private WatcherSessionDescriptor? _managementDescriptor;
     private bool _managementRegistered;
+    private long _inputSnapshotEpoch;
+    private bool _transitionInProgress;
     private Task? _startTask;
     private Task? _backupTask;
     private Task? _recoveryTask;
@@ -41,8 +46,10 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
     private bool _recoveryPending;
     private bool _recoverySignalQueued;
     private string _recoveryReason = "The watcher requires recovery.";
-    private int _bootstrapUncertaintyReported;
+    private int _transitionJournalOverflowReported;
     private int _disposed;
+
+    private const int TransitionEventJournalCapacity = 4096;
 
     public IncrementalWatcherHost(
         ProjectLoadRequest request,
@@ -77,7 +84,8 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             _watchRoots.Select(root => root.CanonicalPath),
             _outputPath,
             IncrementalCachePath.ForOutput(_outputPath),
-            _watchRoots);
+            _watchRoots,
+            knownInputPaths: [request.InputPath]);
         _session = new IncrementalIndexSession(
             request,
             _outputPath,
@@ -116,8 +124,12 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
 
             lock (_healthGate)
             {
+                var sessionStatus = _session.Status;
                 return Volatile.Read(ref _disposed) == 0
-                    && _healthy.Task.IsCompletedSuccessfully;
+                    && _healthy.Task.IsCompletedSuccessfully
+                    && (sessionStatus == IncrementalSessionStatus.Refreshing
+                        || (sessionStatus == IncrementalSessionStatus.Ready
+                            && !Volatile.Read(ref _inputSnapshot).IsBootstrap));
             }
         }
     }
@@ -236,6 +248,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
     {
         var generation = _session.Generation;
         var ready = IsReady;
+        var recoveryPending = IsRecoveryPending();
         var sessionState = _session.Status switch
         {
             IncrementalSessionStatus.Created => "starting",
@@ -245,7 +258,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             ? "stopped"
             : _stopRequested.Task.IsCompleted
                 ? "stopping"
-                : !ready && sessionState is "ready" or "refreshing"
+                : recoveryPending && !ready && sessionState is ("ready" or "refreshing")
                     ? "recovering"
                 : sessionState;
         var endpoint = _managementOptions is null
@@ -468,22 +481,15 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             }
 
             CreateAndStartWatchers();
+            // Keep the refresh endpoint available throughout startup. A
+            // requester that arrives before the first trusted publication must
+            // receive a structured not-ready response instead of waiting for a
+            // pipe that does not exist or reading a stale output file.
+            await StartControlServerAsync().ConfigureAwait(false);
             await RefreshInventoryBaselineAsync(
                     _stop.Token,
                     allowBootstrap: true)
                 .ConfigureAwait(false);
-
-            // Start recovery and backup loops before Roslyn initialization so
-            // failures during the cold start are not lost.
-            lock (_lifecycleGate)
-            {
-                if (Volatile.Read(ref _disposed) != 0)
-                {
-                    return;
-                }
-
-                _recoveryTask = Task.Run(() => RecoveryLoopAsync(_stop.Token));
-            }
 
             await _session.StartAsync(_stop.Token).ConfigureAwait(false);
             await RefreshInventoryBaselineAsync(
@@ -496,37 +502,15 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
                 if (Volatile.Read(ref _disposed) == 0)
                 {
                     _backupTask = Task.Run(() => BackupScanLoopAsync(_stop.Token));
+                    _recoveryTask = Task.Run(() => RecoveryLoopAsync(_stop.Token));
                 }
-            }
-
-            var controlServer = new IncrementalRefreshControlServer(
-                PipeName,
-                _requestIdentity,
-                _outputPath,
-                (rebuild, cancellationToken) => RefreshAsync(rebuild, cancellationToken));
-            var installed = false;
-            lock (_lifecycleGate)
-            {
-                if (Volatile.Read(ref _disposed) == 0)
-                {
-                    _controlServer = controlServer;
-                    controlServer.Start();
-                    installed = true;
-                }
-            }
-
-            if (!installed)
-            {
-                await AwaitIgnoringCancellation(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false);
-                return;
             }
 
             MarkHealthy();
             // Startup is a foreground readiness barrier too. A watcher error
-            // or uncertain bootstrap event may have queued recovery while the
-            // initial Roslyn load was running; do not let StartAsync return
-            // until that recovery has either completed or the host has been
-            // stopped.
+            // may have queued recovery while the initial Roslyn load was
+            // running; do not let StartAsync return until that recovery has
+            // either completed or the host has been stopped.
             await WaitUntilHealthyAsync(_stop.Token).ConfigureAwait(false);
         }
         catch (Exception exception)
@@ -657,6 +641,31 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
         }
     }
 
+    private async Task StartControlServerAsync()
+    {
+        var controlServer = new IncrementalRefreshControlServer(
+            PipeName,
+            _requestIdentity,
+            _outputPath,
+            (rebuild, cancellationToken) => RefreshAsync(rebuild, cancellationToken),
+            GetInspectionSnapshot);
+        var installed = false;
+        lock (_lifecycleGate)
+        {
+            if (Volatile.Read(ref _disposed) == 0)
+            {
+                _controlServer = controlServer;
+                controlServer.Start();
+                installed = true;
+            }
+        }
+
+        if (!installed)
+        {
+            await AwaitIgnoringCancellation(controlServer.DisposeAsync().AsTask()).ConfigureAwait(false);
+        }
+    }
+
     private async Task BackupScanLoopAsync(CancellationToken cancellationToken)
     {
         using var timer = new PeriodicTimer(_options.BackupScanInterval);
@@ -673,7 +682,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
 
                     var scan = await ScanInventoryAsync(includeContentHashes: false, cancellationToken)
                         .ConfigureAwait(false);
-                    if (!TrySetInventory(scan, out var previous))
+                    if (!TrySetInventory(scan, out var previous, out _))
                     {
                         // A workspace reload or coverage replacement completed
                         // while this scan was running. Its result describes an
@@ -769,15 +778,15 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
         {
             try
             {
-                // The previously evaluated snapshot may contain linked roots
-                // that have since been deleted. Re-establish only the stable
-                // request coverage first; the reload below will publish the
-                // new evaluated roots after MSBuild has had a chance to remove
-                // obsolete links.
+                // Validate the stable request coverage before reloading, but
+                // preserve the previous inventory as the comparison baseline.
+                // Replacing it here would erase edits made while the old
+                // watcher was being torn down and the new one was starting.
                 CreateAndStartWatchers(_baseWatchRoots);
                 await RefreshInventoryBaselineAsync(
                         cancellationToken,
-                        allowBootstrap: true)
+                        allowBootstrap: true,
+                        preserveExistingBaseline: true)
                     .ConfigureAwait(false);
                 // Recovery restores the in-memory Roslyn/catalog state and
                 // trust boundary, but it must not publish a new public graph.
@@ -994,30 +1003,92 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
 
     private void OnWatcherPathChanged(FileChangeEvent change)
     {
+        var journalOverflowed = false;
+        FileChangeEvent? sessionChange = null;
+        var capturedAgainstPreviousPolicy = false;
         try
         {
-            var snapshot = Volatile.Read(ref _inputSnapshot);
-            var classification = snapshot.Classify(change);
-            if (!classification.Accepted)
+            lock (_transitionGate)
             {
-                return;
+                var snapshot = Volatile.Read(ref _inputSnapshot);
+                var currentEpoch = Volatile.Read(ref _inputSnapshotEpoch);
+                var capturedByWatcher = change.CaptureEpoch is not null;
+                if (change.CaptureEpoch is { } captureEpoch
+                    && captureEpoch != currentEpoch)
+                {
+                    // The dispatch predicate accepted this event under a
+                    // previous immutable policy, but the callback reached the
+                    // host after that policy was replaced. Keep it in the
+                    // transition handoff when one is active; after the
+                    // handoff, deliver it as an already-admitted cold event so
+                    // the current policy cannot silently discard it.
+                    var normalizedStaleChange = NormalizeChange(change, null) with
+                    {
+                        CaptureEpoch = null,
+                    };
+                    if (_transitionInProgress || snapshot.IsBootstrap)
+                    {
+                        journalOverflowed = !_transitionEvents.TryRecord(normalizedStaleChange);
+                    }
+                    else
+                    {
+                        sessionChange = normalizedStaleChange with
+                        {
+                            RequiresColdReconciliation = true,
+                        };
+                        capturedAgainstPreviousPolicy = true;
+                    }
+                }
+                else
+                {
+                    var classification = snapshot.Classify(change);
+                    if (!classification.Accepted)
+                    {
+                        return;
+                    }
+
+                    var normalizedChange = NormalizeChange(
+                        change,
+                        snapshot.IsBootstrap ? null : classification) with
+                    {
+                        CaptureEpoch = null,
+                    };
+                    if (snapshot.IsBootstrap || _transitionInProgress)
+                    {
+                        journalOverflowed = !_transitionEvents.TryRecord(normalizedChange);
+                    }
+                    else
+                    {
+                        sessionChange = normalizedChange;
+                        // The dispatch predicate already admitted this event
+                        // under the immutable snapshot identified by its
+                        // epoch. Deliver that admission directly to the
+                        // session so a transition cannot begin between this
+                        // classification and the callback below.
+                        capturedAgainstPreviousPolicy = capturedByWatcher;
+                    }
+                }
             }
 
-            if (snapshot.IsBootstrap && classification.RequiresColdReconciliation)
+            // Keep session callbacks and recovery signaling outside the
+            // policy handoff gate. The gate protects the journal/snapshot
+            // boundary; the session owns its own serialized command queue.
+            if (sessionChange is not null)
             {
-                ReportBootstrapUncertainty(change);
-                return;
+                if (capturedAgainstPreviousPolicy)
+                {
+                    _session.ReportCapturedFileChanged(sessionChange);
+                }
+                else
+                {
+                    _session.ReportFileChanged(sessionChange);
+                }
             }
 
-            _session.ReportFileChanged(change with
+            if (journalOverflowed)
             {
-                Path = IncrementalPaths.CanonicalAbsolutePath(change.Path),
-                OldPath = string.IsNullOrWhiteSpace(change.OldPath)
-                    ? null
-                    : IncrementalPaths.CanonicalAbsolutePath(change.OldPath),
-                RequiresColdReconciliation = change.RequiresColdReconciliation
-                    || classification.RequiresColdReconciliation,
-            });
+                ReportTransitionJournalOverflow(change.Path);
+            }
         }
         catch (ObjectDisposedException)
         {
@@ -1026,74 +1097,119 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
         {
             SignalWatcherFailure($"The watcher could not enqueue '{change.Path}': {exception.Message}", reportToSession: false);
         }
+        catch (ArgumentException exception)
+        {
+            SignalWatcherFailure($"The watcher received an invalid path near '{change.Path}': {exception.Message}", reportToSession: true);
+        }
     }
 
-    private bool ShouldCaptureWatcherEvent(FileChangeEvent change)
+    private FileChangeEvent? ShouldCaptureWatcherEvent(FileChangeEvent change)
     {
         try
         {
-            var snapshot = Volatile.Read(ref _inputSnapshot);
-            var classification = snapshot.Classify(change);
-            if (!classification.Accepted)
+            lock (_transitionGate)
             {
-                return false;
-            }
+                var snapshot = Volatile.Read(ref _inputSnapshot);
+                var classification = snapshot.Classify(change);
+                if (!classification.Accepted)
+                {
+                    return null;
+                }
 
-            if (snapshot.IsBootstrap && classification.RequiresColdReconciliation)
-            {
-                ReportBootstrapUncertainty(change);
-                return false;
+                return NormalizeChange(change, snapshot.IsBootstrap ? null : classification) with
+                {
+                    CaptureEpoch = Volatile.Read(ref _inputSnapshotEpoch),
+                };
             }
-
-            return true;
         }
         catch (Exception exception)
         {
             SignalWatcherFailure(
                 $"The watcher could not classify '{change.Path}': {exception.Message}",
                 reportToSession: true);
-            return false;
+            return null;
         }
     }
 
-    private void ReportBootstrapUncertainty(FileChangeEvent change)
+    private void ReportTransitionJournalOverflow(string path)
     {
-        if (Interlocked.Exchange(ref _bootstrapUncertaintyReported, 1) == 0)
+        // A full transition journal means event delivery is no longer
+        // lossless. Keep the recovery behavior reserved for this real loss;
+        // ordinary edits during a load are replayed after evaluation.
+        if (Interlocked.Exchange(ref _transitionJournalOverflowReported, 1) == 0)
         {
             SignalWatcherFailure(
-                $"An in-scope file changed before project input membership was established: '{change.Path}'.",
+                $"The file-system transition journal is full; event delivery became untrusted near '{path}'.",
                 reportToSession: true);
         }
     }
 
     private bool OnInputSnapshotChanged(WatcherInputSnapshot snapshot)
     {
-        Volatile.Write(ref _inputSnapshot, snapshot ?? throw new ArgumentNullException(nameof(snapshot)));
-        // Each load gets a fresh conservative transition window.
-        Interlocked.Exchange(ref _bootstrapUncertaintyReported, 0);
-        if (snapshot.IsBootstrap)
+        ArgumentNullException.ThrowIfNull(snapshot);
+        IReadOnlyList<FileChangeEvent> deferredEvents;
+        lock (_transitionGate)
         {
-            // A load transition deliberately reuses the previous logical
-            // coverage while Roslyn evaluates the next project. The host's
-            // current watcher set is already the authoritative coverage for
-            // that interval. In particular, recovery may have replaced an
-            // obsolete external root with only the stable base roots; do not
-            // resurrect the old evaluated roots from the transition snapshot.
-            return false;
+            Volatile.Write(ref _inputSnapshot, snapshot);
+            _inputSnapshotEpoch++;
+            _transitionInProgress = true;
+            Interlocked.Exchange(ref _transitionJournalOverflowReported, 0);
+            if (snapshot.IsBootstrap)
+            {
+                // Do not clear the journal here. Events already observed in
+                // this transition must survive until the evaluated policy is
+                // published and can classify them authoritatively.
+                return false;
+            }
+
+            deferredEvents = _transitionEvents.Drain();
         }
 
+        var coverageChanged = false;
         try
         {
-            return ReplaceWatchersForSnapshot(snapshot);
+            coverageChanged = ReplaceWatchersForSnapshot(snapshot);
         }
         catch (Exception exception)
         {
             SignalWatcherFailure(
                 $"The watcher could not establish coverage for evaluated inputs: {exception.Message}",
                 reportToSession: true);
-            return false;
         }
+
+        lock (_transitionGate)
+        {
+            deferredEvents = deferredEvents
+                .Concat(_transitionEvents.Drain())
+                .ToArray();
+            _transitionInProgress = false;
+        }
+
+        // Replay after watcher coverage has been replaced. OnWatcherPathChanged
+        // reclassifies each event against the evaluated policy, so noise from
+        // the conservative bootstrap window is discarded without triggering a
+        // recovery, while relevant source/project/restore edits retain their
+        // normal warm/cold semantics.
+        foreach (var deferredEvent in deferredEvents)
+        {
+            OnWatcherPathChanged(deferredEvent);
+        }
+
+        return coverageChanged;
     }
+
+    private static FileChangeEvent NormalizeChange(
+        FileChangeEvent change,
+        WatcherEventClassification? classification) =>
+        change with
+        {
+            Path = IncrementalPaths.CanonicalAbsolutePath(change.Path),
+            OldPath = string.IsNullOrWhiteSpace(change.OldPath)
+                ? null
+                : IncrementalPaths.CanonicalAbsolutePath(change.OldPath),
+            RequiresColdReconciliation = change.RequiresColdReconciliation
+                || classification?.RequiresColdReconciliation == true,
+        };
 
     private void OnWatcherFailed(Exception exception)
     {
@@ -1208,11 +1324,25 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
                     throw new ObjectDisposedException(nameof(IncrementalWatcherHost));
                 }
 
-                if (_healthy.Task.IsCompletedSuccessfully)
+                var sessionStatus = _session.Status;
+                if (_healthy.Task.IsCompletedSuccessfully
+                    && (sessionStatus == IncrementalSessionStatus.Refreshing
+                        || (sessionStatus == IncrementalSessionStatus.Ready
+                            && !Volatile.Read(ref _inputSnapshot).IsBootstrap)))
                 {
                     return;
                 }
             }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(10), cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private bool IsRecoveryPending()
+    {
+        lock (_recoveryGate)
+        {
+            return _recoveryPending || _recoverySignalQueued;
         }
     }
 
@@ -1246,12 +1376,18 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
         CancellationToken cancellationToken,
         bool reconcileDifferences = false,
         bool allowBootstrap = false,
-        bool publishOutput = true)
+        bool publishOutput = true,
+        bool preserveExistingBaseline = false)
     {
         while (true)
         {
             var scan = await ScanInventoryAsync(includeContentHashes: false, cancellationToken).ConfigureAwait(false);
-            if (!TrySetInventory(scan, out var previous, allowBootstrap))
+            if (!TrySetInventory(
+                    scan,
+                    out var previous,
+                    out var previousWasBootstrap,
+                    allowBootstrap,
+                    preserveExistingBaseline))
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 continue;
@@ -1264,14 +1400,41 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
 
             // A newly discovered exact input has no previous inventory
             // fingerprint. It may have changed after Roslyn read it but before
-            // this post-load scan, so accepting it as a clean baseline would
-            // permanently hide that observation gap. Feed Created entries
-            // through the same cold path as changed/deleted entries. The next
-            // scan will see the now-established baseline and settle without a
-            // further reload.
+            // this post-load scan. Source documents are already represented by
+            // Roslyn's loaded solution, but a newly discovered dependency can
+            // affect that solution before it was observed by the bootstrap
+            // inventory. Feed dependency differences through the cold path.
             var changes = scan.Snapshot
                 .CompareToEvents(previous)
                 .ToArray();
+            if (previousWasBootstrap && !scan.InputSnapshot.IsBootstrap)
+            {
+                changes = changes
+                    .Where(change => change.Endpoints.Any(scan.InputSnapshot.IsKnownDependency))
+                    .ToArray();
+                if (changes.Length == 0)
+                {
+                    // The bootstrap baseline is intentionally narrow and
+                    // contains only request-known inputs. Replace it with the
+                    // evaluated baseline, then take one immediate
+                    // verification scan to catch edits made during the
+                    // handoff.
+                    var verification = await ScanInventoryAsync(
+                            includeContentHashes: false,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    if (!TrySetInventory(verification, out previous, out _))
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        continue;
+                    }
+
+                    scan = verification;
+                    changes = scan.Snapshot
+                        .CompareToEvents(previous)
+                        .ToArray();
+                }
+            }
             if (changes.Length == 0)
             {
                 return;
@@ -1299,10 +1462,13 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
     private bool TrySetInventory(
         InventoryScanResult scan,
         out FileInventorySnapshot? previous,
-        bool allowBootstrap = false)
+        out bool previousWasBootstrap,
+        bool allowBootstrap = false,
+        bool preserveExistingBaseline = false)
     {
         ArgumentNullException.ThrowIfNull(scan);
         previous = null;
+        previousWasBootstrap = false;
         lock (_lifecycleGate)
         {
             if (!ReferenceEquals(Volatile.Read(ref _inputSnapshot), scan.InputSnapshot)
@@ -1328,7 +1494,12 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
                 }
 
                 previous = _inventory;
-                _inventory = scan.Snapshot ?? throw new ArgumentNullException(nameof(scan));
+                previousWasBootstrap = _inventoryBaselineWasBootstrap;
+                if (!preserveExistingBaseline || _inventory is null)
+                {
+                    _inventory = scan.Snapshot ?? throw new ArgumentNullException(nameof(scan));
+                    _inventoryBaselineWasBootstrap = scan.InputSnapshot.IsBootstrap;
+                }
             }
         }
 

@@ -22,7 +22,8 @@ public sealed class FileInventorySnapshotTests
                 sourceProjects: [],
                 discoveryRoots: [root],
                 outputPath: Path.Combine(root, "graphify-out", "csharp.json"),
-                cachePath: Path.Combine(root, "graphify-out", ".graphify-csharp", "manifest.json"));
+                cachePath: Path.Combine(root, "graphify-out", ".graphify-csharp", "manifest.json"),
+                inputDiscoveryComplete: false);
             var scanner = new FileInventoryScanner();
             var before = await scanner.ScanAsync([root], root, inputSnapshot: snapshot);
 
@@ -39,6 +40,41 @@ public sealed class FileInventorySnapshotTests
                 changes,
                 change => change.Kind == FileChangeKind.Created
                     && string.Equals(change.Path, candidatePath, IncrementalPaths.PathComparison));
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(root);
+        }
+    }
+
+    [Fact]
+    public async Task Bootstrap_inventory_does_not_walk_unrelated_subtrees()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var inputPath = Path.Combine(root, "Fixture.csproj");
+            var unrelatedPath = Path.Combine(root, "unrelated", "Noise.cs");
+            await File.WriteAllTextAsync(inputPath, "<Project />");
+            Directory.CreateDirectory(Path.GetDirectoryName(unrelatedPath)!);
+            await File.WriteAllTextAsync(unrelatedPath, "public sealed class Noise { }");
+
+            var snapshot = WatcherInputSnapshot.CreateBootstrap(
+                [root],
+                Path.Combine(root, "graphify-out", "csharp.json"),
+                Path.Combine(root, "graphify-out", ".graphify-csharp", "manifest.json"),
+                knownInputPaths: [inputPath]);
+            var inventory = await new FileInventoryScanner().ScanAsync(
+                [root],
+                root,
+                inputSnapshot: snapshot);
+
+            Assert.Contains(
+                IncrementalPaths.CanonicalAbsolutePath(inputPath),
+                inventory.Entries.Keys);
+            Assert.DoesNotContain(
+                IncrementalPaths.CanonicalAbsolutePath(unrelatedPath),
+                inventory.Entries.Keys);
         }
         finally
         {

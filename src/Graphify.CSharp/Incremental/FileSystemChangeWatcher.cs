@@ -15,13 +15,13 @@ internal interface IFileChangeWatcher : IDisposable
 
 internal interface IFileChangeWatcherFactory
 {
-    IFileChangeWatcher Create(WatcherRoot root, Func<FileChangeEvent, bool> shouldCapture);
+    IFileChangeWatcher Create(WatcherRoot root, Func<FileChangeEvent, FileChangeEvent?> capture);
 }
 
 internal sealed class FileSystemChangeWatcherFactory : IFileChangeWatcherFactory
 {
-    public IFileChangeWatcher Create(WatcherRoot root, Func<FileChangeEvent, bool> shouldCapture) =>
-        new FileSystemChangeWatcher(root, shouldCapture);
+    public IFileChangeWatcher Create(WatcherRoot root, Func<FileChangeEvent, FileChangeEvent?> capture) =>
+        new FileSystemChangeWatcher(root, capture);
 }
 
 internal sealed class FileSystemChangeWatcher : IFileChangeWatcher
@@ -29,7 +29,7 @@ internal sealed class FileSystemChangeWatcher : IFileChangeWatcher
     private const int MaximumNativeBufferSize = 64 * 1024;
     private const int EventQueueCapacity = 4096;
     private readonly FileSystemWatcher _watcher;
-    private readonly Func<FileChangeEvent, bool> _shouldCapture;
+    private readonly Func<FileChangeEvent, FileChangeEvent?> _capture;
     private readonly Channel<FileChangeEvent> _pendingChanges = Channel.CreateBounded<FileChangeEvent>(
         new BoundedChannelOptions(EventQueueCapacity)
         {
@@ -44,12 +44,12 @@ internal sealed class FileSystemChangeWatcher : IFileChangeWatcher
     private int _dispatchCallbackThreadId = -1;
     private int _disposed;
 
-    public FileSystemChangeWatcher(WatcherRoot root, Func<FileChangeEvent, bool> shouldCapture)
+    public FileSystemChangeWatcher(WatcherRoot root, Func<FileChangeEvent, FileChangeEvent?> capture)
     {
         ArgumentNullException.ThrowIfNull(root);
-        ArgumentNullException.ThrowIfNull(shouldCapture);
+        ArgumentNullException.ThrowIfNull(capture);
         Root = root.CanonicalPath;
-        _shouldCapture = shouldCapture;
+        _capture = capture;
         if (!Directory.Exists(Root))
         {
             throw new DirectoryNotFoundException($"The file watcher root '{Root}' does not exist.");
@@ -188,12 +188,13 @@ internal sealed class FileSystemChangeWatcher : IFileChangeWatcher
 
         try
         {
-            if (!_shouldCapture(change))
+            var capturedChange = _capture(change);
+            if (capturedChange is null)
             {
                 return;
             }
 
-            PathChanged?.Invoke(change);
+            PathChanged?.Invoke(capturedChange);
         }
         catch
         {

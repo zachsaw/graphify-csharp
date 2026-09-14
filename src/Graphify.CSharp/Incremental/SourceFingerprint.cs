@@ -113,6 +113,26 @@ internal sealed record SourceFingerprint
         return FingerprintComparison.MetadataMatch;
     }
 
+    public bool ContentEquals(SourceFingerprint other)
+    {
+        ArgumentNullException.ThrowIfNull(other);
+        if (!string.Equals(RelativePath, other.RelativePath, StringComparison.Ordinal)
+            || Exists != other.Exists)
+        {
+            return false;
+        }
+
+        if (!Exists)
+        {
+            return true;
+        }
+
+        return Length == other.Length
+            && ContentSha256 is not null
+            && other.ContentSha256 is not null
+            && string.Equals(ContentSha256, other.ContentSha256, StringComparison.Ordinal);
+    }
+
     public string CanonicalForm => string.Join(
         '\u001F',
         CanonicalText.Escape(RelativePath),

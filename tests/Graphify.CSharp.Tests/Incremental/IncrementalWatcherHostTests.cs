@@ -90,6 +90,150 @@ public sealed class IncrementalWatcherHostTests
     }
 
     [Fact]
+    public async Task Evaluated_compile_remove_suppresses_unlisted_files_under_a_custom_intermediate_root()
+    {
+        var fixture = await CreateFixtureAsync();
+        try
+        {
+            var intermediateRoot = Path.Combine(fixture.Root, "build-state");
+            Directory.CreateDirectory(intermediateRoot);
+            await File.WriteAllTextAsync(
+                Path.Combine(intermediateRoot, "ExplicitBuildStateGenerated.cs"),
+                "namespace ReferenceFixture.Production; public sealed class ExplicitBuildStateGenerated { }\n");
+            await File.WriteAllTextAsync(
+                fixture.ProjectPath,
+                """
+                <Project Sdk="Microsoft.NET.Sdk">
+                  <PropertyGroup>
+                    <TargetFramework>net10.0</TargetFramework>
+                    <BaseOutputPath>compiled-output/</BaseOutputPath>
+                    <BaseIntermediateOutputPath>build-state/</BaseIntermediateOutputPath>
+                    <MSBuildProjectExtensionsPath>restore-state/</MSBuildProjectExtensionsPath>
+                    <ProjectAssetsFile>restore-state/project.assets.json</ProjectAssetsFile>
+                    <ImplicitUsings>enable</ImplicitUsings>
+                    <Nullable>enable</Nullable>
+                  </PropertyGroup>
+                  <ItemGroup>
+                    <Compile Remove="build-state/**/*.cs" />
+                    <Compile Include="build-state/ExplicitBuildStateGenerated.cs" />
+                  </ItemGroup>
+                </Project>
+                """);
+            await RestoreProjectAsync(fixture.ProjectPath, fixture.Root);
+
+            var factory = new FakeWatcherFactory();
+            await using var host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(backupScanInterval: TimeSpan.FromHours(1)),
+                watcherFactory: factory);
+
+            await host.StartAsync().WaitAsync(TimeSpan.FromSeconds(60));
+            var noisePath = Path.Combine(intermediateRoot, "IgnoredBuildStateNoise.cs");
+            var classification = host.Session.InputSnapshot.Classify(new FileChangeEvent(
+                FileChangeKind.Changed,
+                noisePath,
+                IsDirectory: false));
+
+            Assert.True(
+                host.Session.InputSnapshot.InputDiscoveryComplete,
+                string.Join(" | ", host.Session.InputSnapshot.InputDiscoveryDiagnostics));
+            Assert.False(
+                classification.Accepted,
+                string.Join(
+                    " | ",
+                    host.Session.InputSnapshot.InputGlobs.Select(
+                        glob => $"{glob.ItemType}:{glob.Pattern} excludes [{string.Join(",", glob.ExcludePatterns)}]")));
+            Assert.False(host.Session.InputSnapshot.ShouldIncludeInInventory(noisePath));
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task Build_output_events_during_startup_do_not_enter_recovery()
+    {
+        var fixture = await CreateFixtureAsync();
+        var factory = new FakeWatcherFactory();
+        var loader = new PostCompilationGateLoader(new RoslynWorkspaceLoader());
+        loader.ArmNextLoad();
+        try
+        {
+            await using var host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(backupScanInterval: TimeSpan.FromHours(1)),
+                projectLoader: loader,
+                watcherFactory: factory);
+
+            var start = host.StartAsync();
+            await loader.GatedLoadCompleted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+            factory.Current.TriggerChange(new FileChangeEvent(
+                FileChangeKind.Changed,
+                Path.Combine(fixture.Root, "obj", "Release", "net10.0", "ILLink.Substitutions.xml")));
+
+            Assert.Equal("starting", host.GetInspectionSnapshot().LifecycleState);
+            loader.ReleaseGatedLoad();
+            await start.WaitAsync(TimeSpan.FromSeconds(60));
+
+            Assert.True(host.IsReady);
+            Assert.NotEqual("recovering", host.GetInspectionSnapshot().LifecycleState);
+        }
+        finally
+        {
+            loader.ReleaseGatedLoad();
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task A_source_edit_during_startup_is_reconciled_before_readiness()
+    {
+        var fixture = await CreateFixtureAsync();
+        var factory = new FakeWatcherFactory();
+        var loader = new PostCompilationGateLoader(new RoslynWorkspaceLoader());
+        loader.ArmNextLoad();
+        try
+        {
+            await using var host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(backupScanInterval: TimeSpan.FromHours(1)),
+                projectLoader: loader,
+                watcherFactory: factory);
+
+            var start = host.StartAsync();
+            await loader.GatedLoadCompleted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+            await File.AppendAllTextAsync(
+                fixture.SourcePath,
+                "\npublic sealed class ChangedDuringStartup { }\n");
+            factory.Current.TriggerChange(new FileChangeEvent(
+                FileChangeKind.Changed,
+                fixture.SourcePath));
+
+            Assert.Equal("starting", host.GetInspectionSnapshot().LifecycleState);
+            loader.ReleaseGatedLoad();
+            await start.WaitAsync(TimeSpan.FromSeconds(60));
+
+            Assert.True(host.IsReady);
+            Assert.Contains(
+                "ReferenceFixture.Production.ChangedDuringStartup",
+                await File.ReadAllTextAsync(fixture.OutputPath),
+                StringComparison.Ordinal);
+            Assert.NotEqual("recovering", host.GetInspectionSnapshot().LifecycleState);
+        }
+        finally
+        {
+            loader.ReleaseGatedLoad();
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
     public async Task Watcher_failure_recreates_the_watcher_and_cold_reconciles()
     {
         var fixture = await CreateFixtureAsync();
@@ -340,6 +484,92 @@ public sealed class IncrementalWatcherHostTests
         }
         finally
         {
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task Refresh_request_during_startup_fails_without_writing_json()
+    {
+        var fixture = await CreateFixtureAsync();
+        var loader = new PostCompilationGateLoader(new RoslynWorkspaceLoader());
+        loader.ArmNextLoad();
+        try
+        {
+            await using var host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(backupScanInterval: TimeSpan.FromHours(1)),
+                projectLoader: loader,
+                watcherFactory: new FakeWatcherFactory());
+
+            var start = host.StartAsync();
+            await loader.GatedLoadCompleted.Task.WaitAsync(TimeSpan.FromSeconds(30));
+            var identity = new RefreshRequestIdentity(
+                fixture.Request.InputPath,
+                fixture.Request.RepositoryRoot,
+                fixture.Request.Configuration,
+                fixture.Request.TargetFramework);
+
+            var failure = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                new IncrementalRefreshControlClient()
+                    .TryRefreshAsync(identity, fixture.OutputPath, rebuild: false));
+
+            Assert.Contains("not_ready", failure.Message, StringComparison.Ordinal);
+            Assert.False(File.Exists(fixture.OutputPath));
+
+            loader.ReleaseGatedLoad();
+            await start.WaitAsync(TimeSpan.FromSeconds(60));
+            Assert.True(host.IsReady);
+        }
+        finally
+        {
+            loader.ReleaseGatedLoad();
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task Refresh_request_during_recovery_fails_without_writing_json()
+    {
+        var fixture = await CreateFixtureAsync();
+        var factory = new FakeWatcherFactory();
+        var loader = new GatedRecoveryLoader(new RoslynWorkspaceLoader());
+        try
+        {
+            await using var host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(
+                    backupScanInterval: TimeSpan.FromHours(1),
+                    recoveryRetryDelay: TimeSpan.FromMilliseconds(25)),
+                projectLoader: loader,
+                watcherFactory: factory);
+            await host.StartAsync().WaitAsync(TimeSpan.FromSeconds(60));
+            var before = await File.ReadAllBytesAsync(fixture.OutputPath);
+            loader.ArmNextRecovery();
+            factory.Current.TriggerFailure(new IOException("synthetic recovery request"));
+            await loader.RecoveryLoadEntered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+            var identity = new RefreshRequestIdentity(
+                fixture.Request.InputPath,
+                fixture.Request.RepositoryRoot,
+                fixture.Request.Configuration,
+                fixture.Request.TargetFramework);
+            var failure = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                new IncrementalRefreshControlClient()
+                    .TryRefreshAsync(identity, fixture.OutputPath, rebuild: false));
+
+            Assert.False(host.IsReady);
+            Assert.Contains("not_ready", failure.Message, StringComparison.Ordinal);
+            Assert.Equal(before, await File.ReadAllBytesAsync(fixture.OutputPath));
+
+            loader.ReleaseRecovery();
+            await WaitUntilAsync(() => host.IsReady, TimeSpan.FromSeconds(60));
+        }
+        finally
+        {
+            loader.ReleaseRecovery();
             DeleteTemporaryDirectory(fixture.Root);
         }
     }
@@ -1071,6 +1301,171 @@ public sealed class IncrementalWatcherHostTests
     }
 
     [Fact]
+    public async Task An_identical_dependency_rewrite_during_each_load_converges()
+    {
+        var fixture = await CreateImportedConfigurationFixtureAsync();
+        IncrementalWatcherHost? host = null;
+        var factory = new FakeWatcherFactory();
+        var loader = new RewritingDependencyLoader(
+            new RoslynWorkspaceLoader(),
+            fixture.ImportPath,
+            "<Project />",
+            () => host!.Session.ReportFileChanged(new FileChangeEvent(
+                FileChangeKind.Changed,
+                fixture.ImportPath,
+                IsDirectory: false)));
+        try
+        {
+            host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(backupScanInterval: TimeSpan.FromHours(1)),
+                projectLoader: loader,
+                watcherFactory: factory);
+            await using (host)
+            {
+                await host.StartAsync().WaitAsync(TimeSpan.FromSeconds(60));
+                var afterStart = loader.LoadCount;
+                await host.RefreshAsync().WaitAsync(TimeSpan.FromSeconds(60));
+
+                Assert.True(host.IsReady);
+                Assert.InRange(loader.LoadCount, afterStart, afterStart + 1);
+            }
+        }
+        finally
+        {
+            if (host is not null)
+            {
+                await host.DisposeAsync();
+            }
+
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task A_dependency_changed_after_roslyn_consumed_it_is_reloaded()
+    {
+        var fixture = await CreateImportedConfigurationFixtureAsync();
+        IncrementalWatcherHost? host = null;
+        var factory = new FakeWatcherFactory();
+        var loader = new MutatingDependencyAfterLoadLoader(
+            new RoslynWorkspaceLoader(),
+            fixture.ImportPath,
+            "<Project><PropertyGroup><DefineConstants>$(DefineConstants);ENABLED_BY_IMPORT</DefineConstants></PropertyGroup></Project>",
+            () => host!.Session.ReportFileChanged(new FileChangeEvent(
+                FileChangeKind.Changed,
+                fixture.ImportPath,
+                IsDirectory: false)));
+        try
+        {
+            host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(backupScanInterval: TimeSpan.FromHours(1)),
+                projectLoader: loader,
+                watcherFactory: factory);
+            await using (host)
+            {
+                await host.StartAsync().WaitAsync(TimeSpan.FromSeconds(60));
+                var initialLoadCount = loader.LoadCount;
+                loader.ArmMutation();
+                Assert.True(host.Session.InputSnapshot.IsKnownDependency(fixture.ImportPath));
+                await File.WriteAllTextAsync(
+                    fixture.ImportPath,
+                    "<Project><PropertyGroup><DefineConstants>$(DefineConstants)</DefineConstants></PropertyGroup></Project>");
+                host.Session.ReportFileChanged(fixture.ImportPath);
+
+                await host.RefreshAsync().WaitAsync(TimeSpan.FromSeconds(60));
+                await loader.MutationReported.Task.WaitAsync(TimeSpan.FromSeconds(10));
+                await WaitUntilAsync(
+                    () => loader.LoadCount >= initialLoadCount + 2,
+                    TimeSpan.FromSeconds(60));
+                var result = await host.RefreshAsync().WaitAsync(TimeSpan.FromSeconds(60));
+
+                Assert.Contains(
+                    "ImportedConfigurationFixture.EnabledByImport",
+                    result.Graph.Nodes.Select(node => node.Label));
+                Assert.Equal(initialLoadCount + 2, loader.LoadCount);
+            }
+        }
+        finally
+        {
+            if (host is not null)
+            {
+                await host.DisposeAsync();
+            }
+
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task A_dependency_event_coalesced_across_coverage_verification_requires_a_cold_reconciliation()
+    {
+        var fixture = await CreateCoverageVerificationFixtureAsync();
+        var coldOutputPath = Path.Combine(fixture.Root, "cold-output", "csharp.json");
+        IncrementalWatcherHost? host = null;
+        try
+        {
+            var loader = new CoverageVerificationDependencyLoader(
+                new RoslynWorkspaceLoader(),
+                fixture.ImportPath,
+                fixture.UpdatedImport,
+                () => host!.Session.ReportFileChanged(fixture.ImportPath));
+            host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(backupScanInterval: TimeSpan.FromHours(1)),
+                projectLoader: loader,
+                inventoryScanner: new EmptyInventoryScanner(),
+                watcherFactory: new FakeWatcherFactory());
+
+            await using (host)
+            {
+                // The linked source expands watcher coverage on the first
+                // evaluated load. The first dependency event is held until
+                // the coverage-verification load, and the second event is
+                // raised after that load has consumed the old bytes. The
+                // coalesced record must therefore force one more cold load.
+                await host.StartAsync().WaitAsync(TimeSpan.FromSeconds(60));
+                var refreshed = await host.RefreshAsync().WaitAsync(TimeSpan.FromSeconds(60));
+
+                Assert.Contains(
+                    "CoverageVerificationFixture.EnabledAfterVerification",
+                    refreshed.Graph.Nodes.Select(node => node.Label));
+                Assert.True(loader.LoadCount >= 3);
+
+                await using var coldHost = new IncrementalWatcherHost(
+                    fixture.Request,
+                    coldOutputPath,
+                    new IncrementalWatcherOptions(backupScanInterval: TimeSpan.FromHours(1)),
+                    inventoryScanner: new EmptyInventoryScanner(),
+                    watcherFactory: new FakeWatcherFactory());
+                await coldHost.StartAsync().WaitAsync(TimeSpan.FromSeconds(60));
+                var cold = await coldHost.RefreshAsync().WaitAsync(TimeSpan.FromSeconds(60));
+
+                Assert.Equal(
+                    cold.Graph.Nodes.Select(node => node.Id),
+                    refreshed.Graph.Nodes.Select(node => node.Id));
+                Assert.Equal(
+                    cold.Graph.Edges.Select(edge => edge.DeduplicationKey),
+                    refreshed.Graph.Edges.Select(edge => edge.DeduplicationKey));
+            }
+        }
+        finally
+        {
+            if (host is not null)
+            {
+                await host.DisposeAsync();
+            }
+
+            DeleteTemporaryDirectory(fixture.Root);
+            DeleteTemporaryDirectory(fixture.ExternalRoot);
+        }
+    }
+
+    [Fact]
     public async Task A_newly_discovered_external_dependency_is_not_accepted_as_a_clean_baseline()
     {
         var fixture = await CreateExternalImportedConfigurationFixtureAsync();
@@ -1165,7 +1560,7 @@ public sealed class IncrementalWatcherHostTests
     }
 
     [Fact]
-    public async Task Automatic_recovery_updates_memory_without_publishing_until_refresh()
+    public async Task Background_reload_replays_transition_edits_without_watcher_recovery()
     {
         var fixture = await CreateFixtureAsync();
         var factory = new FakeWatcherFactory();
@@ -1194,28 +1589,141 @@ public sealed class IncrementalWatcherHostTests
 
             await File.AppendAllTextAsync(
                 fixture.SourcePath,
-                "\npublic sealed class ChangedDuringRecovery { }\n");
+                "\npublic sealed class ChangedDuringReload { }\n");
             factory.Current.TriggerPath(fixture.SourcePath);
-            await WaitUntilAsync(() => !host.IsReady, TimeSpan.FromSeconds(10));
+            // The transition journal handles ordinary edits without turning
+            // them into watcher failure/recovery. The previously published
+            // graph remains a valid snapshot while the background reload is
+            // in flight.
+            Assert.True(host.IsReady);
+            Assert.Equal("refreshing", host.GetInspectionSnapshot().LifecycleState);
 
             loader.ReleaseGatedLoad();
             await WaitUntilAsync(
-                () => host.IsReady && loader.LoadCount >= 3,
+                () => host.IsReady
+                    && !host.Session.InputSnapshot.IsBootstrap
+                    && loader.LoadCount >= 2,
                 TimeSpan.FromSeconds(60));
+            await WaitUntilAsync(
+                () => host.Session.Generation.EventGeneration >= 2,
+                TimeSpan.FromSeconds(10));
+            await WaitUntilAsync(
+                () => host.Session.Generation.IndexedGeneration >= 2,
+                TimeSpan.FromSeconds(30));
 
-            // Recovery may update the in-memory graph, but it must not write
-            // the public document. Only the explicit refresh below may do so.
+            // Background indexing may update the in-memory graph, but it must
+            // not write the public document. Only the explicit refresh below
+            // may do so.
             Assert.Equal(before, await File.ReadAllBytesAsync(fixture.OutputPath));
 
-            var refreshed = await host.RefreshAsync().WaitAsync(TimeSpan.FromSeconds(60));
             Assert.Contains(
-                "ReferenceFixture.Production.ChangedDuringRecovery",
-                refreshed.Graph.Nodes.Select(node => node.Label));
+                host.Session.InputSnapshot.KnownSourcePaths,
+                path => string.Equals(path, fixture.SourcePath, IncrementalPaths.PathComparison));
+            var refreshed = await host.RefreshAsync().WaitAsync(TimeSpan.FromSeconds(60));
+            var refreshedLabels = refreshed.Graph.Nodes.Select(node => node.Label).ToArray();
+            Assert.True(
+                refreshedLabels.Contains("ReferenceFixture.Production.ChangedDuringReload"),
+                $"Labels: {string.Join(" | ", refreshedLabels)}");
             Assert.True(refreshed.OutputRepublished);
             Assert.Contains(
-                "ReferenceFixture.Production.ChangedDuringRecovery",
+                "ReferenceFixture.Production.ChangedDuringReload",
                 await File.ReadAllTextAsync(fixture.OutputPath),
                 StringComparison.Ordinal);
+        }
+        finally
+        {
+            loader.ReleaseGatedLoad();
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task A_healthy_watcher_serializes_a_refresh_while_background_reload_is_running()
+    {
+        var fixture = await CreateFixtureAsync();
+        var factory = new FakeWatcherFactory();
+        var loader = new PostCompilationGateLoader(new RoslynWorkspaceLoader());
+        try
+        {
+            await using var host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(
+                    backupScanInterval: TimeSpan.FromHours(1),
+                    recoveryRetryDelay: TimeSpan.FromMilliseconds(25)),
+                projectLoader: loader,
+                watcherFactory: factory);
+
+            await host.StartAsync().WaitAsync(TimeSpan.FromSeconds(60));
+            loader.ArmNextLoad();
+            await File.AppendAllTextAsync(fixture.ProjectPath, "\n");
+            factory.Current.TriggerPath(fixture.ProjectPath);
+            await loader.GatedLoadCompleted.Task.WaitAsync(TimeSpan.FromSeconds(60));
+
+            Assert.True(host.IsReady);
+            var queuedRefresh = host.RefreshAsync();
+            Assert.False(queuedRefresh.IsCompleted);
+
+            loader.ReleaseGatedLoad();
+            var result = await queuedRefresh.WaitAsync(TimeSpan.FromSeconds(60));
+
+            Assert.NotEmpty(result.Graph.Nodes);
+            Assert.True(host.IsReady);
+        }
+        finally
+        {
+            loader.ReleaseGatedLoad();
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task A_delayed_watcher_callback_is_replayed_across_policy_and_coverage_replacement()
+    {
+        var fixture = await CreateFixtureAsync();
+        var factory = new FakeWatcherFactory();
+        var loader = new PostCompilationGateLoader(new RoslynWorkspaceLoader());
+        try
+        {
+            await using var host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(
+                    backupScanInterval: TimeSpan.FromHours(1),
+                    recoveryRetryDelay: TimeSpan.FromMilliseconds(25)),
+                projectLoader: loader,
+                watcherFactory: factory);
+
+            await host.StartAsync().WaitAsync(TimeSpan.FromSeconds(60));
+            var oldWatcher = factory.Watchers.Last(watcher =>
+                string.Equals(watcher.Root, fixture.Root, IncrementalPaths.PathComparison));
+            var captured = oldWatcher.CaptureChange(new FileChangeEvent(
+                FileChangeKind.Changed,
+                fixture.SourcePath,
+                IsDirectory: false));
+            Assert.NotNull(captured);
+
+            loader.ArmNextLoad();
+            await File.AppendAllTextAsync(fixture.ProjectPath, "\n");
+            oldWatcher.TriggerPath(fixture.ProjectPath);
+            await loader.GatedLoadCompleted.Task.WaitAsync(TimeSpan.FromSeconds(60));
+
+            await File.AppendAllTextAsync(
+                fixture.SourcePath,
+                "\npublic sealed class DelayedCallbackChange { }\n");
+            oldWatcher.DeliverCaptured(captured);
+            loader.ReleaseGatedLoad();
+            await WaitUntilAsync(
+                () => !host.Session.InputSnapshot.IsBootstrap
+                    && host.Session.EventGeneration >= 2,
+                TimeSpan.FromSeconds(60));
+
+            var result = await host.RefreshAsync().WaitAsync(TimeSpan.FromSeconds(60));
+
+            Assert.Contains(
+                "ReferenceFixture.Production.DelayedCallbackChange",
+                result.Graph.Nodes.Select(node => node.Label));
+            Assert.True(host.IsReady);
         }
         finally
         {
@@ -2122,6 +2630,63 @@ public sealed class IncrementalWatcherHostTests
             new ProjectLoadRequest(projectPath, root, configuration: "Release", targetFramework: "net10.0"));
     }
 
+    private static async Task<CoverageVerificationFixture> CreateCoverageVerificationFixtureAsync()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "graphify-csharp-coverage-verification-tests", Guid.NewGuid().ToString("N"));
+        var externalRoot = Path.Combine(Path.GetTempPath(), "graphify-csharp-coverage-verification-external", Guid.NewGuid().ToString("N"));
+        var buildDirectory = Path.Combine(root, "build");
+        Directory.CreateDirectory(buildDirectory);
+        Directory.CreateDirectory(externalRoot);
+
+        var projectPath = Path.Combine(root, "CoverageVerificationFixture.csproj");
+        var importPath = Path.Combine(buildDirectory, "Custom.props");
+        var linkedPath = Path.Combine(externalRoot, "Linked.cs");
+        var projectContents = $"""
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+                <ImplicitUsings>enable</ImplicitUsings>
+                <Nullable>enable</Nullable>
+              </PropertyGroup>
+              <ItemGroup>
+                <Compile Include="{linkedPath}" Link="Linked.cs" />
+              </ItemGroup>
+              <Import Project="build/Custom.props" />
+            </Project>
+            """;
+        var updatedImport = """
+            <Project>
+              <PropertyGroup>
+                <DefineConstants>$(DefineConstants);ENABLED_AFTER_VERIFICATION</DefineConstants>
+              </PropertyGroup>
+            </Project>
+            """;
+
+        await File.WriteAllTextAsync(
+            projectPath,
+            projectContents);
+        await File.WriteAllTextAsync(importPath, "<Project />");
+        await File.WriteAllTextAsync(
+            Path.Combine(root, "Conditional.cs"),
+            """
+            #if ENABLED_AFTER_VERIFICATION
+            namespace CoverageVerificationFixture;
+            public sealed class EnabledAfterVerification { }
+            #endif
+            """);
+        await File.WriteAllTextAsync(
+            linkedPath,
+            "namespace CoverageVerificationFixture; public sealed class Linked { }\n");
+
+        return new CoverageVerificationFixture(
+            root,
+            externalRoot,
+            importPath,
+            updatedImport,
+            Path.Combine(root, "graphify-out", "csharp.json"),
+            new ProjectLoadRequest(projectPath, root, configuration: "Release", targetFramework: "net10.0"));
+    }
+
     private static async Task<ImportedConfigurationFixture> CreateImportedConfigurationFixtureAsync()
     {
         var root = Path.Combine(Path.GetTempPath(), "graphify-csharp-import-tests", Guid.NewGuid().ToString("N"));
@@ -2505,6 +3070,14 @@ public sealed class IncrementalWatcherHostTests
         string OutputPath,
         ProjectLoadRequest Request);
 
+    private sealed record CoverageVerificationFixture(
+        string Root,
+        string ExternalRoot,
+        string ImportPath,
+        string UpdatedImport,
+        string OutputPath,
+        ProjectLoadRequest Request);
+
     private sealed record ImportedConfigurationFixture(
         string Root,
         string ImportPath,
@@ -2540,6 +3113,20 @@ public sealed class IncrementalWatcherHostTests
         {
             ScanCount++;
             return await _inner.ScanAsync(roots, repositoryRoot, includeContentHashes, cancellationToken, inputSnapshot);
+        }
+    }
+
+    private sealed class EmptyInventoryScanner : IFileInventoryScanner
+    {
+        public Task<FileInventorySnapshot> ScanAsync(
+            IReadOnlyList<string> roots,
+            string repositoryRoot,
+            bool includeContentHashes = false,
+            CancellationToken cancellationToken = default,
+            WatcherInputSnapshot? inputSnapshot = null)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(new FileInventorySnapshot([]));
         }
     }
 
@@ -2706,7 +3293,7 @@ public sealed class IncrementalWatcherHostTests
 
         public List<FakeWatcher> Watchers { get; } = [];
 
-        public IFileChangeWatcher Create(WatcherRoot root, Func<FileChangeEvent, bool> shouldCapture)
+        public IFileChangeWatcher Create(WatcherRoot root, Func<FileChangeEvent, FileChangeEvent?> shouldCapture)
         {
             CreateCount++;
             Current = new FakeWatcher(root.CanonicalPath, shouldCapture);
@@ -2725,7 +3312,7 @@ public sealed class IncrementalWatcherHostTests
 
         public void ReleaseStart() => Current?.ReleaseStart();
 
-        public IFileChangeWatcher Create(WatcherRoot root, Func<FileChangeEvent, bool> shouldCapture)
+        public IFileChangeWatcher Create(WatcherRoot root, Func<FileChangeEvent, FileChangeEvent?> shouldCapture)
         {
             Current = new BlockingWatcher(root.CanonicalPath, StartEntered);
             return Current;
@@ -2778,10 +3365,10 @@ public sealed class IncrementalWatcherHostTests
 
     private sealed class FakeWatcher : IFileChangeWatcher
     {
-        private readonly Func<FileChangeEvent, bool> _shouldCapture;
+        private readonly Func<FileChangeEvent, FileChangeEvent?> _shouldCapture;
         private bool _disposed;
 
-        public FakeWatcher(string root, Func<FileChangeEvent, bool> shouldCapture)
+        public FakeWatcher(string root, Func<FileChangeEvent, FileChangeEvent?> shouldCapture)
         {
             Root = root;
             _shouldCapture = shouldCapture;
@@ -2813,9 +3400,16 @@ public sealed class IncrementalWatcherHostTests
 
         public void TriggerChange(FileChangeEvent change)
         {
-            if (_shouldCapture(change))
+            DeliverCaptured(CaptureChange(change));
+        }
+
+        public FileChangeEvent? CaptureChange(FileChangeEvent change) => _shouldCapture(change);
+
+        public void DeliverCaptured(FileChangeEvent? capturedChange)
+        {
+            if (capturedChange is not null)
             {
-                PathChanged?.Invoke(change);
+                PathChanged?.Invoke(capturedChange);
             }
         }
 
@@ -2846,6 +3440,134 @@ public sealed class IncrementalWatcherHostTests
             if (_reverseProjects)
             {
                 loaded.ReplaceProjects(loaded.Projects.Reverse());
+            }
+
+            return loaded;
+        }
+    }
+
+    private sealed class RewritingDependencyLoader : IProjectLoader
+    {
+        private readonly IProjectLoader _inner;
+        private readonly string _path;
+        private readonly string _content;
+        private readonly Action _reportChange;
+        private int _loadCount;
+
+        public RewritingDependencyLoader(
+            IProjectLoader inner,
+            string path,
+            string content,
+            Action reportChange)
+        {
+            _inner = inner;
+            _path = path;
+            _content = content;
+            _reportChange = reportChange;
+        }
+
+        public int LoadCount => Volatile.Read(ref _loadCount);
+
+        public async Task<LoadedSolution> LoadAsync(
+            ProjectLoadRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _loadCount);
+            var loaded = await _inner.LoadAsync(request, cancellationToken);
+            await File.WriteAllTextAsync(_path, _content, cancellationToken);
+            _reportChange();
+            return loaded;
+        }
+    }
+
+    private sealed class MutatingDependencyAfterLoadLoader : IProjectLoader
+    {
+        private readonly IProjectLoader _inner;
+        private readonly string _path;
+        private readonly string _content;
+        private readonly Action _reportChange;
+        private int _loadCount;
+        private int _mutateNext;
+
+        public MutatingDependencyAfterLoadLoader(
+            IProjectLoader inner,
+            string path,
+            string content,
+            Action reportChange)
+        {
+            _inner = inner;
+            _path = path;
+            _content = content;
+            _reportChange = reportChange;
+        }
+
+        public int LoadCount => Volatile.Read(ref _loadCount);
+
+        public TaskCompletionSource<bool> MutationReported { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void ArmMutation() => Interlocked.Exchange(ref _mutateNext, 1);
+
+        public async Task<LoadedSolution> LoadAsync(
+            ProjectLoadRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref _loadCount);
+            var loaded = await _inner.LoadAsync(request, cancellationToken);
+            if (Interlocked.Exchange(ref _mutateNext, 0) != 0)
+            {
+                await File.WriteAllTextAsync(_path, _content, cancellationToken);
+                _reportChange();
+                MutationReported.TrySetResult(true);
+            }
+
+            return loaded;
+        }
+    }
+
+    private sealed class CoverageVerificationDependencyLoader : IProjectLoader
+    {
+        private readonly IProjectLoader _inner;
+        private readonly string _importPath;
+        private readonly string _updatedImport;
+        private readonly Action _reportChange;
+        private int _loadCount;
+
+        public CoverageVerificationDependencyLoader(
+            IProjectLoader inner,
+            string importPath,
+            string updatedImport,
+            Action reportChange)
+        {
+            _inner = inner;
+            _importPath = importPath;
+            _updatedImport = updatedImport;
+            _reportChange = reportChange;
+        }
+
+        public int LoadCount => Volatile.Read(ref _loadCount);
+
+        public async Task<LoadedSolution> LoadAsync(
+            ProjectLoadRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var loadCount = Interlocked.Increment(ref _loadCount);
+            var loaded = await _inner.LoadAsync(request, cancellationToken);
+            if (loadCount == 1)
+            {
+                // The project already contains the external link. Its
+                // evaluated membership expands watcher coverage after this
+                // load, while this dependency event remains queued.
+                _reportChange();
+            }
+            else if (loadCount == 2)
+            {
+                // Roslyn has consumed the old import for the coverage
+                // verification load. Change it only after LoadAsync returns,
+                // then report the event so the returned solution is stale by
+                // construction.
+                await File.WriteAllTextAsync(_importPath, _updatedImport, cancellationToken);
+                _reportChange();
             }
 
             return loaded;

@@ -12,9 +12,12 @@ Incremental indexing is an internal implementation detail that reduces the
 amount of Roslyn work needed before that document is refreshed.
 
 The long-running watcher owns the warm Roslyn state, the incremental index, and
-JSON publication. A manual refresh is a foreground barrier: it waits until the
-requested state has been indexed, serialized, validated, and atomically
-published.
+JSON publication. A request accepted by a ready watcher is a foreground
+barrier: it waits until the requested state has been indexed, serialized,
+validated, and atomically published. A request that arrives while the watcher
+is starting or recovering receives a structured `not_ready` failure and does
+not invoke extraction or modify JSON; the caller can retry after readiness is
+observed.
 
 The watcher is trusted only for the lifetime of its current healthy session. A
 new or restarted watcher must perform a cold reconciliation before it becomes
@@ -80,11 +83,14 @@ The watcher combines four mechanisms:
   inventory and compares cheap file metadata with the last accepted inventory.
   Differences become the same dirty-path commands produced by events. The
   scan runs on a worker and never performs Roslyn work in a watcher callback.
-- The `Error` handler, missing watch root, failed backup scan, or uncertain
-  event boundary tears down the watcher and invalidates the session. The
-  worker scans the current roots, recreates the subscriptions, and performs a
-  nonpublishing cold reconciliation before declaring the session healthy again.
-  No user files are deleted as part of recovery.
+- The `Error` handler, missing watch root, failed backup scan, or an actual
+  event-queue/journal overflow tears down the watcher and invalidates the
+  session. Ordinary events observed while MSBuild is replacing the input policy
+  are retained in a bounded transition journal and reclassified after the load;
+  they do not become watcher failure merely because membership was temporarily
+  unknown. The worker scans the current roots, recreates the subscriptions, and
+  performs a nonpublishing cold reconciliation before declaring the session
+  healthy again. No user files are deleted as part of recovery.
 
 The backup scan is deliberately metadata-first so it does not turn every
 healthy refresh into a full content hash or Roslyn pass. Normal editor saves,
@@ -104,21 +110,26 @@ never substitutes for recording an event or completing a reconciliation.
 
 ## Input scope and filtering
 
-MSBuild and Roslyn, not `.gitignore`, define the semantic input set. After each
-evaluated load, the worker publishes an immutable input snapshot containing
-exact source documents, additional documents, analyzer configuration,
-references, evaluated project/build imports, project/solution inputs, and
-relevant configuration paths. Event callbacks only perform canonical path
-comparison against that snapshot; they do not evaluate MSBuild, read source
-content, enumerate directories, or start subprocesses.
+MSBuild and Roslyn, not `.gitignore` or directory names, define the semantic
+input set. After each evaluated load, the worker publishes an immutable input
+snapshot containing exact source documents, additional documents, analyzer
+configuration, references, evaluated project/build imports, project/solution
+inputs, evaluated item globs, and relevant configuration paths. The same
+snapshot also contains output/intermediate roots derived from evaluated
+`BaseOutputPath`, `OutputPath`, `OutDir`, `BaseIntermediateOutputPath`,
+`IntermediateOutputPath`, `MSBuildProjectExtensionsPath`, and `PublishDir`
+properties, plus the evaluated `ProjectAssetsFile` candidate. No global
+blacklist of names such as `obj` or `artifacts` is used.
 
-Inventory traversal prunes conventional noise directories (`obj`, `bin`,
-`.git`, `node_modules`, `.e2e`, `graphify-out`, `.vs`, `TestResults`, and
-`artifacts`). Exact evaluated paths are scanned separately before traversal, so
-an explicitly compiled `obj/Generated.cs` or an arbitrary-extension additional
-file remains visible without recursively scanning all build output. A root
-level custom output is ignored as one exact path rather than hiding its sibling
-source files; the cache directory is ignored as a tool-owned subtree.
+Inventory scans exact evaluated inputs first. It prunes only tool-owned output
+and cache paths, roots explicitly identified by MSBuild as generated output or
+intermediate state, and directories that candidate-glob coverage proves cannot
+contain an input. An evaluated candidate glob can reopen a prunable root when
+its include/exclude rules admit that path, so an explicitly compiled generated
+file or an arbitrary-extension additional file remains visible. If discovery is
+incomplete, the scanner falls back to conservative traversal rather than
+silently filtering uncertain paths. A directory is therefore ignored because
+the project policy proves it irrelevant—not because of its basename.
 
 An existing evaluated source document changed in place is the only warm
 document mutation. Creation, deletion, rename, directory changes, project
@@ -168,10 +179,12 @@ management server keeps the completion response path alive long enough to
 reply without awaiting its own disposal, while unrelated `inspect` requests
 remain available during a pending stop.
 
-The normal foreground invocation connects to a healthy matching watcher when
-one exists. It waits for that watcher rather than opening a second MSBuild
-workspace. If no matching watcher exists, it performs the cold reconciliation
-itself and waits for completion.
+The normal foreground invocation connects to a matching watcher when one exists.
+The watcher exposes its refresh channel throughout startup, but accepts JSON
+requests only after it is healthy. A request during `starting` or `recovering`
+returns `not_ready` without writing JSON; callers should inspect or retry after
+the watcher reports `ready`. If no matching watcher exists, the invocation
+performs the cold reconciliation itself and waits for completion.
 
 There is one watcher per canonical analysis-and-output identity. The analysis
 identity includes the input path, repository root, configuration, selected
@@ -277,34 +290,50 @@ Every later cold load has an explicit transition boundary. Before Roslyn
 reevaluates the project, the session publishes a bootstrap snapshot that keeps
 the current logical input roots conservative. The host keeps the watcher set
 that is currently known to be viable; it does not recreate obsolete external
-roots merely because they appeared in the previous evaluated snapshot. An
-uncertain in-scope event during this interval invalidates trust and is folded
-into cold recovery rather than being treated as a warm document edit.
+roots merely because they appeared in the previous evaluated snapshot. Events
+during this interval are retained in the bounded transition journal and
+reclassified after the evaluated policy is available. Only a genuine delivery
+loss is folded into cold recovery rather than being treated as a normal edit.
 
 After the load succeeds, the evaluated input snapshot is published before
 cataloging and semantic extraction. The host then establishes any newly
-discovered coverage. A scan captured against an old or transitional snapshot
-is discarded. The post-load inventory is accepted only when it matches the
-current evaluated snapshot; all differences, including changes to existing
-entries and newly observed exact inputs, are reconciled through the serialized
-  cold path before the new baseline is accepted. During automatic recovery,
-  this catch-up is nonpublishing and leaves an in-memory publication obligation
-  for the next explicit refresh. During initial startup, it may publish so the
-  readiness barrier represents the complete first document. This prevents an
-  input that changed during the load/coverage gap from becoming a clean but
-  stale baseline.
+discovered coverage and replays the transition journal against the new policy.
+A scan captured against an old or transitional snapshot is discarded. The
+post-load inventory is accepted only when it matches the current evaluated
+snapshot; all differences, including changes to existing entries and newly
+observed exact inputs, are reconciled through the serialized cold path before
+the new baseline is accepted. During automatic recovery, this catch-up is
+nonpublishing and leaves an in-memory publication obligation for the next
+explicit refresh. During initial startup, it may publish so the readiness
+barrier represents the complete first document. This prevents an input that
+changed during the load/coverage gap from becoming a clean but stale baseline.
 
 ### Ready and watching
 
-Once the initial complete graph has been published, the session enters
-`Ready`. File events add paths to the dirty set and increment the in-memory
+Once the initial complete graph has been published, the session is healthy and
+`ready=true`. Readiness describes trusted ownership and an established input
+boundary; it does not mean that the single worker is idle. During ordinary
+background indexing the management state may be `refreshing` while readiness
+remains true. File events add paths to the dirty set and increment the in-memory
 event generation. Duplicate events are harmless because the set is keyed by
 canonical path or project.
 
+An ordinary edit to an existing source document stays in the healthy session.
+Low-priority background indexing catches up in memory, and an explicit refresh
+issued through the control endpoint is serialized behind that work rather than
+rejected merely because the worker is busy. Structural, project, dependency,
+watcher-error, or otherwise untrusted changes use the appropriate cold reload
+or recovery path. Startup and delivery-loss recovery still withhold readiness
+and return `not_ready`; ordinary transition events are journaled and
+reclassified rather than treated as delivery loss. If edits continue without a
+quiet boundary, indexing remains pending even though the watcher remains
+available for serialized refresh requests.
+
 There is no correctness dependency on a time-based debounce. Background work
 may coalesce project requests for efficiency, but events are recorded
-immediately and a manual refresh bypasses debounce; it still waits for any
-active trust recovery before returning a successful result.
+immediately. A refresh issued through the host API bypasses debounce and waits
+for active trust recovery; the external control endpoint instead returns
+`not_ready` until the watcher is healthy.
 
 ### Stopping or losing trust
 
@@ -321,10 +350,12 @@ being built. Automatic recovery does not replace it; it only prepares trusted
 in-memory state. An explicit refresh must publish that state before reporting
 success.
 
-If a load fails after the transition snapshot is published, recovery resets
-inventory under the stable base/ancestor coverage and retries the cold load.
-This prevents a failed transition from leaving the backup scanner spinning on
-an untrusted snapshot.
+If a load fails after the transition snapshot is published, recovery validates
+the stable base/ancestor coverage but preserves the prior inventory as the
+comparison baseline. The post-load scan then detects edits made while watcher
+subscriptions were being replaced and retries the cold load. This prevents a
+failed transition from erasing changes or leaving the backup scanner spinning
+on an untrusted snapshot.
 
 ## Invalidation granularity
 
@@ -358,16 +389,20 @@ required.
 
 ## Refresh protocol
 
-A refresh request captures the current event generation as its target. The
-watcher then:
+A refresh request is accepted only while the watcher reports `ready=true` and
+captures the current event generation as its target. The watcher then:
 
-1. waits for the initial cold load if the session is still starting;
-2. promotes pending work for the requested generation to foreground priority;
-3. finishes or rebuilds the required project/TFM contributions;
-4. merges cached and rebuilt contributions deterministically;
-5. validates nodes, edges, endpoints, diagnostics, and output identity;
-6. serializes the complete Graphify document; and
-7. atomically replaces `csharp.json` before returning success.
+1. promotes pending work for the requested generation to foreground priority;
+2. finishes or rebuilds the required project/TFM contributions;
+3. merges cached and rebuilt contributions deterministically;
+4. validates nodes, edges, endpoints, diagnostics, and output identity;
+5. serializes the complete Graphify document; and
+6. atomically replaces `csharp.json` before returning success.
+
+The control channel returns `not_ready` for a request observed during startup or
+recovery. It includes the current lifecycle state and explicitly reports that
+no JSON graph was generated. This is a failure of the request, not a fallback
+to the previous file or to a second workspace.
 
 If the graph is already clean at the requested generation, the request returns
 the existing published generation without loading Roslyn or rewriting JSON.
@@ -418,10 +453,12 @@ MSBuild, or SDK caches.
 
 If a refresh is requested without a matching live watcher, the standalone
 process performs the cold reconciliation described above after acquiring the
-destination lease. A matching watcher is waited on through its control channel;
-an occupied destination owned by a different request fails with an ownership
-conflict. The command must not claim a warm incremental refresh based solely on
-a persisted last-update timestamp.
+destination lease. A matching ready watcher is used through its control
+channel; a matching watcher that is still starting or recovering returns
+`not_ready` rather than blocking or publishing an unverified graph. An occupied
+destination owned by a different request fails with an ownership conflict. The
+command must not claim a warm incremental refresh based solely on a persisted
+last-update timestamp.
 
 ## Output consistency and failure handling
 
@@ -466,8 +503,8 @@ document.
 The implementation should test the refresh service with a small fixture and a
 real project:
 
-- a manual request arriving during a slow cold load waits and does not trigger
-  a second load;
+- a manual request arriving during a slow healthy background load queues behind
+  the active worker and completes without starting a second concurrent load;
 - a clean warm refresh returns the existing published generation immediately;
 - background indexing and a manual refresh coalesce on one generation;
 - a source change, including one observed during automatic recovery, updates

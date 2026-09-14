@@ -17,7 +17,8 @@ internal sealed record FileChangeEvent(
     string Path,
     string? OldPath = null,
     bool RequiresColdReconciliation = false,
-    bool? IsDirectory = null)
+    bool? IsDirectory = null,
+    long? CaptureEpoch = null)
 {
     public IEnumerable<string> Endpoints
     {
@@ -55,6 +56,7 @@ internal sealed class WatcherInputSnapshot
     private readonly ImmutableHashSet<string> _knownStructuralInputAncestors;
     private readonly ImmutableHashSet<string> _infrastructurePaths;
     private readonly ImmutableArray<string> _ignoredRoots;
+    private readonly ImmutableArray<string> _outputRoots;
     private readonly ImmutableArray<string> _knownInputPathsOrdered;
     private readonly ImmutableArray<string> _knownSourcePathsOrdered;
     private readonly ImmutableArray<string> _knownDependencyPathsOrdered;
@@ -75,6 +77,7 @@ internal sealed class WatcherInputSnapshot
         bool inputDiscoveryComplete = true,
         IEnumerable<string>? inputDiscoveryDiagnostics = null,
         IEnumerable<string>? infrastructurePaths = null,
+        IEnumerable<string>? outputRoots = null,
         bool isBootstrap = false)
     {
         _knownInputPaths = CreatePathSet(knownInputPaths);
@@ -101,6 +104,7 @@ internal sealed class WatcherInputSnapshot
                 IncrementalPaths.PathComparer);
         _discoveryRoots = NormalizePaths(discoveryRoots);
         _ignoredRoots = NormalizePaths(ignoredRoots);
+        _outputRoots = NormalizePaths(outputRoots ?? Array.Empty<string>());
         _infrastructurePaths = CreatePathSet(infrastructurePaths ?? Array.Empty<string>());
         _knownInputAncestors = BuildAncestors(_knownInputPaths)
             .ToImmutableHashSet(IncrementalPaths.PathComparer);
@@ -135,18 +139,20 @@ internal sealed class WatcherInputSnapshot
         IEnumerable<string> discoveryRoots,
         string outputPath,
         string cachePath,
-        IEnumerable<WatcherRoot>? watchRoots = null)
+        IEnumerable<WatcherRoot>? watchRoots = null,
+        IEnumerable<string>? knownInputPaths = null)
     {
         ArgumentNullException.ThrowIfNull(discoveryRoots);
         var ignoredRoots = BuildToolIgnoredRoots(outputPath, cachePath);
         return new WatcherInputSnapshot(
-            EmptyPaths,
+            knownInputPaths ?? EmptyPaths,
             EmptyPaths,
             EmptyPaths,
             Array.Empty<KeyValuePair<string, IEnumerable<string>>>(),
             discoveryRoots,
             ignoredRoots,
             watchRoots ?? discoveryRoots.Select(root => new WatcherRoot(root, IncludeSubdirectories: true)),
+            inputDiscoveryComplete: false,
             isBootstrap: true);
     }
 
@@ -166,6 +172,7 @@ internal sealed class WatcherInputSnapshot
         var infrastructurePaths = new HashSet<string>(IncrementalPaths.PathComparer);
         var explicitSemanticPaths = new HashSet<string>(IncrementalPaths.PathComparer);
         var inputGlobs = new HashSet<ProjectInputGlob>();
+        var outputRoots = new HashSet<string>(IncrementalPaths.PathComparer);
         var inputDiscoveryDiagnostics = new HashSet<string>(StringComparer.Ordinal);
         var inputDiscoveryComplete = true;
         var discoveryRoots = new HashSet<string>(IncrementalPaths.PathComparer)
@@ -272,6 +279,8 @@ internal sealed class WatcherInputSnapshot
                     watchRoots);
             }
 
+            outputRoots.UnionWith(inputDiscovery.OutputRoots);
+
             foreach (var dependencyPath in inputDiscovery.Paths)
             {
                 if (!solution.IsTransientPath(dependencyPath))
@@ -288,7 +297,7 @@ internal sealed class WatcherInputSnapshot
         AddConfigurationSearchInputs(solution, request, dependencies, allInputs, discoveryRoots, watchRoots);
 
         var ignoredRoots = BuildToolIgnoredRoots(outputPath, cachePath);
-        if (allInputs.Any(path => ignoredRoots.Any(root => IncrementalPaths.IsPathOrUnder(path, root))))
+        if (allInputs.Any(path => IsToolPath(path, ignoredRoots)))
         {
             throw new InvalidOperationException(
                 "The configured graph output or cache directory is also a compilation input. Choose an output path outside the analyzed input scope.");
@@ -305,7 +314,8 @@ internal sealed class WatcherInputSnapshot
             inputGlobs,
             inputDiscoveryComplete,
             inputDiscoveryDiagnostics,
-            infrastructurePaths);
+            infrastructurePaths,
+            outputRoots: outputRoots);
     }
 
     internal static WatcherInputSnapshot CreateForTests(
@@ -318,7 +328,8 @@ internal sealed class WatcherInputSnapshot
         IEnumerable<ProjectInputGlob>? inputGlobs = null,
         bool inputDiscoveryComplete = true,
         IEnumerable<string>? inputDiscoveryDiagnostics = null,
-        IEnumerable<string>? infrastructurePaths = null)
+        IEnumerable<string>? infrastructurePaths = null,
+        IEnumerable<string>? outputRoots = null)
     {
         var sources = CreatePathSet(knownSources);
         var dependencies = CreatePathSet(knownDependencies);
@@ -333,7 +344,8 @@ internal sealed class WatcherInputSnapshot
             inputGlobs,
             inputDiscoveryComplete,
             inputDiscoveryDiagnostics,
-            infrastructurePaths);
+            infrastructurePaths,
+            outputRoots: outputRoots);
     }
 
     public ImmutableArray<string> KnownInputPaths => _knownInputPathsOrdered;
@@ -353,6 +365,8 @@ internal sealed class WatcherInputSnapshot
 
     public ImmutableArray<string> InputDiscoveryDiagnostics => _inputDiscoveryDiagnostics;
 
+    public ImmutableArray<string> OutputRoots => _outputRoots;
+
     public bool IsBootstrap => _isBootstrap;
 
     public bool IsKnownInput(string path) => _knownInputPaths.Contains(Canonicalize(path));
@@ -367,23 +381,61 @@ internal sealed class WatcherInputSnapshot
     public bool ShouldIncludeInInventory(string path)
     {
         var canonicalPath = Canonicalize(path);
+        if (_isBootstrap)
+        {
+            // The bootstrap inventory is only a handoff anchor. Before
+            // evaluation there is no authoritative wildcard membership, so
+            // scanning conventional extensions here would quietly turn a
+            // narrow startup pass back into a checkout-wide scan.
+            return !IsToolPath(canonicalPath)
+                && _knownInputPaths.Contains(canonicalPath);
+        }
+
         return !IsToolPath(canonicalPath)
             && (_knownInputPaths.Contains(canonicalPath)
                 || _inputGlobs.Any(glob => glob.Matches(canonicalPath)
-                    && glob.MayIntentionallyIncludeExcludedPath(canonicalPath, isDirectory: false))
-                || (_isBootstrap && IsBootstrapRelevantBuildFile(canonicalPath))
-                || (!IsConventionalExcludedDirectory(canonicalPath)
+                    && glob.AllowsPath(canonicalPath, isDirectory: false))
+                || (!_inputDiscoveryComplete
                     && IsConventionalRelevantFilePath(canonicalPath)));
     }
 
     public bool ShouldTraverseDirectory(string path)
     {
         var canonicalPath = Canonicalize(path);
-        return !IsToolPath(canonicalPath)
-            && (!IsConventionalExcludedDirectory(canonicalPath)
-                || _inputGlobs.Any(glob =>
-                    glob.MayContain(canonicalPath)
-                    && glob.MayIntentionallyIncludeExcludedPath(canonicalPath, isDirectory: true)));
+        if (IsToolPath(canonicalPath))
+        {
+            return false;
+        }
+
+        if (_isBootstrap)
+        {
+            // Before evaluation, only walk directories that can lead to an
+            // exact bootstrap input. The watcher itself remains broad and
+            // journals uncertain events; the inventory must not recursively
+            // enumerate the whole checkout just to establish that baseline.
+            return _knownInputPaths.Contains(canonicalPath)
+                || _knownInputAncestors.Contains(canonicalPath);
+        }
+
+        if (!_inputDiscoveryComplete
+            || _knownInputAncestors.Contains(canonicalPath))
+        {
+            return true;
+        }
+
+        // A complete evaluated project boundary also tells us which
+        // directories can contain future wildcard inputs. This avoids walking
+        // unrelated trees such as package or repository metadata directories
+        // without relying on their names. Exact-input ancestors above retain
+        // precedence, and an explicit project glob can reopen an output root.
+        if (_inputGlobs.Length > 0)
+        {
+            return _inputGlobs.Any(glob =>
+                glob.MayContain(canonicalPath)
+                && glob.AllowsPath(canonicalPath, isDirectory: true));
+        }
+
+        return !IsPrunablePath(canonicalPath);
     }
 
     public WatcherEventClassification Classify(FileChangeEvent change)
@@ -409,13 +461,11 @@ internal sealed class WatcherInputSnapshot
 
         if (_isBootstrap)
         {
-            // Before Roslyn has evaluated the project, exclusions such as
-            // obj/bin are not authoritative: a project may explicitly include
-            // a file there, or a non-source input may have any extension. The
-            // host coalesces the first uncertain event into recovery rather
-            // than enqueueing the entire startup burst.
+            // Before Roslyn has evaluated the project, no project-derived
+            // exclusion is authoritative. Keep all events under a discovery
+            // root in the transition journal; the evaluated snapshot will
+            // replay only events that belong to the project input boundary.
             var uncertainEndpoints = relevantEndpoints
-                .Where(path => !IsBootstrapConfidentlyExcludedDirectory(path))
                 .Where(IsUnderDiscoveryRoot)
                 .ToArray();
             return new WatcherEventClassification(
@@ -437,7 +487,7 @@ internal sealed class WatcherInputSnapshot
 
         if (relevantEndpoints.Any(path =>
                 IsKnownInputAncestor(path)
-                && (!IsConventionalExcludedDirectoryRoot(path)
+                && (!IsPrunablePath(path)
                     || _knownStructuralInputAncestors.Contains(path)
                     || change.Kind is FileChangeKind.Deleted or FileChangeKind.Renamed)))
         {
@@ -447,10 +497,10 @@ internal sealed class WatcherInputSnapshot
         }
 
         var discoveryEndpoints = relevantEndpoints
-            .Where(path => !IsConventionalExcludedDirectory(path)
-                || _inputGlobs.Any(glob =>
-                    glob.MayIntentionallyIncludeExcludedPath(path, change.IsDirectory)
-                    && (glob.Matches(path) || glob.MayContain(path))))
+            .Where(path => !_inputDiscoveryComplete
+                ? !IsPrunablePath(path)
+                    || _inputGlobs.Any(glob => IsCandidateGlobMatch(glob, path, change.IsDirectory))
+                : _inputGlobs.Any(glob => IsCandidateGlobMatch(glob, path, change.IsDirectory)))
             .ToArray();
         var discoveryEvent = discoveryEndpoints.Any(IsUnderDiscoveryRoot);
         if (!discoveryEvent)
@@ -458,19 +508,21 @@ internal sealed class WatcherInputSnapshot
             return new WatcherEventClassification(Accepted: false, RequiresColdReconciliation: false);
         }
 
-        var conventionalEvent = discoveryEndpoints.Any(path =>
-            IsConventionalRelevantFilePath(path)
-            || (change.IsDirectory ?? IsDirectoryLike(path)));
         var globEvent = discoveryEndpoints.Any(path =>
-            _inputGlobs.Any(glob => glob.Matches(path)
-                || glob.MayContain(path)));
+            _inputGlobs.Any(glob => IsCandidateGlobMatch(glob, path, change.IsDirectory)));
+        var conservativeEvent = !_inputDiscoveryComplete
+            && discoveryEndpoints.Any(path =>
+                IsConventionalRelevantFilePath(path)
+                || (change.IsDirectory ?? IsDirectoryLike(path)));
         return new WatcherEventClassification(
-            Accepted: conventionalEvent || globEvent,
-            RequiresColdReconciliation: conventionalEvent || globEvent);
+            Accepted: conservativeEvent || globEvent,
+            RequiresColdReconciliation: conservativeEvent || globEvent);
     }
 
-    private bool IsToolPath(string path) =>
-        _ignoredRoots.Any(root => IncrementalPaths.IsPathOrUnder(path, root)
+    private bool IsToolPath(string path) => IsToolPath(path, _ignoredRoots);
+
+    private static bool IsToolPath(string path, IEnumerable<string> ignoredRoots) =>
+        ignoredRoots.Any(root => IncrementalPaths.IsPathOrUnder(path, root)
             || IsAtomicTemporaryPath(path, root));
 
     private static bool IsAtomicTemporaryPath(string path, string destinationPath)
@@ -492,8 +544,29 @@ internal sealed class WatcherInputSnapshot
     private bool IsKnownInputAncestor(string path) =>
         _knownInputAncestors.Contains(path);
 
+    private bool IsPrunablePath(string path) =>
+        _outputRoots.Any(root => IncrementalPaths.IsPathOrUnder(path, root));
+
     private bool IsUnderDiscoveryRoot(string path) =>
         _discoveryRoots.Any(root => IncrementalPaths.IsUnderDirectory(path, root));
+
+    private static bool IsCandidateGlobMatch(
+        GlobMatcher glob,
+        string path,
+        bool? isDirectory) =>
+        isDirectory switch
+        {
+            // A known file must match the include pattern. MayContain only
+            // proves that a directory prefix could contain a match.
+            false => glob.Matches(path) && glob.AllowsPath(path, isDirectory: false),
+            true => glob.MayContain(path) && glob.AllowsPath(path, isDirectory: true),
+            // Deleted entries and native events with an unknown type remain
+            // conservative: either a file match or a possible directory
+            // descendant is enough, provided exclusions do not prove both
+            // interpretations impossible.
+            null => (glob.Matches(path) || glob.MayContain(path))
+                && glob.AllowsPath(path, isDirectory: null),
+        };
 
     private static string Canonicalize(string path) =>
         IncrementalPaths.CanonicalAbsolutePath(path);
@@ -740,26 +813,8 @@ internal sealed class WatcherInputSnapshot
         }
     }
 
-    private static bool IsConventionalExcludedDirectory(string path)
-    {
-        var segments = path.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
-        return segments.Any(segment => ExcludedDirectoryNames.Contains(segment));
-    }
-
-    private static bool IsConventionalExcludedDirectoryRoot(string path) =>
-        ExcludedDirectoryNames.Contains(Path.GetFileName(path));
-
     private static bool IsDirectoryLike(string path) =>
         string.IsNullOrEmpty(Path.GetExtension(Path.GetFileName(path)));
-
-    private static bool IsBootstrapConfidentlyExcludedDirectory(string path)
-    {
-        var segments = path.Replace('\\', '/').Split('/', StringSplitOptions.RemoveEmptyEntries);
-        return segments.Any(segment => BootstrapExcludedDirectoryNames.Contains(segment));
-    }
-
-    private static bool IsBootstrapRelevantBuildFile(string path) =>
-        Path.GetFileName(path).Equals("project.assets.json", StringComparison.OrdinalIgnoreCase);
 
     internal static bool IsConventionalRelevantFilePath(string path)
     {
@@ -784,30 +839,6 @@ internal sealed class WatcherInputSnapshot
             || fileName.Equals("project.assets.json", StringComparison.OrdinalIgnoreCase)
             || fileName.Equals("NuGet.Config", StringComparison.OrdinalIgnoreCase);
     }
-
-    private static readonly ImmutableHashSet<string> ExcludedDirectoryNames =
-        ImmutableHashSet.Create(
-            StringComparer.OrdinalIgnoreCase,
-            ".git",
-            "bin",
-            "obj",
-            "node_modules",
-            ".e2e",
-            "graphify-out",
-            ".vs",
-            "TestResults",
-            "artifacts");
-
-    private static readonly ImmutableHashSet<string> BootstrapExcludedDirectoryNames =
-        ImmutableHashSet.Create(
-            StringComparer.OrdinalIgnoreCase,
-            ".git",
-            "node_modules",
-            ".e2e",
-            "graphify-out",
-            ".vs",
-            "TestResults",
-            "artifacts");
 
     private static readonly ImmutableArray<string> ConventionalConfigurationNames =
     [
@@ -906,14 +937,8 @@ internal sealed class WatcherInputSnapshot
             && (IncrementalPaths.IsPathOrUnder(path, CoverageRoot)
                 || IncrementalPaths.IsPathOrUnder(CoverageRoot, path));
 
-        public bool MayIntentionallyIncludeExcludedPath(string path, bool? isDirectory)
-        {
-            if (!IsConventionalExcludedDirectory(path))
-            {
-                return true;
-            }
-
-            return !_exclusions.Any(exclusion =>
+        public bool AllowsPath(string path, bool? isDirectory) =>
+            !_exclusions.Any(exclusion =>
                 isDirectory switch
                 {
                     true => exclusion.ExcludesDirectory(path),
@@ -927,9 +952,8 @@ internal sealed class WatcherInputSnapshot
                     // exclusion directory prefix must still be delivered.
                     null => exclusion.Matches(path) && exclusion.ExcludesDirectory(path),
                 });
-        }
 
-        private bool ExcludesDirectory(string path) =>
+        public bool ExcludesDirectory(string path) =>
             // Only a recursive catch-all suffix proves that every descendant
             // is excluded. A nonrecursive pattern such as obj/* may match a
             // directory name, but it does not exclude files nested beneath
