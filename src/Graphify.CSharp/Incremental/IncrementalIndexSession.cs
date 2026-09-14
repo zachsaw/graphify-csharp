@@ -160,13 +160,15 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         bool publishOutput = true)
     {
         EnsureWorkerStarted();
-        var target = new RefreshTarget(
-            _sessionId,
-            Volatile.Read(ref _eventClock));
         var completion = new TaskCompletionSource<IncrementalRefreshResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (_lifecycleGate)
         {
             ThrowIfSessionUnavailableLocked();
+            // Event producers hold this gate from advancing the event clock
+            // through enqueueing the corresponding command. Capture the
+            // refresh target under the same gate so a target can never include
+            // an event whose queue entry is still being published.
+            var target = CaptureCurrentTargetLocked();
             if (!_commands.Writer.TryWrite(new RefreshCommand(target, rebuild, publishOutput, completion)))
             {
                 completion.TrySetException(new InvalidOperationException("The incremental session is not accepting refresh requests."));
@@ -503,7 +505,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         DrainFileEvents();
         CaptureConsumedDependencyBaselines();
         DiscardAlreadyConsumedDependencyChanges();
-        var target = new RefreshTarget(_sessionId, Volatile.Read(ref _eventClock));
+        var target = CaptureCurrentTarget();
         var dueStates = DueDirtyPathStates(target.EventGeneration);
         var duePaths = dueStates.Select(state => state.Path).ToArray();
         if (IsEventDeliveryUntrusted() || duePaths.Length > 0)
@@ -751,7 +753,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         }
 
         DrainFileEvents();
-        var target = new RefreshTarget(_sessionId, Volatile.Read(ref _eventClock));
+        var target = CaptureCurrentTarget();
         await ReconcileAsync(
                 target,
                 forceCold: false,
@@ -1358,6 +1360,18 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             throw new InvalidOperationException("The refresh target belongs to a different incremental session.");
         }
     }
+
+    private RefreshTarget CaptureCurrentTarget()
+    {
+        lock (_lifecycleGate)
+        {
+            return CaptureCurrentTargetLocked();
+        }
+    }
+
+    private RefreshTarget CaptureCurrentTargetLocked() => new(
+        _sessionId,
+        Volatile.Read(ref _eventClock));
 
     private void FailPendingCommands(Exception exception)
     {
