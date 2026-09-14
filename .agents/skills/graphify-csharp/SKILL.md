@@ -123,10 +123,14 @@ graphify-csharp \
 ~~~
 
 Run the ordinary command without `--watch` whenever fresh evidence is needed.
-It waits through matching-watcher startup, indexing, and recovery and returns
-after the requested complete JSON is current. File events alone do not
-republish the public JSON. Without a matching live watcher, the ordinary
-command performs a one-shot refresh if the destination is available.
+If a matching watcher is still starting or recovering, the command returns a
+`not_ready` error immediately and does not write JSON. Retry it after
+`inspect` reports `ready: true`. Once it attaches to a ready watcher, the
+command waits for the requested generation to be indexed, serialized, and
+published; if recovery begins during that accepted refresh, the watcher waits
+for a trusted boundary before returning. File events alone do not republish
+the public JSON. Without a matching live watcher, the ordinary command
+performs a one-shot refresh if the destination is available.
 
 A different analysis configuration targeting an active watcher's output
 fails with an ownership conflict. Use another output or stop the relevant
