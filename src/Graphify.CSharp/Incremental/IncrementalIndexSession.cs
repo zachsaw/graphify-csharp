@@ -704,79 +704,79 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         switch (command)
         {
             case RefreshCommand refresh:
-            {
-                if (!TryBeginRefresh(refresh))
                 {
+                    if (!TryBeginRefresh(refresh))
+                    {
+                        break;
+                    }
+
+                    using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                        cancellationToken,
+                        refresh.RequestCancellationToken);
+                    IndexingObservationOperation? operation = null;
+                    try
+                    {
+                        requestCancellation.Token.ThrowIfCancellationRequested();
+                        operation = _observation.BeginOperation(refresh.OperationKind);
+                        operation.SetStage(IndexingStages.ReconcilingChanges);
+                        TrySetStatusIfActive(IncrementalSessionStatus.Refreshing);
+                        var result = await ReconcileAsync(
+                                refresh.Target,
+                                forceCold: refresh.Rebuild,
+                                publishOutput: refresh.PublishOutput,
+                                includeGraph: refresh.IncludeGraph,
+                                operation,
+                                requestCancellation.Token)
+                            .ConfigureAwait(false);
+                        if (refresh.CaptureSemanticResponse)
+                        {
+                            result = result.WithSemanticRefreshResponse(
+                                CreateSemanticRefreshResponse(result, refresh.Target, refresh.Rebuild));
+                        }
+
+                        operation.Complete();
+                        TrySetStatusIfActive(IncrementalSessionStatus.Ready);
+                        // A completed refresh is the foreground readiness barrier.
+                        // Publish the state before completing the task so callers
+                        // cannot observe a completed refresh while the session
+                        // still reports itself as Refreshing.
+                        refresh.Completion.TrySetResult(result);
+                    }
+                    catch (OperationCanceledException) when (
+                        refresh.RequestCancellationToken.IsCancellationRequested
+                        && !cancellationToken.IsCancellationRequested)
+                    {
+                        operation?.Complete("cancelled", "The refresh was cancelled.");
+                        Volatile.Write(ref _requiresColdReconciliation, 1);
+                        if (!IsEventDeliveryUntrusted())
+                        {
+                            MarkEventDeliveryUntrusted(
+                                "A foreground refresh was cancelled before reconciliation completed.");
+                        }
+
+                        TrySetStatusIfActive(IncrementalSessionStatus.Ready);
+                        refresh.Completion.TrySetCanceled(refresh.RequestCancellationToken);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        operation?.Complete("cancelled", "The refresh was cancelled during shutdown.");
+                        refresh.Completion.TrySetCanceled(cancellationToken);
+                        throw;
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        operation?.Complete("failed", exception.Message);
+                        TrySetStatusIfActive(IncrementalSessionStatus.Ready);
+                        refresh.Completion.TrySetException(exception);
+                    }
+                    finally
+                    {
+                        operation?.Dispose();
+                        EndRefresh(refresh.Completion);
+                    }
+
                     break;
                 }
-
-                using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken,
-                    refresh.RequestCancellationToken);
-                IndexingObservationOperation? operation = null;
-                try
-                {
-                    requestCancellation.Token.ThrowIfCancellationRequested();
-                    operation = _observation.BeginOperation(refresh.OperationKind);
-                    operation.SetStage(IndexingStages.ReconcilingChanges);
-                    TrySetStatusIfActive(IncrementalSessionStatus.Refreshing);
-                    var result = await ReconcileAsync(
-                            refresh.Target,
-                            forceCold: refresh.Rebuild,
-                            publishOutput: refresh.PublishOutput,
-                            includeGraph: refresh.IncludeGraph,
-                            operation,
-                            requestCancellation.Token)
-                        .ConfigureAwait(false);
-                    if (refresh.CaptureSemanticResponse)
-                    {
-                        result = result.WithSemanticRefreshResponse(
-                            CreateSemanticRefreshResponse(result, refresh.Target, refresh.Rebuild));
-                    }
-
-                    operation.Complete();
-                    TrySetStatusIfActive(IncrementalSessionStatus.Ready);
-                    // A completed refresh is the foreground readiness barrier.
-                    // Publish the state before completing the task so callers
-                    // cannot observe a completed refresh while the session
-                    // still reports itself as Refreshing.
-                    refresh.Completion.TrySetResult(result);
-                }
-                catch (OperationCanceledException) when (
-                    refresh.RequestCancellationToken.IsCancellationRequested
-                    && !cancellationToken.IsCancellationRequested)
-                {
-                    operation?.Complete("cancelled", "The refresh was cancelled.");
-                    Volatile.Write(ref _requiresColdReconciliation, 1);
-                    if (!IsEventDeliveryUntrusted())
-                    {
-                        MarkEventDeliveryUntrusted(
-                            "A foreground refresh was cancelled before reconciliation completed.");
-                    }
-
-                    TrySetStatusIfActive(IncrementalSessionStatus.Ready);
-                    refresh.Completion.TrySetCanceled(refresh.RequestCancellationToken);
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    operation?.Complete("cancelled", "The refresh was cancelled during shutdown.");
-                    refresh.Completion.TrySetCanceled(cancellationToken);
-                    throw;
-                }
-                catch (Exception exception) when (exception is not OperationCanceledException)
-                {
-                    operation?.Complete("failed", exception.Message);
-                    TrySetStatusIfActive(IncrementalSessionStatus.Ready);
-                    refresh.Completion.TrySetException(exception);
-                }
-                finally
-                {
-                    operation?.Dispose();
-                    EndRefresh(refresh.Completion);
-                }
-
-                break;
-            }
             case WatcherInvalidatedCommand:
                 Volatile.Write(ref _requiresColdReconciliation, 1);
                 break;
