@@ -725,15 +725,17 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                                 forceCold: refresh.Rebuild,
                                 publishOutput: refresh.PublishOutput,
                                 includeGraph: refresh.IncludeGraph,
-                                operation,
-                                requestCancellation.Token)
-                            .ConfigureAwait(false);
+                            operation,
+                            requestCancellation.Token)
+                        .ConfigureAwait(false);
+                        requestCancellation.Token.ThrowIfCancellationRequested();
                         if (refresh.CaptureSemanticResponse)
                         {
                             result = result.WithSemanticRefreshResponse(
                                 CreateSemanticRefreshResponse(result, refresh.Target, refresh.Rebuild));
                         }
 
+                        requestCancellation.Token.ThrowIfCancellationRequested();
                         operation.Complete();
                         TrySetStatusIfActive(IncrementalSessionStatus.Ready);
                         // A completed refresh is the foreground readiness barrier.
