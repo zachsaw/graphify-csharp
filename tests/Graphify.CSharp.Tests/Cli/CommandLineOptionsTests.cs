@@ -23,6 +23,7 @@ public sealed class CommandLineOptionsTests
         Assert.Equal("net10.0", options.TargetFramework);
         Assert.False(options.Rebuild);
         Assert.False(options.Watch);
+        Assert.False(options.NoProgress);
     }
 
     [Fact]
@@ -64,6 +65,17 @@ public sealed class CommandLineOptionsTests
             ["--input", "project.csproj", "--watch-scan-interval", "00:00:02"]));
         Assert.Throws<CommandLineException>(() => CommandLineOptions.Parse(
             ["--input", "project.csproj", "--watch", "--watch-scan-interval", "0"]));
+    }
+
+    [Fact]
+    public void Parses_no_progress_without_changing_the_request_options()
+    {
+        var options = CommandLineOptions.Parse(["--input", "project.csproj", "--no-progress"]);
+
+        Assert.True(options.NoProgress);
+        Assert.EndsWith("/project.csproj", options.InputPath, StringComparison.Ordinal);
+        Assert.Throws<CommandLineException>(() => CommandLineOptions.Parse(
+            ["--input", "project.csproj", "--no-progress", "--no-progress"]));
     }
 
     [Fact]

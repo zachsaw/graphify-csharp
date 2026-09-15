@@ -14,6 +14,7 @@ public sealed class CommandLineOptions
         bool rebuild,
         bool watch,
         TimeSpan watchScanInterval,
+        bool noProgress,
         bool showHelp)
     {
         InputPath = inputPath;
@@ -25,6 +26,7 @@ public sealed class CommandLineOptions
         Rebuild = rebuild;
         Watch = watch;
         WatchScanInterval = watchScanInterval;
+        NoProgress = noProgress;
         ShowHelp = showHelp;
     }
 
@@ -46,6 +48,8 @@ public sealed class CommandLineOptions
 
     public TimeSpan WatchScanInterval { get; }
 
+    public bool NoProgress { get; }
+
     public bool ShowHelp { get; }
 
     public static CommandLineOptions Parse(IReadOnlyList<string> args)
@@ -57,6 +61,7 @@ public sealed class CommandLineOptions
         var showHelp = false;
         var rebuild = false;
         var watch = false;
+        var noProgress = false;
         for (var index = 0; index < args.Count; index++)
         {
             var argument = args[index];
@@ -85,6 +90,17 @@ public sealed class CommandLineOptions
                 }
 
                 watch = true;
+                continue;
+            }
+
+            if (argument == "--no-progress")
+            {
+                if (noProgress)
+                {
+                    throw new CommandLineException("Option '--no-progress' may only be supplied once.");
+                }
+
+                noProgress = true;
                 continue;
             }
 
@@ -135,6 +151,7 @@ public sealed class CommandLineOptions
                 rebuild: false,
                 watch: false,
                 watchScanInterval: TimeSpan.FromMinutes(5),
+                noProgress: false,
                 showHelp: true);
         }
 
@@ -185,6 +202,7 @@ public sealed class CommandLineOptions
             rebuild,
             watch,
             watchScanInterval,
+            noProgress,
             showHelp: false);
     }
 
@@ -197,11 +215,14 @@ public sealed class CommandLineOptions
         + "  -f, --target-framework <tfm>    Select one TFM when target selection is ambiguous\n"
         + "      --rebuild                  Ignore incremental cache and rebuild all projects\n"
         + "      --watch                    Keep a warm indexer and serve local refresh requests\n"
+        + "      --no-progress              Suppress progress messages on stderr\n"
         + "      --watch-scan-interval <t>   Backup inventory interval (default: 00:05:00)\n"
         + "  -h, --help                      Show this help\n\n"
         + "Watcher management:\n"
         + "  graphify-csharp ps [--json]\n"
+        + "  graphify-csharp info <session-id|prefix> [--json]\n"
         + "  graphify-csharp inspect <session-id|prefix> [--json]\n"
+        + "  graphify-csharp diagnostics <session-id|prefix> --output <path> [--json]\n"
         + "  graphify-csharp stop <session-id|prefix> [--json]";
 
     private static string? Single(IReadOnlyDictionary<string, List<string>> values, string key)

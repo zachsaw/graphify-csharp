@@ -27,6 +27,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     private readonly byte[] _cursorSecret = RandomNumberGenerator.GetBytes(32);
     private readonly SemanticQueryEngine _semanticQueryEngine;
     private readonly Guid _sessionId;
+    private readonly IndexingObservation _observation;
+    private readonly bool _ownsObservation;
     // A bounded command queue prevents abandoned, cancelled requests from
     // accumulating without limit while the single worker is rebuilding a
     // solution. Callers receive a deterministic admission failure when the
@@ -82,6 +84,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     private long _evidenceRevision;
     private long _compatibilityGraphBuildCount;
     private SemanticEvidenceIndex? _semanticIndex;
+    private long _lastExtractedProjectCount;
+    private long _lastReusedProjectCount;
 
     public IncrementalIndexSession(
         ProjectLoadRequest request,
@@ -93,7 +97,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         Action<string>? trustLostCallback = null,
         Func<WatcherInputSnapshot, bool>? inputSnapshotChangedCallback = null,
         string semanticMode = "instance",
-        SemanticQueryEngine? semanticQueryEngine = null)
+        SemanticQueryEngine? semanticQueryEngine = null,
+        IndexingObservation? observation = null)
     {
         _request = request ?? throw new ArgumentNullException(nameof(request));
         _outputPath = string.IsNullOrWhiteSpace(outputPath) ? null : Path.GetFullPath(outputPath);
@@ -115,6 +120,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 
         _semanticMode = semanticMode;
         _semanticQueryEngine = semanticQueryEngine ?? new SemanticQueryEngine();
+        _ownsObservation = observation is null;
+        _observation = observation ?? new IndexingObservation();
         _sessionId = (sessionIdFactory ?? Guid.NewGuid)();
         _generation = new RefreshGeneration(_sessionId);
         var bootstrapRoots = new HashSet<string>(IncrementalPaths.PathComparer)
@@ -157,6 +164,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     // between a legacy refresh result and semantic reconciliation observable
     // in deterministic performance tests without adding wire/API surface.
     internal long CompatibilityGraphBuildCount => Volatile.Read(ref _compatibilityGraphBuildCount);
+
+    internal IndexingObservation Observation => _observation;
 
     internal Task<SemanticQueryResponse> ExecuteSemanticQueryAsync(
         SemanticQuerySpec specification,
@@ -243,20 +252,22 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     }
 
     public Task<IncrementalRefreshResult> RefreshAsync(CancellationToken cancellationToken = default)
-        => RefreshCoreAsync(rebuild: false, cancellationToken);
+        => RefreshCoreAsync(rebuild: false, operationKind: "refresh", cancellationToken: cancellationToken);
 
     public Task<IncrementalRefreshResult> RebuildAsync(CancellationToken cancellationToken = default)
-        => RefreshCoreAsync(rebuild: true, cancellationToken);
+        => RefreshCoreAsync(rebuild: true, operationKind: "rebuild", cancellationToken: cancellationToken);
 
     internal Task<IncrementalRefreshResult> RecoverAsync(CancellationToken cancellationToken = default)
         => RefreshCoreAsync(
             rebuild: true,
-            cancellationToken,
+            operationKind: "recovery",
+            cancellationToken: cancellationToken,
             publishOutput: false,
             includeGraph: false);
 
     private Task<IncrementalRefreshResult> RefreshCoreAsync(
         bool rebuild,
+        string operationKind,
         CancellationToken cancellationToken,
         bool publishOutput = true,
         bool includeGraph = true)
@@ -271,7 +282,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             // refresh target under the same gate so a target can never include
             // an event whose queue entry is still being published.
             var target = CaptureCurrentTargetLocked();
-            if (!_commands.Writer.TryWrite(new RefreshCommand(target, rebuild, publishOutput, completion)))
+            if (!_commands.Writer.TryWrite(new RefreshCommand(target, rebuild, publishOutput, operationKind, completion)))
             {
                 completion.TrySetException(new InvalidOperationException("The incremental session is not accepting refresh requests."));
             }
@@ -448,6 +459,10 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         {
             _stop.Dispose();
             _workSignal.Dispose();
+            if (_ownsObservation)
+            {
+                await _observation.DisposeAsync().ConfigureAwait(false);
+            }
             return;
         }
 
@@ -463,6 +478,10 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             Volatile.Write(ref _status, (int)IncrementalSessionStatus.Stopped);
             _stop.Dispose();
             _workSignal.Dispose();
+            if (_ownsObservation)
+            {
+                await _observation.DisposeAsync().ConfigureAwait(false);
+            }
         }
     }
 
@@ -515,9 +534,15 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 
     private async Task RunAsync()
     {
+        IndexingObservationOperation? startupOperation = null;
         try
         {
-            await InitializeAsync(_stop.Token).ConfigureAwait(false);
+            _observation.StartResourceSampling();
+            startupOperation = _observation.BeginOperation("startup");
+            startupOperation.SetStage(IndexingStages.Initializing);
+            await InitializeAsync(_stop.Token, startupOperation).ConfigureAwait(false);
+            startupOperation.Complete();
+            startupOperation = null;
             TrySetStatusIfActive(IncrementalSessionStatus.Ready);
             _ready.TrySetResult(true);
 
@@ -570,6 +595,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested)
         {
+            startupOperation?.Complete("cancelled", "Startup was cancelled.");
             lock (_lifecycleGate)
             {
                 CancelPendingCommandsLocked();
@@ -577,6 +603,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         }
         catch (Exception exception)
         {
+            startupOperation?.Complete("failed", exception.Message);
             lock (_lifecycleGate)
             {
                 if (Volatile.Read(ref _disposeRequested) != 0)
@@ -601,9 +628,11 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         }
     }
 
-    private async Task InitializeAsync(CancellationToken cancellationToken)
+    private async Task InitializeAsync(
+        CancellationToken cancellationToken,
+        IndexingObservationOperation? operation = null)
     {
-        await LoadAndExtractAllAsync(cancellationToken).ConfigureAwait(false);
+        await LoadAndExtractAllAsync(cancellationToken, operation).ConfigureAwait(false);
         // Establish the boundary before draining callbacks. An event accepted
         // after this point must remain newer than the startup snapshot even if
         // its callback is already waiting in the queue.
@@ -620,6 +649,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                     forceCold: IsEventDeliveryUntrusted(),
                     publishOutput: _outputPath is not null,
                     includeGraph: true,
+                    operation,
                     cancellationToken)
                 .ConfigureAwait(false);
             return;
@@ -628,17 +658,20 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         _generation = _generation.AdvanceEventsThrough(
             Math.Max(_generation.EventGeneration, target.EventGeneration));
         _generation = MarkGenerationIndexed(target.EventGeneration);
+        PublishEvidenceObservation();
         if (_outputPath is null)
         {
             return;
         }
 
+        operation?.SetStage(IndexingStages.Serializing);
         await PublishCurrentAsync(
             target,
             extractedProjectCount: _contributions.Count,
             reusedProjectCount: 0,
             outputRepublished: true,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken: cancellationToken,
+            operation: operation).ConfigureAwait(false);
     }
 
     private async Task HandleCommandAsync(SessionCommand command, CancellationToken cancellationToken)
@@ -651,16 +684,21 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                     break;
                 }
 
+                IndexingObservationOperation? operation = null;
                 try
                 {
+                    operation = _observation.BeginOperation(refresh.OperationKind);
+                    operation.SetStage(IndexingStages.ReconcilingChanges);
                     TrySetStatusIfActive(IncrementalSessionStatus.Refreshing);
                     var result = await ReconcileAsync(
                             refresh.Target,
                             forceCold: refresh.Rebuild,
                             publishOutput: refresh.PublishOutput,
                             includeGraph: true,
+                            operation,
                             cancellationToken)
                         .ConfigureAwait(false);
+                    operation.Complete();
                     TrySetStatusIfActive(IncrementalSessionStatus.Ready);
                     // A completed refresh is the foreground readiness barrier.
                     // Publish the state before completing the task so callers
@@ -670,16 +708,19 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                 }
                 catch (OperationCanceledException)
                 {
+                    operation?.Complete("cancelled", "The refresh was cancelled.");
                     refresh.Completion.TrySetCanceled(cancellationToken);
                     throw;
                 }
                 catch (Exception exception) when (exception is not OperationCanceledException)
                 {
+                    operation?.Complete("failed", exception.Message);
                     TrySetStatusIfActive(IncrementalSessionStatus.Ready);
                     refresh.Completion.TrySetException(exception);
                 }
                 finally
                 {
+                    operation?.Dispose();
                     EndRefresh(refresh.Completion);
                 }
 
@@ -703,17 +744,24 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(
             sessionCancellationToken,
             command.RequestCancellationToken);
+        IndexingObservationOperation? operation = null;
         try
         {
+            operation = _observation.BeginOperation("query_index");
+            operation.SetStage(IndexingStages.ReconcilingChanges);
             await ReconcileAsync(
                     command.Target,
                     forceCold: false,
                     publishOutput: false,
                     includeGraph: false,
+                    operation,
                     requestCancellation.Token)
                 .ConfigureAwait(false);
             requestCancellation.Token.ThrowIfCancellationRequested();
-            var view = CreateSemanticEvidenceView(command.Target, requestCancellation.Token);
+            var view = CreateSemanticEvidenceView(
+                command.Target,
+                requestCancellation.Token,
+                operation);
             var mediator = new WatcherManagementMediator(new WatcherManagementServiceProvider());
             var response = await mediator
                 .Send(
@@ -721,11 +769,13 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                     requestCancellation.Token)
                 .ConfigureAwait(false);
             command.Completion.TrySetResult(response);
+            operation.Complete();
         }
         catch (OperationCanceledException) when (
             command.RequestCancellationToken.IsCancellationRequested
             && !sessionCancellationToken.IsCancellationRequested)
         {
+            operation?.Complete("cancelled", "The semantic query was cancelled.");
             command.Completion.TrySetCanceled(command.RequestCancellationToken);
         }
         catch (OperationCanceledException) when (sessionCancellationToken.IsCancellationRequested)
@@ -733,10 +783,12 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             // The command has already left the queue, so the worker's
             // pending-command drain cannot complete it during shutdown.
             // Complete active semantic work explicitly before the worker exits.
+            operation?.Complete("cancelled", "The semantic query was cancelled during shutdown.");
             command.Completion.TrySetCanceled(sessionCancellationToken);
         }
         catch (SemanticQueryException exception)
         {
+            operation?.Complete("failed", exception.Message);
             command.Completion.TrySetResult(SemanticQueryResponse.Failure(
                 _semanticMode == "cold" ? null : _sessionId,
                 _semanticMode,
@@ -747,6 +799,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         }
         catch (NotSupportedException exception)
         {
+            operation?.Complete("failed", exception.Message);
             command.Completion.TrySetResult(SemanticQueryResponse.Failure(
                 _semanticMode == "cold" ? null : _sessionId,
                 _semanticMode,
@@ -757,6 +810,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
+            operation?.Complete("failed", exception.Message);
             command.Completion.TrySetResult(SemanticQueryResponse.Failure(
                 _semanticMode == "cold" ? null : _sessionId,
                 _semanticMode,
@@ -764,6 +818,10 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                 "internal_error",
                 exception.Message,
                 _requestIdentity.CanonicalKey));
+        }
+        finally
+        {
+            operation?.Dispose();
         }
     }
 
@@ -774,17 +832,25 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(
             sessionCancellationToken,
             command.RequestCancellationToken);
+        IndexingObservationOperation? operation = null;
         try
         {
+            operation = _observation.BeginOperation("export");
+            operation.SetStage(IndexingStages.ReconcilingChanges);
             await ReconcileAsync(
                     command.Target,
                     forceCold: false,
                     publishOutput: false,
                     includeGraph: false,
+                    operation,
                     requestCancellation.Token)
                 .ConfigureAwait(false);
             requestCancellation.Token.ThrowIfCancellationRequested();
-            var view = CreateSemanticEvidenceView(command.Target, requestCancellation.Token);
+            var view = CreateSemanticEvidenceView(
+                command.Target,
+                requestCancellation.Token,
+                operation);
+            operation.SetStage(IndexingStages.Serializing);
             if (view.InputSnapshot.IsKnownInput(command.OutputPath)
                 || view.InputSnapshot.IsKnownInputOnFileSystem(command.OutputPath)
                 || (_outputPath is not null
@@ -832,19 +898,23 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                     graph.Nodes.Length,
                     graph.Edges.Length));
             command.Completion.TrySetResult(response);
+            operation.Complete();
         }
         catch (OperationCanceledException) when (
             command.RequestCancellationToken.IsCancellationRequested
             && !sessionCancellationToken.IsCancellationRequested)
         {
+            operation?.Complete("cancelled", "The semantic export was cancelled.");
             command.Completion.TrySetCanceled(command.RequestCancellationToken);
         }
         catch (OperationCanceledException) when (sessionCancellationToken.IsCancellationRequested)
         {
+            operation?.Complete("cancelled", "The semantic export was cancelled during shutdown.");
             command.Completion.TrySetCanceled(sessionCancellationToken);
         }
         catch (SemanticQueryException exception)
         {
+            operation?.Complete("failed", exception.Message);
             command.Completion.TrySetResult(SemanticQueryResponse.Failure(
                 _semanticMode == "cold" ? null : _sessionId,
                 _semanticMode,
@@ -855,6 +925,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
+            operation?.Complete("failed", exception.Message);
             command.Completion.TrySetResult(SemanticQueryResponse.Failure(
                 _semanticMode == "cold" ? null : _sessionId,
                 _semanticMode,
@@ -863,6 +934,10 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                 exception.Message,
                 _requestIdentity.CanonicalKey));
         }
+        finally
+        {
+            operation?.Dispose();
+        }
     }
 
     private async Task<IncrementalRefreshResult> ReconcileAsync(
@@ -870,9 +945,11 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         bool forceCold,
         bool publishOutput,
         bool includeGraph,
+        IndexingObservationOperation? operation,
         CancellationToken cancellationToken)
     {
         ValidateTarget(target);
+        operation?.SetStage(IndexingStages.ReconcilingChanges);
         DrainFileEvents();
         DiscardAlreadyConsumedDependencyChanges();
         forceCold |= IsEventDeliveryUntrusted()
@@ -900,6 +977,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             _generation = _generation.AdvanceEventsThrough(
                 Math.Max(_generation.EventGeneration, target.EventGeneration));
             _generation = MarkGenerationIndexed(target.EventGeneration);
+            PublishEvidenceObservation();
             if (!publishOutput)
             {
                 return CreateUnpublishedResult(
@@ -913,7 +991,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                     extractedProjectCount: 0,
                     reusedProjectCount: _contributions.Count,
                     outputRepublished: _generation.PublishedGeneration < target.EventGeneration,
-                    cancellationToken)
+                    cancellationToken: cancellationToken,
+                    operation: operation)
                 .ConfigureAwait(false);
             ClearDirtyPaths(duePaths, target.EventGeneration);
             return result;
@@ -928,6 +1007,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             _generation = _generation.AdvanceEventsThrough(
                 Math.Max(_generation.EventGeneration, target.EventGeneration));
             _generation = MarkGenerationIndexed(target.EventGeneration);
+            PublishEvidenceObservation();
             if (!publishOutput)
             {
                 return CreateUnpublishedResult(
@@ -941,7 +1021,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                     extractedProjectCount: 0,
                     reusedProjectCount: _contributions.Count,
                     outputRepublished: true,
-                    cancellationToken)
+                    cancellationToken: cancellationToken,
+                    operation: operation)
                 .ConfigureAwait(false);
             ClearDirtyPaths(duePaths, target.EventGeneration);
             return pendingPublication;
@@ -952,7 +1033,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         if (fullRebuild)
         {
             var trustVersionAtStart = CaptureEventTrustVersion();
-            await LoadAndExtractAllAsync(cancellationToken).ConfigureAwait(false);
+            await LoadAndExtractAllAsync(cancellationToken, operation).ConfigureAwait(false);
             DrainFileEvents();
             CaptureConsumedDependencyBaselines();
             extractedProjectCount = _contributions.Count;
@@ -966,10 +1047,10 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         }
         else
         {
-            var updated = await ApplySourceChangesAsync(duePaths, cancellationToken).ConfigureAwait(false);
+            var updated = await ApplySourceChangesAsync(duePaths, operation, cancellationToken).ConfigureAwait(false);
             if (updated is null)
             {
-                await LoadAndExtractAllAsync(cancellationToken).ConfigureAwait(false);
+                await LoadAndExtractAllAsync(cancellationToken, operation).ConfigureAwait(false);
                 DrainFileEvents();
                 CaptureConsumedDependencyBaselines();
                 extractedProjectCount = _contributions.Count;
@@ -983,15 +1064,26 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             else
             {
                 _currentRoslynSolution = updated;
-                await RefreshAnalyzedProjectsAsync(updated, cancellationToken).ConfigureAwait(false);
+                await RefreshAnalyzedProjectsAsync(updated, operation, cancellationToken).ConfigureAwait(false);
+                operation?.SetStage(IndexingStages.Fingerprinting);
                 var newFingerprints = new IncrementalProjectFingerprintBuilder().BuildAll(_loadedSolution!);
                 dirtyProjectKeys = ExpandReverseDependencies(dirtyProjectKeys, newFingerprints);
+                using var catalogPhase = operation?.BeginPhase(IndexingStages.Cataloging);
                 var catalog = await new DeclarationCatalogBuilder()
-                    .BuildAsync(_loadedSolution!, cancellationToken)
+                    .BuildAsync(
+                        _loadedSolution!,
+                        progress: progress => ReportCatalogProgress(catalogPhase, progress),
+                        cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
+                using var extractionPhase = operation?.BeginPhase(IndexingStages.ExtractingRelationships);
                 var extractor = new SemanticReferenceExtractor();
                 var extracted = await extractor
-                    .ExtractContributionsAsync(_loadedSolution!, catalog, dirtyProjectKeys, cancellationToken)
+                    .ExtractContributionsAsync(
+                        _loadedSolution!,
+                        catalog,
+                        dirtyProjectKeys,
+                        progress: progress => ReportExtractionProgress(extractionPhase, progress),
+                        cancellationToken: cancellationToken)
                     .ConfigureAwait(false);
                 var extractedByProject = extracted.ToDictionary(
                     contribution => contribution.Project.Key,
@@ -1029,6 +1121,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                 _catalog = catalog;
                 _fingerprints = newFingerprints;
                 _contributions = merged;
+                _lastExtractedProjectCount = extractedProjectCount;
+                _lastReusedProjectCount = reusedProjectCount;
                 _globalDiagnostics = _loadedSolution.Diagnostics
                     .Select(diagnostic => $"{diagnostic.Kind}: {diagnostic.Message}")
                     .Concat(_inputSnapshot.InputDiscoveryDiagnostics)
@@ -1043,6 +1137,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         _generation = _generation.AdvanceEventsThrough(
             Math.Max(_generation.EventGeneration, target.EventGeneration));
         _generation = MarkGenerationIndexed(target.EventGeneration);
+        PublishEvidenceObservation();
         if (!publishOutput)
         {
             // Recovery and opportunistic background indexing may update the
@@ -1063,7 +1158,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             extractedProjectCount,
             reusedProjectCount,
             outputRepublished: true,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken: cancellationToken,
+            operation: operation).ConfigureAwait(false);
         ClearDirtyPaths(duePaths, target.EventGeneration);
         return published;
     }
@@ -1077,13 +1173,30 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 
         DrainFileEvents();
         var target = CaptureCurrentTarget();
-        await ReconcileAsync(
-                target,
-                forceCold: false,
-                publishOutput: false,
-                includeGraph: false,
-                cancellationToken)
-            .ConfigureAwait(false);
+        var operation = _observation.BeginOperation("background_refresh");
+        try
+        {
+            operation.SetStage(IndexingStages.ReconcilingChanges);
+            await ReconcileAsync(
+                    target,
+                    forceCold: false,
+                    publishOutput: false,
+                    includeGraph: false,
+                    operation,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            operation.Complete();
+        }
+        catch (OperationCanceledException)
+        {
+            operation.Complete("cancelled", "The background refresh was cancelled.");
+            throw;
+        }
+        catch (Exception exception)
+        {
+            operation.Complete("failed", exception.Message);
+            throw;
+        }
     }
 
     private IncrementalRefreshResult CreateUnpublishedResult(
@@ -1116,7 +1229,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         int extractedProjectCount,
         int reusedProjectCount,
         bool outputRepublished,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IndexingObservationOperation? operation = null)
     {
         var outputPath = _outputPath
             ?? throw new InvalidOperationException("This query-only session does not publish a canonical output.");
@@ -1128,6 +1242,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             .Distinct(StringComparer.Ordinal)
             .OrderBy(diagnostic => diagnostic, StringComparer.Ordinal)
             .ToArray();
+        operation?.SetStage(IndexingStages.Serializing);
         var didPublish = outputRepublished;
         var outputDigest = outputRepublished
             ? await _outputPublisher.PublishAsync(outputPath, graph, diagnostics, cancellationToken).ConfigureAwait(false)
@@ -1155,6 +1270,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             _globalDiagnostics,
             outputPath,
             outputDigest);
+        operation?.SetStage(IndexingStages.WritingCache);
         await _cacheStore.SaveAsync(cachePath, state, cancellationToken).ConfigureAwait(false);
         Interlocked.Exchange(ref _publicationPending, 0);
         return new IncrementalRefreshResult(
@@ -1188,18 +1304,22 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             .ConfigureAwait(false);
     }
 
-    private async Task LoadAndExtractAllAsync(CancellationToken cancellationToken)
+    private async Task LoadAndExtractAllAsync(
+        CancellationToken cancellationToken,
+        IndexingObservationOperation? operation = null)
     {
         // A newly discovered external root is subscribed only after the first
         // evaluated load. Repeat once after coverage is established so an edit
         // in that observation gap cannot survive in the published snapshot.
-        while (await LoadAndExtractAllOnceAsync(cancellationToken).ConfigureAwait(false))
+        while (await LoadAndExtractAllOnceAsync(cancellationToken, operation).ConfigureAwait(false))
         {
             cancellationToken.ThrowIfCancellationRequested();
         }
     }
 
-    private async Task<bool> LoadAndExtractAllOnceAsync(CancellationToken cancellationToken)
+    private async Task<bool> LoadAndExtractAllOnceAsync(
+        CancellationToken cancellationToken,
+        IndexingObservationOperation? operation = null)
     {
         var transitionPublished = false;
         try
@@ -1237,7 +1357,10 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 
             _loadedSolution?.Dispose();
             _loadedSolution = null;
-            _loadedSolution = await _projectLoader.LoadAsync(_request, cancellationToken).ConfigureAwait(false);
+            operation?.SetStage(IndexingStages.LoadingProjects);
+            _loadedSolution = _projectLoader is RoslynWorkspaceLoader roslynLoader
+                ? await roslynLoader.LoadAsync(_request, operation, cancellationToken).ConfigureAwait(false)
+                : await _projectLoader.LoadAsync(_request, cancellationToken).ConfigureAwait(false);
             _currentRoslynSolution = _loadedSolution.Workspace.CurrentSolution;
 
             // Publish evaluated membership before the expensive catalog/extraction
@@ -1251,11 +1374,23 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             Volatile.Write(ref _inputSnapshot, inputSnapshot);
             NotifyInputSnapshotChanged(inputSnapshot, out var requiresCoverageVerification);
 
-            _catalog = await new DeclarationCatalogBuilder().BuildAsync(_loadedSolution, cancellationToken).ConfigureAwait(false);
+            using var catalogPhase = operation?.BeginPhase(IndexingStages.Cataloging);
+            _catalog = await new DeclarationCatalogBuilder()
+                .BuildAsync(
+                    _loadedSolution,
+                    progress: progress => ReportCatalogProgress(catalogPhase, progress),
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            using var extractionPhase = operation?.BeginPhase(IndexingStages.ExtractingRelationships);
             var extractor = new SemanticReferenceExtractor();
             var extracted = await extractor
-                .ExtractContributionsAsync(_loadedSolution, _catalog, cancellationToken: cancellationToken)
+                .ExtractContributionsAsync(
+                    _loadedSolution,
+                    _catalog,
+                    progress: progress => ReportExtractionProgress(extractionPhase, progress),
+                    cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
+            operation?.SetStage(IndexingStages.Fingerprinting);
             _fingerprints = new IncrementalProjectFingerprintBuilder().BuildAll(_loadedSolution);
             _contributions = extracted.ToDictionary(
                 contribution => contribution.Project.Key,
@@ -1264,6 +1399,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                     contribution.Graph,
                     contribution.Diagnostics),
                 StringComparer.Ordinal);
+            _lastExtractedProjectCount = _contributions.Count;
+            _lastReusedProjectCount = 0;
             _globalDiagnostics = _loadedSolution.Diagnostics
                 .Select(diagnostic => $"{diagnostic.Kind}: {diagnostic.Message}")
                 .Concat(inputSnapshot.InputDiscoveryDiagnostics)
@@ -1271,6 +1408,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                 .Distinct(StringComparer.Ordinal)
                 .OrderBy(diagnostic => diagnostic, StringComparer.Ordinal)
                 .ToImmutableArray();
+            operation?.SetStage(IndexingStages.MergingEvidence);
             MarkEvidenceReplaced();
             Volatile.Write(
                 ref _requiresColdReconciliation,
@@ -1296,6 +1434,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 
     private async Task<Solution?> ApplySourceChangesAsync(
         IReadOnlyList<string> duePaths,
+        IndexingObservationOperation? operation,
         CancellationToken cancellationToken)
     {
         if (_loadedSolution is null || _currentRoslynSolution is null)
@@ -1304,8 +1443,10 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         }
 
         var solution = _currentRoslynSolution;
-        foreach (var path in duePaths)
+        operation?.SetStage(IndexingStages.DiscoveringInputs);
+        for (var pathIndex = 0; pathIndex < duePaths.Count; pathIndex++)
         {
+            var path = duePaths[pathIndex];
             cancellationToken.ThrowIfCancellationRequested();
             var exists = File.Exists(path);
             var changedDocument = false;
@@ -1333,14 +1474,21 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             {
                 return null;
             }
+
+            operation?.ReportWork(pathIndex + 1, duePaths.Count, "files", path);
         }
 
         return solution;
     }
 
-    private async Task RefreshAnalyzedProjectsAsync(Solution solution, CancellationToken cancellationToken)
+    private async Task RefreshAnalyzedProjectsAsync(
+        Solution solution,
+        IndexingObservationOperation? operation,
+        CancellationToken cancellationToken)
     {
         var projects = new List<AnalyzedProject>(_loadedSolution!.Projects.Length);
+        operation?.SetStage(IndexingStages.Compiling);
+        var projectIndex = 0;
         foreach (var existing in _loadedSolution.Projects)
         {
             var project = solution.GetProject(existing.Project.Id);
@@ -1356,6 +1504,11 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             }
 
             projects.Add(new AnalyzedProject(project, existing.Identity, compilation));
+            operation?.ReportWork(
+                ++projectIndex,
+                _loadedSolution.Projects.Length,
+                "projects",
+                project.Name);
         }
 
         _loadedSolution.ReplaceProjects(projects);
@@ -1715,17 +1868,28 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 
     private SemanticEvidenceView CreateSemanticEvidenceView(
         RefreshTarget target,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IndexingObservationOperation? operation = null)
     {
         if (_loadedSolution is null || _catalog is null)
         {
             throw new InvalidOperationException("Semantic evidence is not ready.");
         }
 
+        var indexWasBuilt = _semanticIndex is null;
+        if (indexWasBuilt)
+        {
+            operation?.SetStage(IndexingStages.BuildingQueryIndex);
+        }
+
         _semanticIndex ??= SemanticEvidenceIndex.Create(
             _catalog,
             _contributions.Values,
             cancellationToken);
+        if (indexWasBuilt)
+        {
+            PublishEvidenceObservation();
+        }
         return new SemanticEvidenceView(
             _semanticMode == "cold" ? Guid.Empty : _sessionId,
             _semanticMode,
@@ -1742,6 +1906,59 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             _contributions.Values
                 .SelectMany(contribution => contribution.Diagnostics)
                 .ToArray());
+    }
+
+    private void PublishEvidenceObservation()
+    {
+        if (_loadedSolution is null || _catalog is null)
+        {
+            return;
+        }
+
+        var documentInstances = _loadedSolution.Projects
+            .Sum(project => project.Project.Documents.LongCount());
+        var syntaxTrees = _loadedSolution.Projects
+            .Sum(project => project.Compilation.SyntaxTrees.LongCount());
+        _observation.PublishEvidence(new ObservationEvidenceSummary(
+            _evidenceRevision,
+            _generation.IndexedGeneration,
+            _loadedSolution.Projects.Length,
+            documentInstances,
+            syntaxTrees,
+            SourceGeneratedDocuments: null,
+            Declarations: _catalog.Declarations.Length,
+            ContributionNodes: _contributions.Values.Sum(contribution => (long)contribution.Graph.Nodes.Length),
+            ContributionEdges: _contributions.Values.Sum(contribution => (long)contribution.Graph.Edges.Length),
+            SemanticIndexBuilt: _semanticIndex is not null,
+            SemanticIndexEdges: _semanticIndex?.Edges.Length,
+            QueryCachesBuilt: _semanticIndex is null ? Array.Empty<string>() : ["semantic_index"],
+            ExtractedProjects: _lastExtractedProjectCount,
+            ReusedProjects: _lastReusedProjectCount,
+            ObservedAtUtc: DateTimeOffset.UtcNow));
+    }
+
+    private static void ReportCatalogProgress(
+        IndexingObservationPhase? phase,
+        DeclarationCatalogBuilder.CatalogProgress progress)
+    {
+        phase?.SetStage(IndexingStages.Cataloging, progress.ProjectName);
+        phase?.ReportWork(
+            progress.CompletedProjects,
+            progress.TotalProjects,
+            "projects",
+            progress.ProjectName);
+    }
+
+    private static void ReportExtractionProgress(
+        IndexingObservationPhase? phase,
+        SemanticReferenceExtractor.ExtractionProgress progress)
+    {
+        phase?.SetStage(progress.Stage, progress.Detail);
+        if (progress.Completed > 0
+            || (progress.Stage == IndexingStages.ExtractingReferences && progress.Total is not null))
+        {
+            phase?.ReportWork(progress.Completed, progress.Total, progress.Unit, progress.Detail);
+        }
     }
 
     private static string GetInternalStateDirectory(string outputPath)
@@ -1890,6 +2107,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         RefreshTarget Target,
         bool Rebuild,
         bool PublishOutput,
+        string OperationKind,
         TaskCompletionSource<IncrementalRefreshResult> Completion) : SessionCommand;
 
     private sealed record WatcherInvalidatedCommand(string Reason) : SessionCommand;

@@ -110,7 +110,9 @@ internal static class WatcherManagementCli
         {
             Console.WriteLine(
                 $"{session.SessionId:D} {session.Reachability,-14} {session.LifecycleState,-10} "
-                + $"ready={session.Ready,-5} pid={session.ProcessId} input={session.InputPath}");
+                + $"ready={session.Ready,-5} pid={session.ProcessId} "
+                + $"stage={session.Stage ?? "idle",-24} rss={FormatBytes(session.WorkingSetBytes),-12} "
+                + $"uptime={FormatElapsed(session.UptimeMilliseconds)} input={session.InputPath}");
         }
 
         foreach (var diagnostic in diagnostics)
@@ -143,7 +145,36 @@ internal static class WatcherManagementCli
 
         var response = options.Kind == WatcherManagementCommandKind.Inspect
             ? await client.InspectAsync(descriptor, TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false)
-            : await client.StopAsync(descriptor, TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+            : options.Kind == WatcherManagementCommandKind.Diagnostics
+                ? await client.DiagnosticsAsync(descriptor, TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false)
+                : await client.StopAsync(descriptor, TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+        if (options.Kind == WatcherManagementCommandKind.Diagnostics
+            && response.Success)
+        {
+            if (response.Diagnostics is null)
+            {
+                return WriteFailure(
+                    options.Json,
+                    "diagnostics_missing",
+                    "The watcher reported success but did not return a diagnostics report.",
+                    exitCode: 1);
+            }
+
+            var reportPath = Path.GetFullPath(options.OutputPath!);
+            await WriteDiagnosticsReportAsync(reportPath, response.Diagnostics, cancellationToken).ConfigureAwait(false);
+            if (options.Json)
+            {
+                Console.WriteLine(JsonSerializer.Serialize(
+                    new DiagnosticsCliResponse(true, reportPath, null, null),
+                    JsonOptions));
+            }
+            else
+            {
+                Console.WriteLine($"Wrote diagnostics to {reportPath}.");
+            }
+
+            return 0;
+        }
         if (options.Json)
         {
             Console.WriteLine(JsonSerializer.Serialize(response, JsonOptions));
@@ -162,6 +193,11 @@ internal static class WatcherManagementCli
             Console.WriteLine($"output: {inspection.OutputPath ?? "<none>"}");
             Console.WriteLine($"semantic-endpoint: {inspection.SemanticEndpoint ?? "<none>"}");
             Console.WriteLine($"generations: events={inspection.EventGeneration}, indexed={inspection.IndexedGeneration}, published={inspection.PublishedGeneration}");
+            if (inspection.Observation?.StartupPending == true)
+            {
+                Console.WriteLine($"startup: pending ({inspection.Observation.StartupDetail ?? "host barrier"})");
+            }
+            WriteObservationText(inspection.Observation);
         }
 
         if (!response.Success)
@@ -181,6 +217,108 @@ internal static class WatcherManagementCli
 
         return 0;
     }
+
+    private static async Task WriteDiagnosticsReportAsync(
+        string outputPath,
+        WatcherDiagnosticsSnapshot report,
+        CancellationToken cancellationToken)
+    {
+        var outputDirectory = Path.GetDirectoryName(outputPath)
+            ?? throw new IOException("The diagnostics output path has no directory.");
+        Directory.CreateDirectory(outputDirectory);
+        var temporaryPath = Path.Combine(
+            outputDirectory,
+            $".{Path.GetFileName(outputPath)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            var payload = JsonSerializer.SerializeToUtf8Bytes(report, JsonOptions);
+            await using (var stream = new FileStream(
+                temporaryPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 64 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan))
+            {
+                await stream.WriteAsync(payload, cancellationToken).ConfigureAwait(false);
+                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+                stream.Flush(flushToDisk: true);
+            }
+
+            File.Move(temporaryPath, outputPath, overwrite: false);
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(temporaryPath))
+                {
+                    File.Delete(temporaryPath);
+                }
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
+
+    private static void WriteObservationText(IndexingObservationSnapshot? observation)
+    {
+        if (observation is null)
+        {
+            return;
+        }
+
+        var activity = observation.Activity;
+        Console.WriteLine($"activity: {(activity is null ? "idle" : $"{activity.OperationKind}/{activity.Stage} ({activity.OperationElapsedMilliseconds}ms)")}");
+        if (activity?.Completed is not null)
+        {
+            Console.WriteLine($"progress: {activity.Completed}/{activity.Total?.ToString() ?? "?"} {activity.Unit}");
+        }
+
+        var evidence = observation.Evidence;
+        if (evidence is not null)
+        {
+            Console.WriteLine($"evidence: {evidence.Projects} projects, {evidence.DocumentInstances} document instances, {evidence.Declarations} declarations, {evidence.ContributionEdges} contribution edges (revision {evidence.EvidenceRevision})");
+            Console.WriteLine($"query-index: {(evidence.SemanticIndexBuilt ? $"built ({evidence.SemanticIndexEdges} edges)" : "not built")}");
+            Console.WriteLine($"last-indexing-result: extracted={evidence.ExtractedProjects}, reused={evidence.ReusedProjects}");
+        }
+
+        var resources = observation.Resources;
+        if (resources is not null)
+        {
+            Console.WriteLine($"memory: rss={FormatBytes(resources.WorkingSetBytes)}, peak-rss={FormatBytes(resources.PeakWorkingSetBytes)}, managed-heap-estimate={FormatBytes(resources.ManagedHeapEstimateBytes)}");
+            var sampleAge = Math.Max(0, (observation.ObservedAtUtc - resources.SampledAtUtc).TotalMilliseconds);
+            Console.WriteLine($"memory-sample-age: {FormatElapsed((long)sampleAge)}");
+        }
+
+        if (observation.LastOperation is { } lastOperation)
+        {
+            Console.WriteLine($"last-operation: {lastOperation.OperationKind} {lastOperation.Outcome} ({FormatElapsed(lastOperation.ElapsedMilliseconds)})");
+        }
+
+        if (observation.Recovery.Attempts > 0)
+        {
+            Console.WriteLine($"recovery: attempts={observation.Recovery.Attempts}, successes={observation.Recovery.Successes}, failures={observation.Recovery.Failures}");
+        }
+
+        if (observation.RecentEventsOmitted > 0 || observation.MessagesTruncated > 0)
+        {
+            Console.WriteLine($"diagnostics-bounds: events-omitted={observation.RecentEventsOmitted}, messages-truncated={observation.MessagesTruncated}");
+        }
+    }
+
+    private static string FormatBytes(long? bytes) =>
+        bytes is null
+            ? "<unavailable>"
+            : bytes.Value >= 1024L * 1024 * 1024
+                ? $"{bytes.Value / (1024d * 1024 * 1024):0.0} GiB"
+                : $"{bytes.Value / (1024d * 1024):0.0} MiB";
+
+    private static string FormatElapsed(long? milliseconds) =>
+        milliseconds is null
+            ? "<unknown>"
+            : TimeSpan.FromMilliseconds(milliseconds.Value).ToString(@"dd\.hh\:mm\:ss");
 
     private static WatcherSessionDescriptor ResolveDescriptor(
         WatcherSessionRegistry registry,
@@ -227,7 +365,12 @@ internal static class WatcherManagementCli
             inspection?.IndexedGeneration,
             inspection?.PublishedGeneration,
             probe.Descriptor.SemanticEndpoint,
-            probe.Descriptor.SemanticProtocolVersion);
+            probe.Descriptor.SemanticProtocolVersion,
+            inspection?.Observation?.Activity?.Stage
+                ?? (inspection?.Observation?.StartupPending == true ? "startup_pending" : null),
+            inspection?.Observation?.Resources?.WorkingSetBytes,
+            inspection?.Observation?.Resources?.PeakWorkingSetBytes,
+            inspection?.Observation?.UptimeMilliseconds);
     }
 
     private static int WriteFailure(
@@ -284,11 +427,21 @@ internal static class WatcherManagementCli
         [property: JsonPropertyName("indexed_generation")] long? IndexedGeneration,
         [property: JsonPropertyName("published_generation")] long? PublishedGeneration,
         [property: JsonPropertyName("semantic_endpoint")] string? SemanticEndpoint,
-        [property: JsonPropertyName("semantic_protocol_version")] int? SemanticProtocolVersion);
+        [property: JsonPropertyName("semantic_protocol_version")] int? SemanticProtocolVersion,
+        [property: JsonPropertyName("stage")] string? Stage,
+        [property: JsonPropertyName("working_set_bytes")] long? WorkingSetBytes,
+        [property: JsonPropertyName("peak_working_set_bytes")] long? PeakWorkingSetBytes,
+        [property: JsonPropertyName("uptime_ms")] long? UptimeMilliseconds);
 
     private sealed record WatcherManagementErrorResponse(
         [property: JsonPropertyName("schema_version")] string SchemaVersion,
         [property: JsonPropertyName("success")] bool Success,
         [property: JsonPropertyName("error_code")] string ErrorCode,
         [property: JsonPropertyName("message")] string Message);
+
+    private sealed record DiagnosticsCliResponse(
+        [property: JsonPropertyName("success")] bool Success,
+        [property: JsonPropertyName("report_path")] string? ReportPath,
+        [property: JsonPropertyName("error_code")] string? ErrorCode,
+        [property: JsonPropertyName("message")] string? Message);
 }

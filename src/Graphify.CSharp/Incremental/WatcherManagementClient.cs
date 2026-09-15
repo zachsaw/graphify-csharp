@@ -40,6 +40,12 @@ internal sealed class WatcherManagementClient
         CancellationToken cancellationToken = default) =>
         SendAsync(descriptor, "stop", timeout, cancellationToken);
 
+    public Task<WatcherManagementResponse> DiagnosticsAsync(
+        WatcherSessionDescriptor descriptor,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default) =>
+        SendAsync(descriptor, "diagnostics", timeout, cancellationToken);
+
     public async Task<WatcherSessionProbeResult> ProbeAsync(
         WatcherSessionDescriptor descriptor,
         TimeSpan timeout,

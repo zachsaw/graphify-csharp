@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using Graphify.CSharp.Domain;
+using Graphify.CSharp.Incremental;
 using Microsoft.CodeAnalysis;
 
 namespace Graphify.CSharp.Roslyn;
@@ -50,6 +51,7 @@ public sealed class SemanticReferenceExtractor
         LoadedSolution solution,
         DeclarationCatalog catalog,
         IReadOnlySet<string>? projectKeys = null,
+        Action<ExtractionProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(solution);
@@ -60,6 +62,12 @@ public sealed class SemanticReferenceExtractor
             declaration => declaration.Node.Id,
             declaration => declaration.Identity.Project.Key,
             StringComparer.Ordinal);
+        progress?.Invoke(new ExtractionProgress(
+            IndexingStages.ExtractingRelationships,
+            0,
+            null,
+            "relationships",
+            null));
         var relationshipEdgesByProject = new SemanticDeclarationRelationshipExtractor()
             .Extract(solution, catalog, cancellationToken, projectKeys)
             .Where(edge => projectByNodeId.ContainsKey(edge.SourceId))
@@ -76,11 +84,23 @@ public sealed class SemanticReferenceExtractor
             .SelectMany(project => CreateProjectBatchWork(project))
             .Select((batch, index) => batch with { Index = index })
             .ToArray();
+        if (work.Length > 0)
+        {
+            var totalDocuments = work.Sum(batch => (long)batch.Documents.Length);
+            progress?.Invoke(new ExtractionProgress(
+                IndexingStages.ExtractingReferences,
+                0,
+                totalDocuments,
+                "document_instances",
+                null));
+        }
+
         var batchResults = await ExtractBatchesAsync(
                 solution,
                 catalog,
                 locations,
                 work,
+                progress,
                 cancellationToken)
             .ConfigureAwait(false);
         var resultsByProject = new Dictionary<string, List<BatchExtractionResult>>(StringComparer.Ordinal);
@@ -149,9 +169,12 @@ public sealed class SemanticReferenceExtractor
         DeclarationCatalog catalog,
         SourceLocationFactory locations,
         IReadOnlyList<BatchWork> work,
+        Action<ExtractionProgress>? progress,
         CancellationToken cancellationToken)
     {
         var results = new BatchExtractionResult[work.Count];
+        var totalDocuments = work.Sum(batch => (long)batch.Documents.Length);
+        long completedDocuments = 0;
         if (work.Count == 0)
         {
             return ImmutableArray<BatchExtractionResult>.Empty;
@@ -161,6 +184,8 @@ public sealed class SemanticReferenceExtractor
         {
             results[0] = await ExtractBatchAsync(solution, catalog, locations, work[0], cancellationToken)
                 .ConfigureAwait(false);
+            var completed = Interlocked.Add(ref completedDocuments, work[0].Documents.Length);
+            ReportBatchProgress(work[0], totalDocuments, completed, progress);
         }
         else
         {
@@ -180,11 +205,32 @@ public sealed class SemanticReferenceExtractor
                                 batch,
                                 token)
                             .ConfigureAwait(false);
+                        var completed = Interlocked.Add(ref completedDocuments, batch.Documents.Length);
+                        ReportBatchProgress(batch, totalDocuments, completed, progress);
                     })
                 .ConfigureAwait(false);
         }
 
         return results.ToImmutableArray();
+    }
+
+    private static void ReportBatchProgress(
+        BatchWork batch,
+        long totalDocuments,
+        long completedDocuments,
+        Action<ExtractionProgress>? progress)
+    {
+        if (progress is null)
+        {
+            return;
+        }
+
+        progress(new ExtractionProgress(
+            IndexingStages.ExtractingReferences,
+            completedDocuments,
+            totalDocuments,
+            "document_instances",
+            batch.Project.Project.Name));
     }
 
     private BatchWork[] CreateProjectBatchWork(AnalyzedProject project)
@@ -294,4 +340,11 @@ public sealed class SemanticReferenceExtractor
                 .Replace('\\', '/');
         return $"Semantic: skipped unsupported Roslyn operations in '{path}' for project '{project.Identity.RelativePath}': {exception.Message}";
     }
+
+    internal sealed record ExtractionProgress(
+        string Stage,
+        long Completed,
+        long? Total,
+        string Unit,
+        string? Detail);
 }

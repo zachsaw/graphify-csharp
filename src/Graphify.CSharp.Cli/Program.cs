@@ -87,6 +87,10 @@ public static class Program
                     managementOptions: new WatcherManagementOptions(
                         WatcherSessionRegistry.ResolveStateDirectory(),
                         GetToolVersion()));
+                await using var progress = options.NoProgress
+                    ? null
+                    : new CliProgressReporter(host.Observation);
+                progress?.Start();
                 var start = host.StartAsync(cancellationToken);
                 var stopRequested = host.WaitForStopRequestedAsync();
                 var startup = cancellationToken.CanBeCanceled
@@ -100,6 +104,7 @@ public static class Program
                 }
 
                 await startup.ConfigureAwait(false);
+                progress?.WriteCompletionSummary("Ready");
                 if (stopRequested.IsCompleted)
                 {
                     await host.DisposeAsync().ConfigureAwait(false);
@@ -139,16 +144,34 @@ public static class Program
                 return 0;
             }
 
-            var result = await new IncrementalRefreshEngine().RefreshAsync(
-                    request,
-                    options.OutputPath,
-                    options.Rebuild,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            var mode = result.ExtractedProjectCount == 0 ? "reused" : $"extracted {result.ExtractedProjectCount} project(s)";
-            Console.WriteLine(
-                $"Wrote {result.Graph.Nodes.Length} nodes and {result.Graph.Edges.Length} edges to {options.OutputPath} ({mode}, reused {result.ReusedProjectCount}).");
-            return 0;
+            var observation = new IndexingObservation();
+            var progressReporter = options.NoProgress
+                ? null
+                : new CliProgressReporter(observation);
+            progressReporter?.Start();
+            try
+            {
+                var result = await new IncrementalRefreshEngine(observation: observation).RefreshAsync(
+                        request,
+                        options.OutputPath,
+                        options.Rebuild,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                var mode = result.ExtractedProjectCount == 0 ? "reused" : $"extracted {result.ExtractedProjectCount} project(s)";
+                progressReporter?.WriteCompletionSummary("Completed");
+                Console.WriteLine(
+                    $"Wrote {result.Graph.Nodes.Length} nodes and {result.Graph.Edges.Length} edges to {options.OutputPath} ({mode}, reused {result.ReusedProjectCount}).");
+                return 0;
+            }
+            finally
+            {
+                if (progressReporter is not null)
+                {
+                    await progressReporter.DisposeAsync().ConfigureAwait(false);
+                }
+
+                await observation.DisposeAsync().ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

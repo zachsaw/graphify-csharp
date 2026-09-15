@@ -19,6 +19,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
     private readonly WatcherSessionRegistry? _managementRegistry;
     private readonly IReadOnlyList<WatcherRoot> _baseWatchRoots;
     private readonly IncrementalIndexSession _session;
+    private readonly IndexingObservation _observation;
     private readonly SemaphoreSlim _recoverySignal = new(0);
     private readonly CancellationTokenSource _stop = new();
     private readonly TaskCompletionSource<bool> _shutdown = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -64,7 +65,8 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
         IFileInventoryScanner? inventoryScanner = null,
         IFileChangeWatcherFactory? watcherFactory = null,
         Func<Guid>? sessionIdFactory = null,
-        WatcherManagementOptions? managementOptions = null)
+        WatcherManagementOptions? managementOptions = null,
+        IndexingObservation? observation = null)
     {
         _request = request ?? throw new ArgumentNullException(nameof(request));
         _outputPath = string.IsNullOrWhiteSpace(outputPath) ? null : Path.GetFullPath(outputPath);
@@ -80,6 +82,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             : new WatcherSessionRegistry(managementOptions.StateDirectory);
         _inventoryScanner = inventoryScanner ?? new FileInventoryScanner();
         _watcherFactory = watcherFactory ?? new FileSystemChangeWatcherFactory();
+        _observation = observation ?? new IndexingObservation();
         _baseWatchRoots = GetWatchRoots(request);
         _watchRoots = _baseWatchRoots.ToList();
         _inputSnapshot = WatcherInputSnapshot.CreateBootstrap(
@@ -96,10 +99,13 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             outputPublisher,
             sessionIdFactory,
             OnTrustLost,
-            OnInputSnapshotChanged);
+            OnInputSnapshotChanged,
+            observation: _observation);
     }
 
     public IncrementalIndexSession Session => _session;
+
+    internal IndexingObservation Observation => _observation;
 
     public string PipeName => _outputPath is null
         ? throw new InvalidOperationException("A query-only watcher has no legacy refresh endpoint.")
@@ -225,6 +231,8 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
 
     WatcherInspectionSnapshot IWatcherManagementHost.GetInspectionSnapshot() => GetInspectionSnapshot();
 
+    WatcherDiagnosticsSnapshot IWatcherManagementHost.GetDiagnosticsSnapshot() => GetDiagnosticsSnapshot();
+
     void IWatcherManagementHost.RequestStop() => RequestStop();
 
     Task IWatcherManagementHost.WaitForWorkStoppedAsync(CancellationToken cancellationToken) =>
@@ -256,7 +264,10 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
         }
     }
 
-    internal WatcherInspectionSnapshot GetInspectionSnapshot()
+    internal WatcherInspectionSnapshot GetInspectionSnapshot() =>
+        GetInspectionSnapshot(_observation.Snapshot());
+
+    private WatcherInspectionSnapshot GetInspectionSnapshot(IndexingObservationSnapshot observation)
     {
         var generation = _session.Generation;
         var ready = IsReady;
@@ -294,7 +305,19 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             generation.IndexedGeneration,
             _outputPath is null ? null : generation.PublishedGeneration,
             _managementOptions is null ? null : SemanticPipeName,
-            _managementOptions is null ? null : SemanticQueryProtocol.CurrentVersion);
+            _managementOptions is null ? null : SemanticQueryProtocol.CurrentVersion,
+            observation);
+    }
+
+    internal WatcherDiagnosticsSnapshot GetDiagnosticsSnapshot()
+    {
+        var observation = _observation.Snapshot();
+        return new(
+            "graphify-csharp/diagnostics/v1",
+            DateTimeOffset.UtcNow,
+            GetInspectionSnapshot(observation) with { Observation = null },
+            IndexingObservation.CreateRuntimeSnapshot(),
+            observation);
     }
 
     private async Task DisposeCoreAsync()
@@ -406,6 +429,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
 
             RecordCleanupFailure(TryDispose(lease));
             RecordCleanupFailure(await CaptureCleanupFailureAsync(_session.DisposeAsync().AsTask()).ConfigureAwait(false));
+            RecordCleanupFailure(await CaptureCleanupFailureAsync(_observation.DisposeAsync().AsTask()).ConfigureAwait(false));
             RecordCleanupFailure(TryDispose(outputLease));
             RecordCleanupFailure(TryDispose(_exportGate));
 
@@ -485,6 +509,12 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
         SemanticQueryServer? semanticServer = null;
         try
         {
+            // The host owns startup before the session worker exists. Start
+            // observation here so a slow lease, inventory or health barrier is
+            // still visible and resource samples begin before the first scan.
+            _observation.StartResourceSampling();
+            _observation.SetStartupPending(true, "initializing");
+
             // Output-backed watchers retain both ownership barriers. Query-only
             // watchers deliberately acquire neither: their semantic state is
             // independent and has no canonical publication destination.
@@ -504,6 +534,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
                     outputLease?.Dispose();
                     lease = null;
                     outputLease = null;
+                    _observation.CompleteStartup("cancelled", "Watcher was stopped before startup completed.");
                     return;
                 }
 
@@ -546,12 +577,14 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             {
                 await StartControlServerAsync().ConfigureAwait(false);
             }
-            await RefreshInventoryBaselineAsync(
+            _observation.SetStartupPending(true, "inventory");
+            await RefreshInventoryWithObservationAsync(
                     _stop.Token,
                     allowBootstrap: true)
                 .ConfigureAwait(false);
 
             await _session.StartAsync(_stop.Token).ConfigureAwait(false);
+            _observation.SetStartupPending(true, "final inventory");
             await RefreshInventoryBaselineAsync(
                     _stop.Token,
                     reconcileDifferences: true,
@@ -567,15 +600,21 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
                 }
             }
 
+            _observation.SetStartupPending(true, "health check");
             MarkHealthy();
             // Startup is a foreground readiness barrier too. A watcher error
             // may have queued recovery while the initial Roslyn load was
             // running; do not let StartAsync return until that recovery has
             // either completed or the host has been stopped.
             await WaitUntilHealthyAsync(_stop.Token).ConfigureAwait(false);
+            _observation.CompleteStartup("succeeded");
         }
         catch (Exception exception)
         {
+            var outcome = exception is OperationCanceledException || _stop.IsCancellationRequested
+                ? "cancelled"
+                : "failed";
+            _observation.CompleteStartup(outcome, exception.Message);
             lock (_healthGate)
             {
                 if (Volatile.Read(ref _disposed) == 0)
@@ -843,6 +882,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             return;
         }
 
+        _observation.RecordEvent("recovery_started", reason);
         DisposeWatchers();
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -867,6 +907,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
                         reconcileDifferences: true,
                         publishOutput: false)
                     .ConfigureAwait(false);
+                _observation.RecordRecovery("succeeded", reason);
                 return;
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -876,6 +917,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             catch (Exception exception)
             {
                 DisposeWatchers();
+                _observation.RecordRecovery("failed", exception.Message);
                 SignalWatcherFailure(
                     $"Watcher recovery is retrying after '{reason}': {exception.Message}",
                     reportToSession: false);
@@ -1570,6 +1612,7 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
         }
 
         MarkUnhealthy();
+        _observation.RecordEvent("watcher_failure", reason);
         if (reportToSession)
         {
             try
@@ -1783,6 +1826,34 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             {
                 await _session.RecoverAsync(cancellationToken).ConfigureAwait(false);
             }
+        }
+    }
+
+    private async Task RefreshInventoryWithObservationAsync(
+        CancellationToken cancellationToken,
+        bool allowBootstrap = false,
+        bool preserveExistingBaseline = false)
+    {
+        using var operation = _observation.BeginOperation("inventory");
+        operation.SetStage(IndexingStages.Inventory);
+        try
+        {
+            await RefreshInventoryBaselineAsync(
+                    cancellationToken,
+                    allowBootstrap: allowBootstrap,
+                    preserveExistingBaseline: preserveExistingBaseline)
+                .ConfigureAwait(false);
+            operation.Complete();
+        }
+        catch (OperationCanceledException)
+        {
+            operation.Complete("cancelled", "Inventory was cancelled.");
+            throw;
+        }
+        catch (Exception exception)
+        {
+            operation.Complete("failed", exception.Message);
+            throw;
         }
     }
 

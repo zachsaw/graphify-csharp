@@ -29,6 +29,43 @@ public sealed class WatcherManagementServerTests
     }
 
     [Fact]
+    public async Task Info_is_an_inspect_alias_and_diagnostics_keeps_one_observation_payload()
+    {
+        var root = CreateTemporaryDirectory();
+        var sessionId = Guid.NewGuid();
+        var host = new FakeManagementHost(CreateSnapshot(sessionId, "ready", ready: true));
+        await using var server = new WatcherManagementServer(
+            sessionId,
+            host,
+            new WatcherManagementOptions(root, "test"));
+        await server.StartAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        var descriptor = CreateDescriptor(sessionId, server.PipeName, root);
+
+        var info = await SendRawAsync(
+            descriptor.ManagementEndpoint,
+            new WatcherManagementRequest(
+                WatcherManagementProtocol.CurrentVersion,
+                sessionId,
+                "info"));
+        Assert.True(info.Success);
+        Assert.Equal("inspect", info.Command);
+        Assert.NotNull(info.Inspection);
+        Assert.Null(info.Diagnostics);
+
+        var diagnostics = await new WatcherManagementClient().DiagnosticsAsync(
+            descriptor,
+            TimeSpan.FromSeconds(2));
+        Assert.True(diagnostics.Success);
+        Assert.Equal("diagnostics", diagnostics.Command);
+        Assert.NotNull(diagnostics.Diagnostics);
+        Assert.Null(diagnostics.Inspection);
+        Assert.NotNull(diagnostics.Diagnostics!.Inspection);
+        Assert.Null(diagnostics.Diagnostics.Inspection.Observation);
+
+        DeleteTemporaryDirectory(root);
+    }
+
+    [Fact]
     public async Task Invalid_protocol_and_session_requests_are_rejected_before_dispatch()
     {
         var root = CreateTemporaryDirectory();
@@ -57,6 +94,164 @@ public sealed class WatcherManagementServerTests
         Assert.Equal("session_mismatch", sessionResponse.ErrorCode);
         Assert.Equal(0, host.InspectCount);
         Assert.Equal(0, host.StopRequestCount);
+
+        DeleteTemporaryDirectory(root);
+    }
+
+    [Fact]
+    public async Task Unsupported_command_is_rejected_without_dispatch()
+    {
+        var root = CreateTemporaryDirectory();
+        var sessionId = Guid.NewGuid();
+        var host = new FakeManagementHost(CreateSnapshot(sessionId, "ready", ready: true));
+        await using var server = new WatcherManagementServer(
+            sessionId,
+            host,
+            new WatcherManagementOptions(root, "test"));
+        await server.StartAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        var response = await SendRawAsync(
+            CreateDescriptor(sessionId, server.PipeName, root).ManagementEndpoint,
+            new WatcherManagementRequest(
+                WatcherManagementProtocol.CurrentVersion,
+                sessionId,
+                "old-worker-diagnostics"));
+
+        Assert.False(response.Success);
+        Assert.Equal("unsupported_command", response.ErrorCode);
+        Assert.Equal(0, host.InspectCount);
+
+        DeleteTemporaryDirectory(root);
+    }
+
+    [Fact]
+    public async Task Malformed_json_is_returned_as_a_bounded_structured_error()
+    {
+        var root = CreateTemporaryDirectory();
+        var sessionId = Guid.NewGuid();
+        var host = new FakeManagementHost(CreateSnapshot(sessionId, "ready", ready: true));
+        await using var server = new WatcherManagementServer(
+            sessionId,
+            host,
+            new WatcherManagementOptions(root, "test"));
+        await server.StartAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        await using var client = await LocalIpcTransport.ConnectAsync(
+            server.PipeName,
+            TimeSpan.FromSeconds(5));
+        await WatcherManagementServer.WriteFrameAsync(
+            client,
+            "{ not valid json }"u8.ToArray(),
+            CancellationToken.None);
+        var payload = await WatcherManagementServer.ReadFrameAsync(
+            client,
+            CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        var response = JsonSerializer.Deserialize<WatcherManagementResponse>(payload)!;
+
+        Assert.False(response.Success);
+        Assert.Equal("invalid_request", response.ErrorCode);
+        Assert.True(payload.Length <= WatcherManagementProtocol.MaximumFrameBytes);
+        Assert.Equal(0, host.InspectCount);
+
+        DeleteTemporaryDirectory(root);
+    }
+
+    [Fact]
+    public async Task Oversized_diagnostics_are_reduced_to_a_bounded_protocol_error()
+    {
+        var root = CreateTemporaryDirectory();
+        var sessionId = Guid.NewGuid();
+        var huge = new string('x', 40_000);
+        var snapshot = CreateSnapshot(sessionId, "ready", ready: true) with
+        {
+            InputPath = huge,
+            RepositoryRoot = huge,
+        };
+        var host = new FakeManagementHost(snapshot);
+        await using var server = new WatcherManagementServer(
+            sessionId,
+            host,
+            new WatcherManagementOptions(root, "test"));
+        await server.StartAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        var (payload, response) = await SendRawWithPayloadAsync(
+            CreateDescriptor(sessionId, server.PipeName, root).ManagementEndpoint,
+            new WatcherManagementRequest(
+                WatcherManagementProtocol.CurrentVersion,
+                sessionId,
+                "diagnostics"));
+
+        Assert.True(payload.Length <= WatcherManagementProtocol.MaximumFrameBytes);
+        Assert.False(response.Success);
+        Assert.Equal("response_too_large", response.ErrorCode);
+
+        DeleteTemporaryDirectory(root);
+    }
+
+    [Fact]
+    public async Task Reduced_diagnostics_preserve_failure_meaning_and_report_omissions()
+    {
+        var root = CreateTemporaryDirectory();
+        var sessionId = Guid.NewGuid();
+        var durations = Enumerable.Range(0, 10_000)
+            .ToDictionary(index => $"stage-{index:D5}", _ => 1L, StringComparer.Ordinal);
+        var observation = new IndexingObservationSnapshot(
+            DateTimeOffset.UtcNow,
+            100,
+            null,
+            null,
+            null,
+            new ObservationOperationSummary(
+                1,
+                "startup",
+                1,
+                "succeeded",
+                DateTimeOffset.UtcNow,
+                100,
+                durations,
+                DateTimeOffset.UtcNow,
+                null),
+            new ObservationOperationSummary(
+                2,
+                "refresh",
+                1,
+                "failed",
+                DateTimeOffset.UtcNow,
+                100,
+                durations,
+                DateTimeOffset.UtcNow,
+                "refresh failed"),
+            new RecoveryObservationSummary(0, 0, 0, null, null),
+            Enumerable.Range(0, 32)
+                .Select(index => new ObservationEvent(
+                    DateTimeOffset.UtcNow,
+                    "stage",
+                    $"event-{index}",
+                    1))
+                .ToArray(),
+            new ObservationEvent(DateTimeOffset.UtcNow, "operation_failed", "failure marker", 2));
+        var host = new FakeManagementHost(
+            CreateSnapshot(sessionId, "ready", ready: true) with { Observation = observation });
+        await using var server = new WatcherManagementServer(
+            sessionId,
+            host,
+            new WatcherManagementOptions(root, "test"));
+        await server.StartAsync().WaitAsync(TimeSpan.FromSeconds(5));
+
+        var (payload, response) = await SendRawWithPayloadAsync(
+            CreateDescriptor(sessionId, server.PipeName, root).ManagementEndpoint,
+            new WatcherManagementRequest(
+                WatcherManagementProtocol.CurrentVersion,
+                sessionId,
+                "diagnostics"));
+
+        Assert.True(response.Success);
+        Assert.True(payload.Length <= WatcherManagementProtocol.MaximumFrameBytes);
+        var reduced = response.Diagnostics!.Observation;
+        Assert.Equal("operation_failed", reduced.LastFailure!.Kind);
+        Assert.Contains("initial_startup", reduced.OmittedFields!);
+        Assert.Contains("last_operation", reduced.OmittedFields!);
+        Assert.Contains("recent_events", reduced.OmittedFields!);
 
         DeleteTemporaryDirectory(root);
     }
@@ -187,14 +382,24 @@ public sealed class WatcherManagementServerTests
         string endpoint,
         WatcherManagementRequest request)
     {
+        var (_, response) = await SendRawWithPayloadAsync(endpoint, request);
+        return response;
+    }
+
+    private static async Task<(byte[] Payload, WatcherManagementResponse Response)> SendRawWithPayloadAsync(
+        string endpoint,
+        WatcherManagementRequest request)
+    {
         await using var client = await LocalIpcTransport.ConnectAsync(
             endpoint,
             TimeSpan.FromSeconds(5));
         var payload = JsonSerializer.SerializeToUtf8Bytes(request);
         await WatcherManagementServer.WriteFrameAsync(client, payload, CancellationToken.None);
         var responsePayload = await WatcherManagementServer.ReadFrameAsync(client, CancellationToken.None);
-        return JsonSerializer.Deserialize<WatcherManagementResponse>(responsePayload)
-            ?? throw new InvalidDataException("The test server returned no response.");
+        return (
+            responsePayload,
+            JsonSerializer.Deserialize<WatcherManagementResponse>(responsePayload)
+                ?? throw new InvalidDataException("The test server returned no response."));
     }
 
     private static WatcherSessionDescriptor CreateDescriptor(
@@ -282,6 +487,25 @@ public sealed class WatcherManagementServerTests
             Interlocked.Increment(ref _inspectCount);
             return _snapshot;
         }
+
+        public WatcherDiagnosticsSnapshot GetDiagnosticsSnapshot() =>
+            new(
+                "graphify-csharp/diagnostics/v1",
+                DateTimeOffset.UtcNow,
+                _snapshot with { Observation = null },
+                new ObservationRuntimeSnapshot("test", "test", "test", 1, false, 1),
+                _snapshot.Observation
+                    ?? new IndexingObservationSnapshot(
+                        DateTimeOffset.UtcNow,
+                        0,
+                        null,
+                        null,
+                        null,
+                        null,
+                        null,
+                        new RecoveryObservationSummary(0, 0, 0, null, null),
+                        Array.Empty<ObservationEvent>(),
+                        null));
 
         public void RequestStop()
         {

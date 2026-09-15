@@ -38,6 +38,7 @@ public sealed class SemanticQueryCommandLineTests
         Assert.Equal("Order", summary.Specification.Search);
         Assert.Equal("abc", summary.InstanceSelector);
         Assert.Equal(["project", "namespace"], summary.Specification.EffectiveGroupBy);
+        Assert.False(symbols.NoProgress);
     }
 
     [Fact]
@@ -63,6 +64,16 @@ public sealed class SemanticQueryCommandLineTests
         Assert.True(help.ShowHelp);
         Assert.Null(help.ColdRequest);
         Assert.Null(help.InstanceSelector);
+    }
+
+    [Fact]
+    public void Parses_no_progress_for_cold_queries_as_a_local_presentation_flag()
+    {
+        var options = SemanticQueryCommandLine.Parse(
+            ["query", "symbols", "Order", "--input", "Product.sln", "--no-progress"]);
+
+        Assert.True(options.NoProgress);
+        Assert.NotNull(options.ColdRequest);
     }
 
     [Fact]

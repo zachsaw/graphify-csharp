@@ -349,7 +349,7 @@ internal sealed class WatcherManagementServer : IAsyncDisposable
             return;
         }
 
-        if (command is not ("inspect" or "stop"))
+        if (command is not ("inspect" or "info" or "diagnostics" or "stop"))
         {
             await TryWriteResponseWithTimeoutAsync(
                     server,
@@ -357,7 +357,7 @@ internal sealed class WatcherManagementServer : IAsyncDisposable
                         _sessionId,
                         command,
                         "unsupported_command",
-                        "The management command must be 'inspect' or 'stop'."),
+                        "The management command must be 'inspect', 'info', 'diagnostics', or 'stop'."),
                     cancellationToken)
                 .ConfigureAwait(false);
             return;
@@ -371,9 +371,11 @@ internal sealed class WatcherManagementServer : IAsyncDisposable
         try
         {
             var mediator = new WatcherManagementMediator(new WatcherManagementServiceProvider());
-            response = command == "inspect"
+            response = command is "inspect" or "info"
                 ? await mediator.Send(new InspectSessionRequest(_host, _sessionId), requestTimeout.Token).ConfigureAwait(false)
-                : await mediator.Send(new StopSessionRequest(_host, _sessionId), requestTimeout.Token).ConfigureAwait(false);
+                : command == "diagnostics"
+                    ? await mediator.Send(new DiagnosticsSessionRequest(_host, _sessionId), requestTimeout.Token).ConfigureAwait(false)
+                    : await mediator.Send(new StopSessionRequest(_host, _sessionId), requestTimeout.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -392,7 +394,7 @@ internal sealed class WatcherManagementServer : IAsyncDisposable
             response = WatcherManagementResponse.ErrorResponse(
                 _sessionId,
                 command,
-                command == "stop" ? "stop_failed" : "inspect_failed",
+                command == "stop" ? "stop_failed" : command == "diagnostics" ? "diagnostics_failed" : "inspect_failed",
                 exception.Message);
         }
 
@@ -467,9 +469,112 @@ internal sealed class WatcherManagementServer : IAsyncDisposable
         WatcherManagementResponse response,
         CancellationToken cancellationToken)
     {
-        var payload = JsonSerializer.SerializeToUtf8Bytes(response, JsonOptions);
+        var payload = SerializeResponse(response);
         await WriteFrameAsync(stream, payload, cancellationToken).ConfigureAwait(false);
     }
+
+    private static byte[] SerializeResponse(WatcherManagementResponse response)
+    {
+        var payload = JsonSerializer.SerializeToUtf8Bytes(response, JsonOptions);
+        if (payload.Length <= WatcherManagementProtocol.MaximumFrameBytes)
+        {
+            return payload;
+        }
+
+        var reduced = response with
+        {
+            Inspection = TrimInspection(response.Inspection),
+            Diagnostics = TrimDiagnostics(response.Diagnostics),
+        };
+        payload = JsonSerializer.SerializeToUtf8Bytes(reduced, JsonOptions);
+        if (payload.Length <= WatcherManagementProtocol.MaximumFrameBytes)
+        {
+            return payload;
+        }
+
+        reduced = reduced with
+        {
+            Inspection = TrimLargeInspection(reduced.Inspection),
+            Diagnostics = TrimLargeDiagnostics(reduced.Diagnostics),
+        };
+        payload = JsonSerializer.SerializeToUtf8Bytes(reduced, JsonOptions);
+        if (payload.Length <= WatcherManagementProtocol.MaximumFrameBytes)
+        {
+            return payload;
+        }
+
+        var error = WatcherManagementResponse.ErrorResponse(
+            response.SessionId,
+            response.Command,
+            "response_too_large",
+            "The management response exceeded the 64 KiB protocol limit.");
+        payload = JsonSerializer.SerializeToUtf8Bytes(error, JsonOptions);
+        if (payload.Length > WatcherManagementProtocol.MaximumFrameBytes)
+        {
+            throw new InvalidDataException("The management error response exceeded the protocol limit.");
+        }
+
+        return payload;
+    }
+
+    private static IndexingObservationSnapshot? TrimObservation(IndexingObservationSnapshot? observation)
+    {
+        if (observation is null)
+        {
+            return null;
+        }
+
+        return observation with
+        {
+            RecentEvents = Array.Empty<ObservationEvent>(),
+            RecentEventsOmitted = checked(observation.RecentEventsOmitted + observation.RecentEvents.Count),
+            OmittedFields = AddOmittedFields(observation.OmittedFields, "recent_events"),
+        };
+    }
+
+    private static WatcherInspectionSnapshot? TrimInspection(WatcherInspectionSnapshot? inspection) =>
+        inspection is null
+            ? null
+            : inspection with { Observation = TrimObservation(inspection.Observation) };
+
+    private static WatcherInspectionSnapshot? TrimLargeInspection(WatcherInspectionSnapshot? inspection) =>
+        inspection is null
+            ? null
+            : inspection with { Observation = TrimLargeObservation(inspection.Observation) };
+
+    private static WatcherDiagnosticsSnapshot? TrimDiagnostics(WatcherDiagnosticsSnapshot? diagnostics) =>
+        diagnostics is null
+            ? null
+            : diagnostics with { Observation = TrimObservation(diagnostics.Observation)! };
+
+    private static WatcherDiagnosticsSnapshot? TrimLargeDiagnostics(WatcherDiagnosticsSnapshot? diagnostics) =>
+        diagnostics is null
+            ? null
+            : diagnostics with { Observation = TrimLargeObservation(diagnostics.Observation)! };
+
+    private static IndexingObservationSnapshot? TrimLargeObservation(IndexingObservationSnapshot? observation) =>
+        observation is null
+            ? null
+            : observation with
+            {
+                // Keep the compact latest-failure marker. Removing it would
+                // make "no failure" indistinguishable from "trimmed failure".
+                InitialStartup = null,
+                LastOperation = null,
+                OmittedFields = AddOmittedFields(
+                    observation.OmittedFields,
+                    "initial_startup",
+                    "last_operation"),
+            };
+
+    private static IReadOnlyList<string> AddOmittedFields(
+        IReadOnlyList<string>? existing,
+        params string[] additions) =>
+        (existing ?? Array.Empty<string>())
+            .Concat(additions)
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(value => value, StringComparer.Ordinal)
+            .ToArray();
 
     private static async Task TryWriteResponseAsync(
         Stream stream,

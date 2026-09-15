@@ -10,17 +10,22 @@ internal sealed class IncrementalRefreshEngine
     private readonly IncrementalCacheStore _cacheStore;
     private readonly IncrementalOutputPublisher _outputPublisher;
     private readonly Func<Guid> _sessionIdFactory;
+    private readonly IndexingObservation _observation;
+    private readonly bool _ownsObservation;
 
     public IncrementalRefreshEngine(
         IProjectLoader? projectLoader = null,
         IncrementalCacheStore? cacheStore = null,
         IncrementalOutputPublisher? outputPublisher = null,
-        Func<Guid>? sessionIdFactory = null)
+        Func<Guid>? sessionIdFactory = null,
+        IndexingObservation? observation = null)
     {
         _projectLoader = projectLoader ?? new RoslynWorkspaceLoader();
         _cacheStore = cacheStore ?? new IncrementalCacheStore();
         _outputPublisher = outputPublisher ?? new IncrementalOutputPublisher();
         _sessionIdFactory = sessionIdFactory ?? Guid.NewGuid;
+        _ownsObservation = observation is null;
+        _observation = observation ?? new IndexingObservation();
     }
 
     public async Task<IncrementalRefreshResult> RefreshAsync(
@@ -31,6 +36,43 @@ internal sealed class IncrementalRefreshEngine
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputPath);
+        if (!_ownsObservation)
+        {
+            _observation.StartResourceSampling();
+        }
+        using var operation = _observation.BeginOperation(rebuild ? "rebuild" : "refresh");
+        operation.SetStage(IndexingStages.Initializing);
+        try
+        {
+            var result = await RefreshCoreAsync(
+                    request,
+                    outputPath,
+                    rebuild,
+                    operation,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            operation.Complete();
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            operation.Complete("cancelled", "The refresh was cancelled.");
+            throw;
+        }
+        catch (Exception exception)
+        {
+            operation.Complete("failed", exception.Message);
+            throw;
+        }
+    }
+
+    private async Task<IncrementalRefreshResult> RefreshCoreAsync(
+        ProjectLoadRequest request,
+        string outputPath,
+        bool rebuild,
+        IndexingObservationOperation operation,
+        CancellationToken cancellationToken)
+    {
 
         // The engine is also used by the one-shot CLI path and must protect
         // the complete cache/load/extract/publish/save transaction. Watchers
@@ -50,7 +92,11 @@ internal sealed class IncrementalRefreshEngine
             : await _cacheStore.LoadAsync(cachePath, requestIdentity, cancellationToken).ConfigureAwait(false);
         var previousState = cacheResult.State;
 
-        using var solution = await _projectLoader.LoadAsync(request, cancellationToken).ConfigureAwait(false);
+        operation.SetStage(IndexingStages.LoadingProjects);
+        using var solution = _projectLoader is RoslynWorkspaceLoader roslynLoader
+            ? await roslynLoader.LoadAsync(request, operation, cancellationToken).ConfigureAwait(false)
+            : await _projectLoader.LoadAsync(request, cancellationToken).ConfigureAwait(false);
+        operation.SetStage(IndexingStages.Fingerprinting);
         var fingerprints = new IncrementalProjectFingerprintBuilder().BuildAll(solution);
         var dirtyProjectKeys = DetermineDirtyProjects(previousState, fingerprints, rebuild);
         var currentProjectKeys = fingerprints.Keys.ToHashSet(StringComparer.Ordinal);
@@ -81,10 +127,22 @@ internal sealed class IncrementalRefreshEngine
         }
         else
         {
-            var catalog = await new DeclarationCatalogBuilder().BuildAsync(solution, cancellationToken).ConfigureAwait(false);
+            using var catalogPhase = operation.BeginPhase(IndexingStages.Cataloging);
+            var catalog = await new DeclarationCatalogBuilder()
+                .BuildAsync(
+                    solution,
+                    progress: progress => ReportCatalogProgress(catalogPhase, progress),
+                    cancellationToken: cancellationToken)
+                .ConfigureAwait(false);
+            using var extractionPhase = operation.BeginPhase(IndexingStages.ExtractingRelationships);
             var extractor = new SemanticReferenceExtractor();
             var extracted = await extractor
-                .ExtractContributionsAsync(solution, catalog, dirtyProjectKeys, cancellationToken)
+                .ExtractContributionsAsync(
+                    solution,
+                    catalog,
+                    dirtyProjectKeys,
+                    progress: progress => ReportExtractionProgress(extractionPhase, progress),
+                    cancellationToken: cancellationToken)
                 .ConfigureAwait(false);
             var extractedByProject = extracted.ToDictionary(
                 contribution => contribution.Project.Key,
@@ -125,6 +183,7 @@ internal sealed class IncrementalRefreshEngine
                 .ToArray();
         }
 
+        operation.SetStage(IndexingStages.MergingEvidence);
         var graph = GraphSnapshot.Create(
             contributions.SelectMany(contribution => contribution.Graph.Nodes),
             contributions.SelectMany(contribution => contribution.Graph.Edges));
@@ -137,6 +196,7 @@ internal sealed class IncrementalRefreshEngine
         var outputNeedsPublication = rebuild
             || dirtyProjectKeys.Count != 0
             || projectMembershipChanged;
+        operation.SetStage(IndexingStages.Serializing);
         var outputDigest = await PublishIfNeededAsync(
             fullOutputPath,
             graph,
@@ -158,6 +218,7 @@ internal sealed class IncrementalRefreshEngine
             globalDiagnostics,
             fullOutputPath,
             outputDigest);
+        operation.SetStage(IndexingStages.WritingCache);
         await _cacheStore.SaveAsync(cachePath, newState, cancellationToken).ConfigureAwait(false);
 
         return new IncrementalRefreshResult(
@@ -168,6 +229,30 @@ internal sealed class IncrementalRefreshEngine
             reusedProjectCount,
             outputRepublished: outputNeedsPublication || !IsPublishedOutputCurrent(previousState, fullOutputPath),
             generation);
+    }
+
+    private static void ReportCatalogProgress(
+        IndexingObservationPhase? phase,
+        DeclarationCatalogBuilder.CatalogProgress progress)
+    {
+        phase?.SetStage(IndexingStages.Cataloging, progress.ProjectName);
+        phase?.ReportWork(
+            progress.CompletedProjects,
+            progress.TotalProjects,
+            "projects",
+            progress.ProjectName);
+    }
+
+    private static void ReportExtractionProgress(
+        IndexingObservationPhase? phase,
+        SemanticReferenceExtractor.ExtractionProgress progress)
+    {
+        phase?.SetStage(progress.Stage, progress.Detail);
+        if (progress.Completed > 0
+            || (progress.Stage == IndexingStages.ExtractingReferences && progress.Total is not null))
+        {
+            phase?.ReportWork(progress.Completed, progress.Total, progress.Unit, progress.Detail);
+        }
     }
 
     private async Task<string> PublishIfNeededAsync(
