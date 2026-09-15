@@ -281,7 +281,7 @@ internal static class SemanticQueryCommandLine
                 "--cursor" => "cursor",
                 "--snapshot" => "snapshot",
                 "--timeout" => "timeout",
-                "--output" => "output",
+                "--output" or "-o" => "output",
                 _ => throw new CommandLineException($"Unknown option '{argument}'."),
             };
             if (++index >= args.Count)
@@ -746,7 +746,7 @@ internal static class SemanticQueryCommandLine
 
     public static string Usage => "Usage:\n"
         + "  graphify-csharp query <verb> [options]\n"
-        + "  graphify-csharp export --instance <id|prefix> [--output <path>] [--json]\n"
+        + "  graphify-csharp export --instance <id|prefix> [-o, --output <path>] [--json]\n"
         + "  graphify-csharp refresh --instance <id|prefix> [--rebuild] [--json]\n\n"
         + "Query verbs: symbols, signature, usages, callers, hierarchy, arguments, usage-summary\n"
         + "Routing: --instance <id|prefix> or cold --input <solution|project|file.cs>\n"

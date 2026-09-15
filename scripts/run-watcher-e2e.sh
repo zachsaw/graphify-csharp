@@ -173,7 +173,7 @@ export_instance() {
   "$tool_directory/graphify-csharp" \
     export \
     --instance "$session_id" \
-    --output "$requested_output_path"
+    -o "$requested_output_path"
 }
 
 run_tool() {

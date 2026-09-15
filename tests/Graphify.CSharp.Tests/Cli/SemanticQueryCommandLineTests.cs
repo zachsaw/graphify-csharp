@@ -67,6 +67,20 @@ public sealed class SemanticQueryCommandLineTests
     }
 
     [Fact]
+    public void Instance_export_accepts_the_short_output_alias_and_rejects_duplicates()
+    {
+        var longOption = SemanticQueryCommandLine.Parse(
+            ["export", "--instance", "abc", "--output", "/caller/long.json"]);
+        var shortOption = SemanticQueryCommandLine.Parse(
+            ["export", "--instance", "abc", "-o", "/caller/short.json"]);
+
+        Assert.Equal("/caller/long.json", longOption.Specification.OutputPath);
+        Assert.Equal("/caller/short.json", shortOption.Specification.OutputPath);
+        Assert.Throws<CommandLineException>(() => SemanticQueryCommandLine.Parse(
+            ["export", "--instance", "abc", "--output", "one.json", "-o", "two.json"]));
+    }
+
+    [Fact]
     public void Warm_query_filesystem_filters_are_relative_to_the_callers_current_directory()
     {
         var options = SemanticQueryCommandLine.Parse(
