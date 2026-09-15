@@ -52,6 +52,42 @@ public sealed class SemanticQueryProtocolTests
     }
 
     [Fact]
+    public async Task Actual_named_pipe_dispatches_refresh_without_a_query_payload()
+    {
+        var root = CreateTemporaryDirectory();
+        var sessionId = Guid.NewGuid();
+        var analysis = CreateAnalysis(root);
+        var observed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var server = new SemanticQueryServer(
+            SemanticQueryProtocol.ForSession(sessionId, root),
+            sessionId,
+            analysis,
+            (_, _) => Task.FromResult(Success(sessionId, "symbols")),
+            (_, _) => Task.FromResult(Success(sessionId, "export")),
+            refresh: (rebuild, _) =>
+            {
+                observed.TrySetResult(rebuild);
+                return Task.FromResult(Success(sessionId, "refresh"));
+            });
+
+        try
+        {
+            await server.StartAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            using var response = await SendAsync(
+                server,
+                CreatePayload(sessionId, analysis, "refresh", rebuild: true));
+
+            Assert.True(response.RootElement.GetProperty("success").GetBoolean());
+            Assert.Equal("refresh", response.RootElement.GetProperty("command").GetString());
+            Assert.True(await observed.Task.WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(root);
+        }
+    }
+
+    [Fact]
     public async Task Identity_errors_are_structured_and_do_not_kill_the_endpoint()
     {
         var root = CreateTemporaryDirectory();
@@ -221,6 +257,33 @@ public sealed class SemanticQueryProtocolTests
                     "symbols",
                     query: null,
                     outputPath: "out.json"))).Code);
+
+        var refresh = SemanticQueryJsonParser.Parse(
+            CreateCustomPayload(
+                sessionId,
+                analysis,
+                "refresh",
+                query: null,
+                rebuild: true));
+        Assert.Equal("refresh", refresh.Command);
+        Assert.True(refresh.Spec.Rebuild);
+        Assert.Equal(
+            "invalid_request",
+            Assert.Throws<SemanticQueryException>(() => SemanticQueryJsonParser.Parse(
+                CreateCustomPayload(
+                    sessionId,
+                    analysis,
+                    "refresh",
+                    query: new { limit = 1 }))).Code);
+        Assert.Equal(
+            "invalid_request",
+            Assert.Throws<SemanticQueryException>(() => SemanticQueryJsonParser.Parse(
+                CreateCustomPayload(
+                    sessionId,
+                    analysis,
+                    "symbols",
+                    query: null,
+                    rebuild: true))).Code);
     }
 
     [Fact]
@@ -352,7 +415,8 @@ public sealed class SemanticQueryProtocolTests
         Guid sessionId,
         RefreshRequestIdentity analysis,
         string command,
-        int protocolVersion = SemanticQueryProtocol.CurrentVersion) =>
+        int protocolVersion = SemanticQueryProtocol.CurrentVersion,
+        bool rebuild = false) =>
         JsonSerializer.SerializeToUtf8Bytes(
             new
             {
@@ -361,13 +425,14 @@ public sealed class SemanticQueryProtocolTests
                 command,
                 analysis_key = analysis.CanonicalKey,
                 timeout_ms = 5000,
-                query = command == "export"
+                query = command is "export" or "refresh"
                     ? null
                     : new
                     {
                         search = "Thing",
                         limit = 1,
                     },
+                rebuild = command == "refresh" ? rebuild : (bool?)null,
             },
             SemanticQueryJson.SerializerOptions);
 
@@ -376,7 +441,8 @@ public sealed class SemanticQueryProtocolTests
         RefreshRequestIdentity analysis,
         string command,
         object? query,
-        string? outputPath = null) =>
+        string? outputPath = null,
+        bool? rebuild = null) =>
         JsonSerializer.SerializeToUtf8Bytes(
             new
             {
@@ -387,6 +453,7 @@ public sealed class SemanticQueryProtocolTests
                 timeout_ms = 5000,
                 query,
                 output_path = outputPath,
+                rebuild,
             },
             SemanticQueryJson.SerializerOptions);
 

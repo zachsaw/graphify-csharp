@@ -257,6 +257,16 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     public Task<IncrementalRefreshResult> RebuildAsync(CancellationToken cancellationToken = default)
         => RefreshCoreAsync(rebuild: true, operationKind: "rebuild", cancellationToken: cancellationToken);
 
+    internal Task<IncrementalRefreshResult> RefreshSemanticAsync(
+        bool rebuild = false,
+        CancellationToken cancellationToken = default)
+        => RefreshCoreAsync(
+            rebuild,
+            operationKind: rebuild ? "rebuild" : "refresh",
+            cancellationToken,
+            publishOutput: false,
+            includeGraph: false);
+
     internal Task<IncrementalRefreshResult> RecoverAsync(CancellationToken cancellationToken = default)
         => RefreshCoreAsync(
             rebuild: true,
@@ -282,7 +292,13 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             // refresh target under the same gate so a target can never include
             // an event whose queue entry is still being published.
             var target = CaptureCurrentTargetLocked();
-            if (!_commands.Writer.TryWrite(new RefreshCommand(target, rebuild, publishOutput, operationKind, completion)))
+            if (!_commands.Writer.TryWrite(new RefreshCommand(
+                    target,
+                    rebuild,
+                    publishOutput,
+                    includeGraph,
+                    operationKind,
+                    completion)))
             {
                 completion.TrySetException(new InvalidOperationException("The incremental session is not accepting refresh requests."));
             }
@@ -694,7 +710,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                             refresh.Target,
                             forceCold: refresh.Rebuild,
                             publishOutput: refresh.PublishOutput,
-                            includeGraph: true,
+                            includeGraph: refresh.IncludeGraph,
                             operation,
                             cancellationToken)
                         .ConfigureAwait(false);
@@ -1222,6 +1238,47 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             reusedProjectCount,
             outputRepublished: false,
             _generation);
+    }
+
+    internal SemanticQueryResponse CreateSemanticRefreshResponse(
+        IncrementalRefreshResult result,
+        bool rebuild)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        var generation = result.Generation ?? _generation;
+        var diagnostics = _globalDiagnostics
+            .Concat(_contributions.Values.SelectMany(contribution => contribution.Diagnostics))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(diagnostic => diagnostic, StringComparer.Ordinal)
+            .ToArray();
+        var displayedDiagnostics = SemanticQueryEngine.DisplayDiagnostics(
+            diagnostics,
+            out var diagnosticsTruncated);
+        return SemanticQueryResponse.SuccessResponse(
+            _semanticMode == "cold" ? null : _sessionId,
+            _semanticMode,
+            "refresh",
+            new SemanticQuerySnapshot(
+                $"{(_semanticMode == "cold" ? Guid.Empty : _sessionId):D}:{_evidenceRevision}",
+                generation.EventGeneration,
+                generation.IndexedGeneration,
+                generation.EventGeneration),
+            new SemanticQueryScope(
+                _requestIdentity.CanonicalKey,
+                new SemanticQueryFilters(),
+                "observed_static",
+                Volatile.Read(ref _inputSnapshot).InputDiscoveryComplete,
+                diagnostics.Length > 0,
+                OperationComplete: true,
+                Array.Empty<string>()),
+            Array.Empty<System.Text.Json.JsonElement>(),
+            new SemanticQueryPage(0, false, null),
+            displayedDiagnostics,
+            diagnosticsTruncated,
+            refresh: new SemanticRefreshResult(
+                rebuild,
+                result.ExtractedProjectCount,
+                result.ReusedProjectCount));
     }
 
     private async Task<IncrementalRefreshResult> PublishCurrentAsync(
@@ -2107,6 +2164,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         RefreshTarget Target,
         bool Rebuild,
         bool PublishOutput,
+        bool IncludeGraph,
         string OperationKind,
         TaskCompletionSource<IncrementalRefreshResult> Completion) : SessionCommand;
 

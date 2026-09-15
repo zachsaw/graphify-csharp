@@ -554,7 +554,8 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
                     _session.SessionId,
                     _requestIdentity,
                     ExecuteSemanticQueryAsync,
-                    ExportSemanticAsync);
+                    ExportSemanticAsync,
+                    ExecuteSemanticRefreshAsync);
                 await semanticServer.StartAsync(_stop.Token).ConfigureAwait(false);
                 lock (_lifecycleGate)
                 {
@@ -1137,6 +1138,34 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             // The response may have been computed from the old workspace while
             // a watcher delivery loss was queued. Discard it and retry after
             // the host has completed its trusted recovery boundary.
+        }
+    }
+
+    private async Task<SemanticQueryResponse> ExecuteSemanticRefreshAsync(
+        bool rebuild,
+        CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            await WaitUntilHealthyAsync(cancellationToken).ConfigureAwait(false);
+            var trustVersion = _session.EventTrustVersion;
+            Task<IncrementalRefreshResult> refresh;
+            lock (_transitionGate)
+            {
+                refresh = _session.RefreshSemanticAsync(rebuild, cancellationToken);
+            }
+
+            var result = await refresh.ConfigureAwait(false);
+            await WaitUntilHealthyAsync(cancellationToken).ConfigureAwait(false);
+            if (_session.IsEventTrustValid(trustVersion))
+            {
+                return _session.CreateSemanticRefreshResponse(result, rebuild);
+            }
+
+            // A watcher delivery loss can be discovered while the refresh is
+            // running. Do not report a successful refresh for evidence that
+            // crossed that untrusted boundary; the host recovery loop will
+            // establish a new trusted generation before retrying.
         }
     }
 

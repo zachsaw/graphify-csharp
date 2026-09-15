@@ -59,6 +59,17 @@ public sealed class SemanticQueryHostTests
             Assert.Equal(2, response.Items.Count);
             Assert.False(File.Exists(fixture.OutputPath));
             Assert.False(File.Exists(IncrementalCachePath.ForOutput(fixture.OutputPath)));
+
+            var refresh = await new SemanticQueryClient().SendAsync(
+                descriptor,
+                new SemanticQuerySpec("refresh", Rebuild: false),
+                TimeSpan.FromSeconds(60));
+            Assert.True(refresh.Success, refresh.Error?.Message);
+            Assert.NotNull(refresh.Refresh);
+            Assert.False(refresh.Refresh!.Rebuild);
+            Assert.Equal("refresh", refresh.Command);
+            Assert.False(File.Exists(fixture.OutputPath));
+            Assert.False(File.Exists(IncrementalCachePath.ForOutput(fixture.OutputPath)));
         }
         finally
         {

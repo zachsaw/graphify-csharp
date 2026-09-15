@@ -10,6 +10,7 @@ internal sealed class SemanticQueryServer : IAsyncDisposable
     private readonly string _analysisKey;
     private readonly Func<SemanticQuerySpec, CancellationToken, Task<SemanticQueryResponse>> _query;
     private readonly Func<string, CancellationToken, Task<SemanticQueryResponse>> _export;
+    private readonly Func<bool, CancellationToken, Task<SemanticQueryResponse>>? _refresh;
     private readonly TimeSpan _transportTimeout;
     private readonly CancellationTokenSource _acceptStop = new();
     private readonly CancellationTokenSource _forcedStop = new();
@@ -29,6 +30,7 @@ internal sealed class SemanticQueryServer : IAsyncDisposable
         RefreshRequestIdentity analysis,
         Func<SemanticQuerySpec, CancellationToken, Task<SemanticQueryResponse>> query,
         Func<string, CancellationToken, Task<SemanticQueryResponse>> export,
+        Func<bool, CancellationToken, Task<SemanticQueryResponse>>? refresh = null,
         int maximumConcurrentRequests = SemanticQueryProtocol.MaximumConcurrentRequests,
         TimeSpan? transportTimeout = null)
     {
@@ -44,6 +46,7 @@ internal sealed class SemanticQueryServer : IAsyncDisposable
         _analysisKey = analysis.CanonicalKey;
         _query = query ?? throw new ArgumentNullException(nameof(query));
         _export = export ?? throw new ArgumentNullException(nameof(export));
+        _refresh = refresh;
         if (maximumConcurrentRequests is < 1 or > SemanticQueryProtocol.MaximumConcurrentRequests)
         {
             throw new ArgumentOutOfRangeException(
@@ -369,9 +372,24 @@ internal sealed class SemanticQueryServer : IAsyncDisposable
         SemanticQueryResponse response;
         try
         {
-            response = command == "export"
-                ? await _export(request.Spec.OutputPath!, operationCancellation.Token).ConfigureAwait(false)
-                : await _query(request.Spec, operationCancellation.Token).ConfigureAwait(false);
+            response = command switch
+            {
+                "export" => await _export(
+                        request.Spec.OutputPath!,
+                        operationCancellation.Token)
+                    .ConfigureAwait(false),
+                "refresh" when _refresh is not null => await _refresh(
+                        request.Spec.Rebuild,
+                        operationCancellation.Token)
+                    .ConfigureAwait(false),
+                "refresh" => SemanticQueryResponse.Failure(
+                    _sessionId,
+                    "instance",
+                    command,
+                    "unsupported_capability",
+                    "The semantic endpoint does not support refresh requests."),
+                _ => await _query(request.Spec, operationCancellation.Token).ConfigureAwait(false),
+            };
         }
         catch (OperationCanceledException) when (operationCancellation.IsCancellationRequested)
         {

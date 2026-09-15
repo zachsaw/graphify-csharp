@@ -13,6 +13,7 @@ internal static class SemanticQueryJsonParser
         "timeout_ms",
         "query",
         "output_path",
+        "rebuild",
     };
 
     private static readonly IReadOnlySet<string> QueryProperties = new HashSet<string>(StringComparer.Ordinal)
@@ -61,6 +62,7 @@ internal static class SemanticQueryJsonParser
                 "timeout_ms",
                 SemanticQueryProtocol.DefaultTimeoutMilliseconds);
             ValidateTimeout(timeoutMilliseconds);
+            var rebuild = OptionalBool(root, "rebuild", defaultValue: false);
 
             if (!SemanticQueryCommands.All.Contains(command))
             {
@@ -71,6 +73,13 @@ internal static class SemanticQueryJsonParser
             var hasOutputPath = root.TryGetProperty("output_path", out var outputPathElement);
             if (command == "export")
             {
+                if (rebuild)
+                {
+                    throw new SemanticQueryException(
+                        "invalid_request",
+                        "The export command does not accept rebuild.");
+                }
+
                 if (hasQuery)
                 {
                     throw new SemanticQueryException("invalid_request", "The export command does not accept a query object.");
@@ -93,9 +102,37 @@ internal static class SemanticQueryJsonParser
                 throw new SemanticQueryException("invalid_request", $"The '{command}' command does not accept output_path.");
             }
 
+            if (command == "refresh")
+            {
+                if (hasQuery)
+                {
+                    throw new SemanticQueryException(
+                        "invalid_request",
+                        "The refresh command does not accept a query object.");
+                }
+
+                var refreshSpec = new SemanticQuerySpec(command, Rebuild: rebuild);
+                ValidateSpec(refreshSpec);
+                return new SemanticQueryWireRequest(
+                    protocolVersion,
+                    sessionId,
+                    command,
+                    analysisKey,
+                    timeoutMilliseconds,
+                    refreshSpec);
+            }
+
+            if (rebuild)
+            {
+                throw new SemanticQueryException(
+                    "invalid_request",
+                    $"The '{command}' command does not accept rebuild.");
+            }
+
             var spec = hasQuery
                 ? ParseQuery(command, queryElement)
-                : new SemanticQuerySpec(command);
+                : new SemanticQuerySpec(command, Rebuild: rebuild);
+
             ValidateSpec(spec);
             return new SemanticQueryWireRequest(
                 protocolVersion,
@@ -140,6 +177,33 @@ internal static class SemanticQueryJsonParser
             throw new SemanticQueryException(
                 "invalid_arguments",
                 $"Unknown declaration kind '{spec.EffectiveFilters.Kind}'.");
+        }
+
+        if (spec.Command == "refresh")
+        {
+            if (spec.Search is not null
+                || spec.SymbolId is not null
+                || !spec.EffectiveFilters.IsEmpty
+                || spec.Direction is not null
+                || spec.EffectiveGroupBy.Count > 0
+                || spec.Limit != SemanticQueryProtocol.DefaultLimit
+                || spec.Cursor is not null
+                || spec.SnapshotId is not null
+                || spec.OutputPath is not null)
+            {
+                throw new SemanticQueryException(
+                    "invalid_arguments",
+                    "The refresh command accepts only rebuild.");
+            }
+
+            return;
+        }
+
+        if (spec.Rebuild)
+        {
+            throw new SemanticQueryException(
+                "invalid_arguments",
+                $"The '{spec.Command}' command does not accept rebuild.");
         }
 
         if (SemanticQueryCommands.IsExact(spec.Command)
@@ -407,6 +471,13 @@ internal static class SemanticQueryJsonParser
         !parent.TryGetProperty(propertyName, out var element)
             ? defaultValue
             : ReadInt(element, propertyName);
+
+    private static bool OptionalBool(JsonElement parent, string propertyName, bool defaultValue) =>
+        !parent.TryGetProperty(propertyName, out var element)
+            ? defaultValue
+            : element.ValueKind is JsonValueKind.True or JsonValueKind.False
+                ? element.GetBoolean()
+                : throw new SemanticQueryException("invalid_request", $"'{propertyName}' must be a boolean.");
 
     private static int ReadInt(JsonElement element, string propertyName)
     {

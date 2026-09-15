@@ -257,6 +257,37 @@ public sealed class SemanticQuerySessionTests
     }
 
     [Fact]
+    public async Task Semantic_refresh_reconciles_without_building_or_publishing_the_compatibility_graph()
+    {
+        var fixture = await CreateFixtureAsync();
+        try
+        {
+            await using var session = new IncrementalIndexSession(
+                fixture.Request,
+                outputPath: null,
+                semanticMode: "instance");
+            await session.StartAsync().WaitAsync(TimeSpan.FromSeconds(60));
+
+            var result = await session.RefreshSemanticAsync().WaitAsync(TimeSpan.FromSeconds(60));
+            var response = session.CreateSemanticRefreshResponse(result, rebuild: false);
+
+            Assert.True(response.Success, response.Error?.Message);
+            Assert.Equal("refresh", response.Command);
+            Assert.NotNull(response.Refresh);
+            Assert.False(response.Refresh!.Rebuild);
+            Assert.Empty(result.Graph.Nodes);
+            Assert.Empty(result.Graph.Edges);
+            Assert.Equal(0, session.CompatibilityGraphBuildCount);
+            Assert.False(File.Exists(fixture.OutputPath));
+            Assert.False(File.Exists(IncrementalCachePath.ForOutput(fixture.OutputPath)));
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
     public async Task Summary_pages_create_only_the_bounded_candidate_rows_and_seek_on_continuation()
     {
         var fixture = await CreateFixtureAsync();

@@ -42,6 +42,19 @@ public sealed class SemanticQueryCommandLineTests
     }
 
     [Fact]
+    public void Parses_refresh_as_an_explicit_instance_operation()
+    {
+        var options = SemanticQueryCommandLine.Parse(
+            ["refresh", "--instance", "abc", "--rebuild", "--json"]);
+
+        Assert.Null(options.ColdRequest);
+        Assert.Equal("abc", options.InstanceSelector);
+        Assert.Equal("refresh", options.Specification.Command);
+        Assert.True(options.Specification.Rebuild);
+        Assert.True(options.Json);
+    }
+
+    [Fact]
     public void Enforces_exact_routing_and_command_option_boundaries()
     {
         Assert.Throws<CommandLineException>(() => SemanticQueryCommandLine.Parse(
@@ -54,6 +67,12 @@ public sealed class SemanticQueryCommandLineTests
             ["export", "--input", "Product.sln", "--output", "out.json"]));
         Assert.Throws<CommandLineException>(() => SemanticQueryCommandLine.Parse(
             ["export", "--instance", "abc"]));
+        Assert.Throws<CommandLineException>(() => SemanticQueryCommandLine.Parse(
+            ["refresh", "--input", "Product.sln"]));
+        Assert.Throws<CommandLineException>(() => SemanticQueryCommandLine.Parse(
+            ["refresh", "--instance", "abc", "--output", "out.json"]));
+        Assert.Throws<CommandLineException>(() => SemanticQueryCommandLine.Parse(
+            ["refresh", "--instance", "abc", "--rebuild", "--rebuild"]));
     }
 
     [Fact]

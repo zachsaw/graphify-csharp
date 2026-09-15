@@ -62,6 +62,7 @@ internal static class SemanticQueryCommands
         "arguments",
         "usage-summary",
         "export",
+        "refresh",
     };
 
     public static bool IsExact(string command) => command is
@@ -134,7 +135,8 @@ internal sealed record SemanticQuerySpec(
     int Limit = SemanticQueryProtocol.DefaultLimit,
     string? Cursor = null,
     string? SnapshotId = null,
-    string? OutputPath = null)
+    string? OutputPath = null,
+    bool Rebuild = false)
 {
     public SemanticQueryFilters EffectiveFilters => Filters ?? new SemanticQueryFilters();
 
@@ -189,6 +191,11 @@ internal sealed record SemanticExportResult(
     [property: JsonPropertyName("nodes")] int NodeCount,
     [property: JsonPropertyName("edges")] int EdgeCount);
 
+internal sealed record SemanticRefreshResult(
+    [property: JsonPropertyName("rebuild")] bool Rebuild,
+    [property: JsonPropertyName("extracted_projects")] int ExtractedProjectCount,
+    [property: JsonPropertyName("reused_projects")] int ReusedProjectCount);
+
 internal sealed record SemanticQueryResponse(
     [property: JsonPropertyName("schema_version")] string SchemaVersion,
     [property: JsonPropertyName("protocol_version")] int ProtocolVersion,
@@ -203,7 +210,8 @@ internal sealed record SemanticQueryResponse(
     [property: JsonPropertyName("page")] SemanticQueryPage? Page,
     [property: JsonPropertyName("diagnostics")] IReadOnlyList<SemanticQueryDiagnostic> Diagnostics,
     [property: JsonPropertyName("diagnostics_truncated")] bool DiagnosticsTruncated,
-    [property: JsonPropertyName("export")] SemanticExportResult? Export)
+    [property: JsonPropertyName("export")] SemanticExportResult? Export,
+    [property: JsonPropertyName("refresh")] SemanticRefreshResult? Refresh = null)
 {
     public static SemanticQueryResponse Failure(
         Guid? sessionId,
@@ -247,7 +255,8 @@ internal sealed record SemanticQueryResponse(
         SemanticQueryPage page,
         IReadOnlyList<SemanticQueryDiagnostic> diagnostics,
         bool diagnosticsTruncated = false,
-        SemanticExportResult? export = null) =>
+        SemanticExportResult? export = null,
+        SemanticRefreshResult? refresh = null) =>
         new(
             SemanticQueryProtocol.SchemaVersion,
             SemanticQueryProtocol.CurrentVersion,
@@ -262,7 +271,8 @@ internal sealed record SemanticQueryResponse(
             page,
             diagnostics,
             diagnosticsTruncated,
-            export);
+            export,
+            refresh);
 }
 
 internal sealed record SemanticQueryWireRequest(

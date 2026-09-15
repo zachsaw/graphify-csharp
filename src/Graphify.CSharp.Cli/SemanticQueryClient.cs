@@ -117,7 +117,7 @@ internal sealed class SemanticQueryClient
         SemanticQuerySpec specification,
         TimeSpan timeout)
     {
-        object? query = specification.Command == "export"
+        object? query = specification.Command is "export" or "refresh"
             ? null
             : new
             {
@@ -152,6 +152,9 @@ internal sealed class SemanticQueryClient
                 SemanticQueryProtocol.MaximumTimeoutMilliseconds),
             query,
             output_path = specification.OutputPath,
+            rebuild = specification.Command == "refresh"
+                ? specification.Rebuild
+                : (bool?)null,
         };
         return JsonSerializer.SerializeToUtf8Bytes(envelope, SemanticQueryJson.SerializerOptions);
     }
@@ -198,6 +201,16 @@ internal sealed class SemanticQueryClient
                 && !response.Success
                 && response.Error?.Code == "server_busy"))
         {
+            if (command == "refresh"
+                && response.Command == "unknown"
+                && !response.Success
+                && response.Error?.Code == "invalid_request")
+            {
+                throw new SemanticClientException(
+                    "unsupported_capability",
+                    "The selected watcher does not support refresh; restart it with the v0.2 tool.");
+            }
+
             throw new SemanticClientException(
                 "invalid_response",
                 "The semantic endpoint returned a response for a different command.");
