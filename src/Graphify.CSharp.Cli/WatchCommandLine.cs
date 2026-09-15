@@ -108,7 +108,9 @@ internal static class WatchCommandLine
         }
     }
 
-    public static WatchCommandLineOptions Parse(IReadOnlyList<string> args)
+    public static WatchCommandLineOptions Parse(
+        IReadOnlyList<string> args,
+        string? currentDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(args);
         if (args.Count == 0 || args[0] != "watch")
@@ -202,15 +204,20 @@ internal static class WatchCommandLine
                 ShowHelp: true);
         }
 
-        var input = Single(values, "input") ?? positionalInput;
-        if (string.IsNullOrWhiteSpace(input))
+        var callerDirectory = AnalysisInputResolver.CurrentDirectory(currentDirectory);
+        if (values.ContainsKey("input") && positionalInput is not null)
         {
-            throw new CommandLineException("The watch command requires an input .sln, .csproj, or file-based .cs app path.");
+            throw new CommandLineException("Input was supplied both positionally and with '--input'.");
         }
 
-        var currentDirectory = Directory.GetCurrentDirectory();
-        var repositoryRoot = FullPath(Single(values, "root") ?? currentDirectory, currentDirectory);
-        var inputPath = FullPath(input, repositoryRoot);
+        var repositoryRoot = AnalysisInputResolver.ResolveRoot(
+            Single(values, "root"),
+            callerDirectory);
+        var inputPath = AnalysisInputResolver.ResolveInput(
+            Single(values, "input") ?? positionalInput,
+            repositoryRoot,
+            callerDirectory,
+            "watch");
         var interval = TimeSpan.FromMinutes(5);
         var intervalValue = Single(values, "watch-scan-interval");
         if (intervalValue is not null
@@ -241,16 +248,6 @@ internal static class WatchCommandLine
     private static string? Single(IReadOnlyDictionary<string, string?> values, string key) =>
         values.TryGetValue(key, out var value) ? value : null;
 
-    private static string FullPath(string path, string basePath)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            throw new CommandLineException("A path value cannot be empty.");
-        }
-
-        return Path.GetFullPath(path, basePath);
-    }
-
     private static async Task IgnoreRequestedStopStartupAsync(Task start)
     {
         try
@@ -265,9 +262,11 @@ internal static class WatchCommandLine
         }
     }
 
-    public static string Usage => "Usage: graphify-csharp watch --input <solution|project|file.cs> [options]\n\n"
+    public static string Usage => "Usage: graphify-csharp watch [--input <solution|project|file.cs>] [options]\n\n"
         + "Starts an output-free foreground semantic session. Use ps to find the session\n"
-        + "and query/refresh/export with --instance <id|prefix>.\n\n"
+        + "and query/refresh/export with --instance <id|prefix>. If --input is omitted,\n"
+        + "one unambiguous solution or project is discovered directly under --root\n"
+        + "(or the current directory).\n\n"
         + "Options:\n"
         + "  -i, --input <path>              C# solution/project/file-based app to watch\n"
         + "  -r, --root <path>               Repository root for stable paths\n"

@@ -161,7 +161,9 @@ internal static class SemanticQueryCommandLine
         }
     }
 
-    public static SemanticQueryCommandLineOptions Parse(IReadOnlyList<string> args)
+    public static SemanticQueryCommandLineOptions Parse(
+        IReadOnlyList<string> args,
+        string? currentDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(args);
         if (!IsSemanticCommand(args))
@@ -316,6 +318,7 @@ internal static class SemanticQueryCommandLine
                 ShowHelp: true);
         }
 
+        var callerDirectory = AnalysisInputResolver.CurrentDirectory(currentDirectory);
         if (isExport)
         {
             if (rebuild)
@@ -325,7 +328,10 @@ internal static class SemanticQueryCommandLine
 
             RejectExportQueryOptions(values, positional);
             var instance = Required(values, "instance");
-            var output = FullPath(Required(values, "output"), Directory.GetCurrentDirectory());
+            var output = AnalysisInputResolver.ResolvePath(
+                Required(values, "output"),
+                callerDirectory,
+                "output");
             var timeout = ParseTimeout(values);
             return new SemanticQueryCommandLineOptions(
                 new SemanticQuerySpec("export", OutputPath: output),
@@ -420,14 +426,19 @@ internal static class SemanticQueryCommandLine
                 ShowHelp: false);
         }
 
-        var root = FullPath(Single(values, "root") ?? Directory.GetCurrentDirectory(), Directory.GetCurrentDirectory());
-        var input = FullPath(Required(values, "input"), root);
+        var root = AnalysisInputResolver.ResolveRoot(
+            Single(values, "root"),
+            callerDirectory);
+        var input = AnalysisInputResolver.ResolvePath(
+            Required(values, "input"),
+            callerDirectory,
+            "input");
         var request = new ProjectLoadRequest(
             input,
             root,
             Single(values, "configuration") ?? "Debug",
             Single(values, "target-framework"));
-        specification = NormalizePaths(specification, root);
+        specification = NormalizePaths(specification, callerDirectory);
         SemanticQueryJsonParser.ValidateSpec(specification);
         if (specification.Cursor is not null || specification.SnapshotId is not null)
         {
@@ -535,8 +546,12 @@ internal static class SemanticQueryCommandLine
         {
             Filters = filters with
             {
-                Path = filters.Path is null ? null : FullPath(filters.Path, root),
-                Project = filters.Project is null ? null : FullPath(filters.Project, root),
+                Path = filters.Path is null
+                    ? null
+                    : AnalysisInputResolver.ResolvePath(filters.Path, root, "path filter"),
+                Project = filters.Project is null
+                    ? null
+                    : AnalysisInputResolver.ResolvePath(filters.Project, root, "project filter"),
             },
         };
     }
@@ -651,16 +666,6 @@ internal static class SemanticQueryCommandLine
         IReadOnlyDictionary<string, string?> values,
         string key) =>
         values.TryGetValue(key, out var value) ? value : null;
-
-    private static string FullPath(string path, string basePath)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            throw new CommandLineException("A path value cannot be empty.");
-        }
-
-        return Path.GetFullPath(path, basePath);
-    }
 
     private static string InferCommand(IReadOnlyList<string> args) =>
         args.Count > 1 && args[0] is not ("export" or "refresh")

@@ -110,7 +110,9 @@ internal static class DiskExportCommandLine
         }
     }
 
-    public static DiskExportCommandLineOptions Parse(IReadOnlyList<string> args)
+    public static DiskExportCommandLineOptions Parse(
+        IReadOnlyList<string> args,
+        string? currentDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(args);
         var startIndex = args.Count > 0 && args[0] == "export" ? 1 : 0;
@@ -223,18 +225,25 @@ internal static class DiskExportCommandLine
                 ShowHelp: true);
         }
 
-        var input = Single(values, "input") ?? positionalInput;
-        if (string.IsNullOrWhiteSpace(input))
+        var callerDirectory = AnalysisInputResolver.CurrentDirectory(currentDirectory);
+        if (values.ContainsKey("input") && positionalInput is not null)
         {
-            throw new CommandLineException("An input .sln, .csproj, or file-based .cs app path is required (use --input).");
+            throw new CommandLineException("Input was supplied both positionally and with '--input'.");
         }
 
-        var currentDirectory = Directory.GetCurrentDirectory();
-        var repositoryRoot = FullPath(Single(values, "root") ?? currentDirectory, currentDirectory);
-        var inputPath = FullPath(input, repositoryRoot);
-        var outputPath = FullPath(
+        var repositoryRoot = AnalysisInputResolver.ResolveRoot(
+            Single(values, "root"),
+            callerDirectory);
+        var input = Single(values, "input") ?? positionalInput;
+        var inputPath = AnalysisInputResolver.ResolveInput(
+            input,
+            repositoryRoot,
+            callerDirectory,
+            "export");
+        var outputPath = AnalysisInputResolver.ResolvePath(
             Required(values, "output"),
-            repositoryRoot);
+            callerDirectory,
+            "output");
         var configuration = Single(values, "configuration") ?? "Debug";
         if (string.IsNullOrWhiteSpace(configuration))
         {
@@ -313,18 +322,10 @@ internal static class DiskExportCommandLine
             ? value
             : throw new CommandLineException($"Option '--{key}' is required.");
 
-    private static string FullPath(string path, string basePath)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            throw new CommandLineException("A path value cannot be empty.");
-        }
-
-        return Path.GetFullPath(path, basePath);
-    }
-
-    public static string Usage => "Usage: graphify-csharp export --input <solution|project|file.cs> --output <path> [options]\n"
-        + "       graphify-csharp <input> --output <path> [options]\n\n"
+    public static string Usage => "Usage: graphify-csharp export [--input <solution|project|file.cs>] --output <path> [options]\n"
+        + "       graphify-csharp [<input>] --output <path> [options]\n\n"
+        + "When --input is omitted, one unambiguous solution or project is discovered\n"
+        + "directly under --root (or the current directory).\n\n"
         + "Options:\n"
         + "  -i, --input <path>              C# solution/project/file-based app to export\n"
         + "  -r, --root <path>               Repository root for stable paths\n"

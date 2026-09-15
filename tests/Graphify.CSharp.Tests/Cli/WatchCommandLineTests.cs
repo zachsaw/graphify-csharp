@@ -16,9 +16,10 @@ public sealed class WatchCommandLineTests
             "--target-framework", "net10.0",
             "--watch-scan-interval", "00:00:02",
             "--no-progress",
-        ]);
+        ],
+        "/caller");
 
-        Assert.Equal("/repo/src/Product.sln", options.Request.InputPath);
+        Assert.Equal("/caller/src/Product.sln", options.Request.InputPath);
         Assert.Equal("/repo", options.Request.RepositoryRoot);
         Assert.Equal("Release", options.Request.Configuration);
         Assert.Equal("net10.0", options.Request.TargetFramework);
@@ -43,5 +44,24 @@ public sealed class WatchCommandLineTests
         var options = WatchCommandLine.Parse(["watch", "--help"]);
 
         Assert.True(options.ShowHelp);
+    }
+
+    [Fact]
+    public void Watch_omits_input_only_when_root_discovery_finds_one_candidate()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "graphify-csharp-watch-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            File.WriteAllText(Path.Combine(root, "Product.sln"), string.Empty);
+
+            var options = WatchCommandLine.Parse(["watch", "--root", root], "/caller");
+
+            Assert.Equal(Path.Combine(root, "Product.sln"), options.Request.InputPath);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 }

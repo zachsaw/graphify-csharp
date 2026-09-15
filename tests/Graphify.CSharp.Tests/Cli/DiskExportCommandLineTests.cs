@@ -18,11 +18,12 @@ public sealed class DiskExportCommandLineTests
             "--rebuild",
             "--json",
             "--no-progress",
-        ]);
+        ],
+        "/caller");
 
-        Assert.Equal("/repo/src/Product.sln", options.Request.InputPath);
+        Assert.Equal("/caller/src/Product.sln", options.Request.InputPath);
         Assert.Equal("/repo", options.Request.RepositoryRoot);
-        Assert.Equal("/repo/out/csharp.json", options.OutputPath);
+        Assert.Equal("/caller/out/csharp.json", options.OutputPath);
         Assert.Equal("Release", options.Request.Configuration);
         Assert.Equal("net10.0", options.Request.TargetFramework);
         Assert.True(options.Rebuild);
@@ -33,10 +34,10 @@ public sealed class DiskExportCommandLineTests
     [Fact]
     public void Bare_positional_input_is_the_disk_export_alias()
     {
-        var options = DiskExportCommandLine.Parse(["Product.sln", "--output", "out.json"]);
+        var options = DiskExportCommandLine.Parse(["Product.sln", "--output", "out.json"], "/caller");
 
-        Assert.EndsWith("/Product.sln", options.Request.InputPath, StringComparison.Ordinal);
-        Assert.EndsWith("/out.json", options.OutputPath, StringComparison.Ordinal);
+        Assert.Equal("/caller/Product.sln", options.Request.InputPath);
+        Assert.Equal("/caller/out.json", options.OutputPath);
     }
 
     [Fact]
