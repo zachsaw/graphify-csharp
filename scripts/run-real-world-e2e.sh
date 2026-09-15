@@ -163,7 +163,7 @@ esac
 
 for output_path in "$output_root/csharp.json" "$output_root/csharp-repeat.json"; do
   "$real_world_tool/graphify-csharp" \
-    --input Dapper/Dapper.csproj \
+    --input "$fixture_root/Dapper/Dapper.csproj" \
     --root "$fixture_root" \
     --configuration "$configuration" \
     --target-framework "$target_framework" \
