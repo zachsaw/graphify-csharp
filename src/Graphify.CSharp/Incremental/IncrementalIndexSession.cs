@@ -265,7 +265,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             operationKind: rebuild ? "rebuild" : "refresh",
             cancellationToken,
             publishOutput: false,
-            includeGraph: false);
+            includeGraph: false,
+            captureSemanticResponse: true);
 
     internal Task<IncrementalRefreshResult> RecoverAsync(CancellationToken cancellationToken = default)
         => RefreshCoreAsync(
@@ -280,7 +281,8 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         string operationKind,
         CancellationToken cancellationToken,
         bool publishOutput = true,
-        bool includeGraph = true)
+        bool includeGraph = true,
+        bool captureSemanticResponse = false)
     {
         if (cancellationToken.IsCancellationRequested)
         {
@@ -304,6 +306,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                     includeGraph,
                     operationKind,
                     cancellationToken,
+                    captureSemanticResponse,
                     completion)))
             {
                 completion.TrySetException(new InvalidOperationException("The incremental session is not accepting refresh requests."));
@@ -725,6 +728,12 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                             operation,
                             requestCancellation.Token)
                         .ConfigureAwait(false);
+                    if (refresh.CaptureSemanticResponse)
+                    {
+                        result = result.WithSemanticRefreshResponse(
+                            CreateSemanticRefreshResponse(result, refresh.Target, refresh.Rebuild));
+                    }
+
                     operation.Complete();
                     TrySetStatusIfActive(IncrementalSessionStatus.Ready);
                     // A completed refresh is the foreground readiness barrier.
@@ -1269,10 +1278,14 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
 
     internal SemanticQueryResponse CreateSemanticRefreshResponse(
         IncrementalRefreshResult result,
+        RefreshTarget target,
         bool rebuild)
     {
         ArgumentNullException.ThrowIfNull(result);
-        var generation = result.Generation ?? _generation;
+        ArgumentNullException.ThrowIfNull(target);
+        ValidateTarget(target);
+        var generation = result.Generation
+            ?? throw new InvalidOperationException("A refresh result did not include its generation.");
         var diagnostics = _globalDiagnostics
             .Concat(_contributions.Values.SelectMany(contribution => contribution.Diagnostics))
             .Distinct(StringComparer.Ordinal)
@@ -1287,7 +1300,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             "refresh",
             new SemanticQuerySnapshot(
                 $"{(_semanticMode == "cold" ? Guid.Empty : _sessionId):D}:{_evidenceRevision}",
-                generation.EventGeneration,
+                target.EventGeneration,
                 generation.IndexedGeneration,
                 generation.EventGeneration),
             new SemanticQueryScope(
@@ -2200,6 +2213,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         bool IncludeGraph,
         string OperationKind,
         CancellationToken RequestCancellationToken,
+        bool CaptureSemanticResponse,
         TaskCompletionSource<IncrementalRefreshResult> Completion) : SessionCommand;
 
     private sealed record WatcherInvalidatedCommand(string Reason) : SessionCommand;

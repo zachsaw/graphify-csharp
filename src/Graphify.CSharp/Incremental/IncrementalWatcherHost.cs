@@ -1159,7 +1159,9 @@ internal sealed class IncrementalWatcherHost : IAsyncDisposable, IWatcherManagem
             await WaitUntilHealthyAsync(cancellationToken).ConfigureAwait(false);
             if (_session.IsEventTrustValid(trustVersion))
             {
-                return _session.CreateSemanticRefreshResponse(result, rebuild);
+                return result.SemanticRefreshResponse
+                    ?? throw new InvalidOperationException(
+                        "The semantic refresh completed without a worker-captured response.");
             }
 
             // A watcher delivery loss can be discovered while the refresh is
