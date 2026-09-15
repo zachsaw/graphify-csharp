@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.IO.Pipes;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -23,10 +22,10 @@ internal sealed class WatcherManagementServer : IAsyncDisposable
     private readonly TaskCompletionSource<bool> _listening = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly object _gate = new();
     private readonly HashSet<Task> _handlers = [];
-    private readonly HashSet<NamedPipeServerStream> _connections = [];
+    private readonly HashSet<Stream> _connections = [];
     private Task? _acceptTask;
     private Task? _disposeTask;
-    private NamedPipeServerStream? _acceptingServer;
+    private LocalIpcListener? _acceptingListener;
     private bool _disposed;
 
     public WatcherManagementServer(
@@ -84,8 +83,8 @@ internal sealed class WatcherManagementServer : IAsyncDisposable
                 // A concurrent DisposeAsync already stopped the listener.
             }
 
-            _acceptingServer?.Dispose();
-            _acceptingServer = null;
+            _acceptingListener?.Dispose();
+            _acceptingListener = null;
         }
     }
 
@@ -152,64 +151,37 @@ internal sealed class WatcherManagementServer : IAsyncDisposable
 
     private async Task RunAsync()
     {
+        LocalIpcListener? listener = null;
         try
         {
+            listener = LocalIpcTransport.CreateListener(_pipeName);
+            lock (_gate)
+            {
+                _acceptingListener = listener;
+            }
+
+            _listening.TrySetResult(true);
             while (!_acceptStop.IsCancellationRequested)
             {
-                NamedPipeServerStream server;
+                Stream server;
                 try
                 {
-                    server = new NamedPipeServerStream(
-                        _pipeName,
-                        PipeDirection.InOut,
-                        NamedPipeServerStream.MaxAllowedServerInstances,
-                        PipeTransmissionMode.Byte,
-                        PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-                }
-                catch (Exception exception)
-                {
-                    _listening.TrySetException(exception);
-                    return;
-                }
-
-                lock (_gate)
-                {
-                    _acceptingServer = server;
-                }
-
-                _listening.TrySetResult(true);
-
-                try
-                {
-                    await server.WaitForConnectionAsync(_acceptStop.Token).ConfigureAwait(false);
+                    server = await listener.AcceptAsync(_acceptStop.Token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) when (_acceptStop.IsCancellationRequested)
                 {
-                    server.Dispose();
                     return;
                 }
                 catch (ObjectDisposedException) when (_acceptStop.IsCancellationRequested)
                 {
-                    server.Dispose();
                     return;
                 }
                 catch (IOException) when (!_acceptStop.IsCancellationRequested)
                 {
-                    server.Dispose();
                     continue;
                 }
-                finally
-                {
-                    lock (_gate)
-                    {
-                        if (ReferenceEquals(_acceptingServer, server))
-                        {
-                            _acceptingServer = null;
-                        }
-                    }
-                }
 
-                if (!server.IsConnected || _acceptStop.IsCancellationRequested)
+                if (_acceptStop.IsCancellationRequested)
                 {
                     server.Dispose();
                     continue;
@@ -262,11 +234,20 @@ internal sealed class WatcherManagementServer : IAsyncDisposable
         }
         finally
         {
+            lock (_gate)
+            {
+                if (ReferenceEquals(_acceptingListener, listener))
+                {
+                    _acceptingListener = null;
+                }
+            }
+
+            listener?.Dispose();
             _listening.TrySetCanceled(_acceptStop.Token);
         }
     }
 
-    private async Task HandleConnectionSlotAsync(NamedPipeServerStream server)
+    private async Task HandleConnectionSlotAsync(Stream server)
     {
         try
         {
@@ -303,7 +284,7 @@ internal sealed class WatcherManagementServer : IAsyncDisposable
     }
 
     private async Task ProcessConnectionAsync(
-        NamedPipeServerStream server,
+        Stream server,
         CancellationToken cancellationToken)
     {
         WatcherManagementRequest? request;
@@ -543,7 +524,7 @@ internal sealed class WatcherManagementServer : IAsyncDisposable
 
     private void AbortConnections()
     {
-        NamedPipeServerStream[] connections;
+        Stream[] connections;
         lock (_gate)
         {
             connections = _connections.ToArray();

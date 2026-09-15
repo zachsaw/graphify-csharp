@@ -96,9 +96,11 @@ internal sealed record WatcherSessionDescriptor(
     [property: JsonPropertyName("repository_root")] string RepositoryRoot,
     [property: JsonPropertyName("configuration")] string Configuration,
     [property: JsonPropertyName("target_framework")] string? TargetFramework,
-    [property: JsonPropertyName("output_path")] string OutputPath,
+    [property: JsonPropertyName("output_path")] string? OutputPath,
     [property: JsonPropertyName("tool_version")] string ToolVersion,
-    [property: JsonPropertyName("protocol_version")] int ProtocolVersion);
+    [property: JsonPropertyName("protocol_version")] int ProtocolVersion,
+    [property: JsonPropertyName("semantic_endpoint")] string? SemanticEndpoint = null,
+    [property: JsonPropertyName("semantic_protocol_version")] int? SemanticProtocolVersion = null);
 
 internal sealed record WatcherInspectionSnapshot(
     [property: JsonPropertyName("session_id")] Guid SessionId,
@@ -108,7 +110,7 @@ internal sealed record WatcherInspectionSnapshot(
     [property: JsonPropertyName("repository_root")] string RepositoryRoot,
     [property: JsonPropertyName("configuration")] string Configuration,
     [property: JsonPropertyName("target_framework")] string? TargetFramework,
-    [property: JsonPropertyName("output_path")] string OutputPath,
+    [property: JsonPropertyName("output_path")] string? OutputPath,
     [property: JsonPropertyName("management_endpoint")] string ManagementEndpoint,
     [property: JsonPropertyName("tool_version")] string ToolVersion,
     [property: JsonPropertyName("protocol_version")] int ProtocolVersion,
@@ -116,7 +118,9 @@ internal sealed record WatcherInspectionSnapshot(
     [property: JsonPropertyName("ready")] bool Ready,
     [property: JsonPropertyName("event_generation")] long EventGeneration,
     [property: JsonPropertyName("indexed_generation")] long IndexedGeneration,
-    [property: JsonPropertyName("published_generation")] long PublishedGeneration);
+    [property: JsonPropertyName("published_generation")] long? PublishedGeneration,
+    [property: JsonPropertyName("semantic_endpoint")] string? SemanticEndpoint = null,
+    [property: JsonPropertyName("semantic_protocol_version")] int? SemanticProtocolVersion = null);
 
 internal sealed record WatcherManagementRequest(
     [property: JsonPropertyName("protocol_version")] int ProtocolVersion,
@@ -229,6 +233,11 @@ internal sealed class WatcherManagementServiceProvider : ISwitchMediatorServiceP
         if (typeof(T) == typeof(StopSessionHandler))
         {
             return (T)(object)_stop;
+        }
+
+        if (typeof(T) == typeof(ExecuteSemanticQueryHandler))
+        {
+            return (T)(object)new ExecuteSemanticQueryHandler();
         }
 
         throw new InvalidOperationException($"No management handler is registered for '{typeof(T).FullName}'.");

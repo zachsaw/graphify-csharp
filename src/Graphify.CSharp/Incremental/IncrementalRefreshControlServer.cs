@@ -1,4 +1,3 @@
-using System.IO.Pipes;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -20,7 +19,7 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
     private readonly object _gate = new();
     private Task? _serverTask;
     private Task? _disposeTask;
-    private NamedPipeServerStream? _activeServer;
+    private LocalIpcListener? _activeListener;
     private bool _disposed;
 
     public IncrementalRefreshControlServer(
@@ -72,7 +71,7 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
         {
             _disposed = true;
             _stop.Cancel();
-            _activeServer?.Dispose();
+            _activeListener?.Dispose();
             serverTask = _serverTask;
         }
 
@@ -94,33 +93,18 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
 
     private async Task RunAsync(CancellationToken cancellationToken)
     {
+        LocalIpcListener? listener = null;
         try
         {
-            while (true)
+            listener = LocalIpcTransport.CreateListener(_pipeName);
+            lock (_gate)
             {
-                await using var server = new NamedPipeServerStream(
-                    _pipeName,
-                    PipeDirection.InOut,
-                    maxNumberOfServerInstances: 1,
-                    PipeTransmissionMode.Byte,
-                    PipeOptions.Asynchronous);
-                lock (_gate)
-                {
-                    _activeServer = server;
-                }
+                _activeListener = listener;
+            }
 
-                try
-                {
-                    await server.WaitForConnectionAsync(cancellationToken).ConfigureAwait(false);
-                }
-                finally
-                {
-                    lock (_gate)
-                    {
-                        _activeServer = null;
-                    }
-                }
-
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                await using var server = await listener.AcceptAsync(cancellationToken).ConfigureAwait(false);
                 try
                 {
                     await ProcessConnectionAsync(server, cancellationToken).ConfigureAwait(false);
@@ -145,10 +129,22 @@ internal sealed class IncrementalRefreshControlServer : IAsyncDisposable
         catch (IOException) when (cancellationToken.IsCancellationRequested)
         {
         }
+        finally
+        {
+            lock (_gate)
+            {
+                if (ReferenceEquals(_activeListener, listener))
+                {
+                    _activeListener = null;
+                }
+            }
+
+            listener?.Dispose();
+        }
     }
 
     private async Task ProcessConnectionAsync(
-        NamedPipeServerStream server,
+        Stream server,
         CancellationToken cancellationToken)
     {
         using var reader = new StreamReader(

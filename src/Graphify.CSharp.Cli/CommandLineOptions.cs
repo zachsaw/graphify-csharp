@@ -8,6 +8,7 @@ public sealed class CommandLineOptions
         string inputPath,
         string repositoryRoot,
         string outputPath,
+        bool outputSpecified,
         string configuration,
         string? targetFramework,
         bool rebuild,
@@ -18,6 +19,7 @@ public sealed class CommandLineOptions
         InputPath = inputPath;
         RepositoryRoot = repositoryRoot;
         OutputPath = outputPath;
+        OutputSpecified = outputSpecified;
         Configuration = configuration;
         TargetFramework = targetFramework;
         Rebuild = rebuild;
@@ -31,6 +33,8 @@ public sealed class CommandLineOptions
     public string RepositoryRoot { get; }
 
     public string OutputPath { get; }
+
+    public bool OutputSpecified { get; }
 
     public string Configuration { get; }
 
@@ -125,6 +129,7 @@ public sealed class CommandLineOptions
                 inputPath: string.Empty,
                 repositoryRoot: Directory.GetCurrentDirectory(),
                 outputPath: string.Empty,
+                outputSpecified: false,
                 configuration: "Debug",
                 targetFramework: null,
                 rebuild: false,
@@ -142,6 +147,7 @@ public sealed class CommandLineOptions
         var repositoryRoot = FullPath(Single(values, "root") ?? Directory.GetCurrentDirectory(), Directory.GetCurrentDirectory());
         var inputPath = FullPath(input, repositoryRoot);
         var output = Single(values, "output") ?? Path.Combine(repositoryRoot, "graphify-out", "graph.json");
+        var outputSpecified = values.ContainsKey("output");
         var outputPath = FullPath(output, repositoryRoot);
         var configuration = Single(values, "configuration") ?? "Debug";
         if (string.IsNullOrWhiteSpace(configuration))
@@ -173,6 +179,7 @@ public sealed class CommandLineOptions
             inputPath,
             repositoryRoot,
             outputPath,
+            outputSpecified,
             configuration.Trim(),
             Single(values, "target-framework"),
             rebuild,
@@ -185,7 +192,7 @@ public sealed class CommandLineOptions
         + "Options:\n"
         + "  -i, --input <path>              C# solution/project/file-based app to extract (required)\n"
         + "  -r, --root <path>               Repository root for stable paths\n"
-        + "  -o, --output <path>             Graphify JSON output path\n"
+        + "  -o, --output <path>             Graphify JSON output path (optional with --watch; omit for query-only mode)\n"
         + "  -c, --configuration <name>      MSBuild configuration (default: Debug)\n"
         + "  -f, --target-framework <tfm>    Select one TFM when target selection is ambiguous\n"
         + "      --rebuild                  Ignore incremental cache and rebuild all projects\n"

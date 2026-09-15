@@ -11,13 +11,15 @@ The enricher keeps one complete Graphify JSON document as its public output.
 Incremental indexing is an internal implementation detail that reduces the
 amount of Roslyn work needed before that document is refreshed.
 
-The long-running watcher owns the warm Roslyn state, the incremental index, and
-JSON publication. A request accepted by a ready watcher is a foreground
-barrier: it waits until the requested state has been indexed, serialized,
-validated, and atomically published. A request that arrives while the watcher
-is starting or recovering receives a structured `not_ready` failure and does
-not invoke extraction or modify JSON; the caller can retry after readiness is
-observed.
+The long-running watcher owns the warm Roslyn state and incremental index. An
+output-backed watcher's legacy refresh request is a foreground JSON barrier: it
+waits until the requested state has been indexed, serialized, validated, and
+atomically published. That legacy request returns a structured `not_ready`
+failure while the watcher is starting or recovering; it does not invoke
+extraction or modify JSON, and the caller can retry after readiness is observed.
+The separate semantic query endpoint waits through startup and recovery and
+returns bounded evidence without publishing JSON. Explicit semantic export is
+the operation that asks a worker to create a complete Graphify document.
 
 The watcher is trusted only for the lifetime of its current healthy session. A
 new or restarted watcher must perform a cold reconciliation before it becomes
@@ -164,13 +166,15 @@ graphify-csharp stop <id>         # request and confirm graceful shutdown
 ```
 
 Management commands are client-side discovery plus a small per-session local
-named-pipe endpoint. They do not require an input path, load MSBuild/Roslyn, or
+IPC endpoint (a named pipe on Windows and a Unix-domain socket elsewhere). They
+do not require an input path, load MSBuild/Roslyn, or
 read the graph. `ps` reads one bounded descriptor per watcher from the
 current-user application-state directory and probes valid records with bounded
 timeouts. `inspect` and `stop` accept an exact session GUID or a unique prefix;
 an ambiguous prefix fails rather than selecting an arbitrary process.
 
-The descriptor is only a discovery hint. Live state is returned by the worker
+The descriptor is only a discovery hint and may remain as a stale record after
+an abnormal exit. Live state is returned by the worker
 and includes reachability, lifecycle/readiness, process-start identity, and
 event/index/published generations. A stale PID is never terminated by the
 management client. `stop` signals the existing host lifetime owner and reports
@@ -180,11 +184,72 @@ reply without awaiting its own disposal, while unrelated `inspect` requests
 remain available during a pending stop.
 
 The normal foreground invocation connects to a matching watcher when one exists.
-The watcher exposes its refresh channel throughout startup, but accepts JSON
-requests only after it is healthy. A request during `starting` or `recovering`
-returns `not_ready` without writing JSON; callers should inspect or retry after
-the watcher reports `ready`. If no matching watcher exists, the invocation
-performs the cold reconciliation itself and waits for completion.
+The watcher exposes its refresh channel throughout startup, but accepts legacy
+JSON refresh requests only after it is healthy. A request during `starting` or
+`recovering` returns `not_ready` without writing JSON; callers should inspect or
+retry after the watcher reports `ready`. If no matching watcher exists, the
+invocation performs the cold reconciliation itself and waits for completion.
+
+### Targeted semantic queries
+
+Phase 2 adds a separate, current-user local IPC endpoint for bounded semantic
+queries (a named pipe on Windows and a Unix-domain socket elsewhere). It shares
+the watcher's one Roslyn workspace and worker-owned evidence index,
+but it does not require a canonical output path, output lease, cache manifest,
+or Graphify installation. Start a query-only worker by omitting `--output`:
+
+```text
+graphify-csharp \
+  --input ./src/Product/Product.sln \
+  --root . \
+  --configuration Release \
+  --watch
+
+graphify-csharp ps --json
+graphify-csharp query symbols Submit --instance <session-id> --kind method --json
+graphify-csharp query callers --instance <session-id> --symbol <symbol-id> --json
+graphify-csharp query usage-summary --instance <session-id> --kind method --group-by project,namespace --json
+```
+
+`symbols` and `usage-summary` select declarations with an optional substring;
+`signature`, `usages`, `callers`, `hierarchy`, and `arguments` require an exact
+symbol ID. Results are ordered, bounded pages. A live response includes an
+opaque snapshot ID and may return a cursor for continuation. Cursors and
+snapshots are valid only for the current evidence revision; recovery or a
+subsequent evidence replacement returns `stale_snapshot` rather than silently
+advancing the request. A query-only worker never creates `csharp.json`.
+
+The same query handlers support a cold one-shot route:
+
+```text
+graphify-csharp query symbols Submit \
+  --input ./src/Product/Product.sln \
+  --root . \
+  --configuration Release \
+  --kind method \
+  --json
+```
+
+Cold queries do not create a persistent worker or support cursors/snapshots. A
+selected `--instance` is never silently replaced by cold analysis. The
+`usage-summary` batch command returns fixed inbound counts and optional flat
+origin groups; it deliberately does not decide whether a declaration is dead
+or test-only. Consumers apply their own namespace/project convention to the
+returned evidence.
+
+When a complete document is required, request it explicitly from a live
+worker:
+
+```text
+graphify-csharp export \
+  --instance <session-id> \
+  --output ./graphify-out/csharp.json \
+  --json
+```
+
+Export is serialized with the session and uses a destination lease. It does not
+change which canonical output (if any) the worker owns, and query-only state
+remains query-only after exporting elsewhere.
 
 There is one watcher per canonical analysis-and-output identity. The analysis
 identity includes the input path, repository root, configuration, selected
@@ -231,11 +296,16 @@ previous complete document while a new one is being built.
 
 ## Persistent state
 
-The public output remains a single file:
+For an output-backed workflow, the public output remains a single file:
 
 ```text
 graphify-out/csharp.json
 ```
+
+A query-only worker has no public output or output-derived persistent cache. Its
+semantic endpoint and session descriptor live under the per-user management
+state directory. A graceful shutdown removes the descriptor; an abnormal exit
+may leave a stale discovery record until a later management read observes it.
 
 The watcher may use ignored internal state alongside it:
 
@@ -317,6 +387,13 @@ background indexing the management state may be `refreshing` while readiness
 remains true. File events add paths to the dirty set and increment the in-memory
 event generation. Duplicate events are harmless because the set is keyed by
 canonical path or project.
+
+During a cold reload, the session may keep the previously published graph
+available while it replaces the evaluated input boundary with a bootstrap
+snapshot. That transition is deliberately not ready: `ready=false` remains in
+force until the new evaluated snapshot has been reconciled and published. This
+prevents a query or refresh from being admitted against an input policy that is
+still changing.
 
 An ordinary edit to an existing source document stays in the healthy session.
 Low-priority background indexing catches up in memory, and an explicit refresh
@@ -521,7 +598,15 @@ real project:
 - a different configuration, input, or target framework cannot overwrite an
   output owned by a live watcher, while ownership can be released and
   reacquired safely; and
-- repeated equivalent refreshes produce byte-identical complete documents.
+- repeated equivalent refreshes produce byte-identical complete documents;
+- query-only startup reaches readiness without invoking the serializer or
+  creating output/cache artifacts;
+- semantic queries wait for startup, reuse the warm evidence revision, and
+  return stale errors for invalid cursors/snapshots after evidence replacement;
+- exact overload, caller, hierarchy, argument, and grouped-summary queries
+  agree between cold and warm routes; and
+- explicit export is the only semantic-query operation that creates a complete
+  Graphify document.
 
 The performance measurement should separate workspace startup, Roslyn
 extraction, contribution merging, JSON serialization, and time spent waiting

@@ -15,7 +15,11 @@ internal sealed record WatcherSessionDescriptorReadResult(
 
 internal sealed class WatcherSessionRegistry
 {
-    public const string DescriptorSchemaVersion = "graphify-csharp/session/v1";
+    public const string LegacyDescriptorSchemaVersion = "graphify-csharp/session/v1";
+    public const string CurrentDescriptorSchemaVersion = "graphify-csharp/session/v2";
+    // Kept as an alias for tests and internal callers that construct the
+    // legacy output-backed descriptor shape. New hosts write v2 explicitly.
+    public const string DescriptorSchemaVersion = CurrentDescriptorSchemaVersion;
     private const string StateDirectoryEnvironmentVariable = "GRAPHIFY_CSHARP_STATE_DIR";
     private const int MaximumDescriptorBytes = 64 * 1024;
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -46,7 +50,7 @@ internal sealed class WatcherSessionRegistry
     public void Register(WatcherSessionDescriptor descriptor)
     {
         ArgumentNullException.ThrowIfNull(descriptor);
-        ValidateDescriptor(descriptor);
+        ValidateDescriptor(descriptor, _stateDirectory);
         Directory.CreateDirectory(_stateDirectory);
 
         var destination = DescriptorPath(descriptor.SessionId);
@@ -145,7 +149,7 @@ internal sealed class WatcherSessionRegistry
         return Path.Combine(localApplicationData, "Graphify.CSharp", "sessions");
     }
 
-    private static WatcherSessionDescriptorReadResult ReadOne(string path)
+    private WatcherSessionDescriptorReadResult ReadOne(string path)
     {
         var stem = Path.GetFileNameWithoutExtension(path);
         if (!Guid.TryParseExact(stem, "D", out var fileSessionId))
@@ -168,7 +172,7 @@ internal sealed class WatcherSessionRegistry
                 return Invalid(path, "invalid_descriptor", "The descriptor is empty.");
             }
 
-            ValidateDescriptor(descriptor);
+            ValidateDescriptor(descriptor, _stateDirectory);
             if (descriptor.SessionId != fileSessionId)
             {
                 return Invalid(path, "invalid_descriptor", "The descriptor session ID does not match its filename.");
@@ -202,9 +206,13 @@ internal sealed class WatcherSessionRegistry
         }
     }
 
-    private static void ValidateDescriptor(WatcherSessionDescriptor descriptor)
+    private static void ValidateDescriptor(
+        WatcherSessionDescriptor descriptor,
+        string stateDirectory)
     {
-        if (!string.Equals(descriptor.SchemaVersion, DescriptorSchemaVersion, StringComparison.Ordinal))
+        var isLegacy = string.Equals(descriptor.SchemaVersion, LegacyDescriptorSchemaVersion, StringComparison.Ordinal);
+        var isCurrent = string.Equals(descriptor.SchemaVersion, CurrentDescriptorSchemaVersion, StringComparison.Ordinal);
+        if (!isLegacy && !isCurrent)
         {
             throw new InvalidDataException(
                 $"The descriptor schema '{descriptor.SchemaVersion}' is not supported.");
@@ -217,7 +225,7 @@ internal sealed class WatcherSessionRegistry
             || string.IsNullOrWhiteSpace(descriptor.InputPath)
             || string.IsNullOrWhiteSpace(descriptor.RepositoryRoot)
             || string.IsNullOrWhiteSpace(descriptor.Configuration)
-            || string.IsNullOrWhiteSpace(descriptor.OutputPath)
+            || (isLegacy && string.IsNullOrWhiteSpace(descriptor.OutputPath))
             || string.IsNullOrWhiteSpace(descriptor.ToolVersion))
         {
             throw new InvalidDataException("The watcher session descriptor is incomplete.");
@@ -231,6 +239,34 @@ internal sealed class WatcherSessionRegistry
         if (descriptor.TargetFramework is not null && string.IsNullOrWhiteSpace(descriptor.TargetFramework))
         {
             throw new InvalidDataException("The watcher session descriptor has an empty target framework.");
+        }
+
+        if (descriptor.SemanticEndpoint is not null
+            && !SemanticQueryProtocol.IsValidEndpoint(descriptor.SemanticEndpoint))
+        {
+            throw new InvalidDataException("The watcher session descriptor has an invalid semantic endpoint.");
+        }
+
+        if ((descriptor.SemanticEndpoint is null) != (descriptor.SemanticProtocolVersion is null))
+        {
+            throw new InvalidDataException(
+                "The watcher session descriptor has incomplete semantic capability fields.");
+        }
+
+        if (descriptor.SemanticEndpoint is not null
+            && !string.Equals(
+                descriptor.SemanticEndpoint,
+                SemanticQueryProtocol.ForSession(descriptor.SessionId, stateDirectory),
+                StringComparison.Ordinal))
+        {
+            throw new InvalidDataException(
+                "The watcher session descriptor has a semantic endpoint that does not match its session and state directory.");
+        }
+
+        if (descriptor.SemanticProtocolVersion is not null
+            && descriptor.SemanticProtocolVersion != SemanticQueryProtocol.CurrentVersion)
+        {
+            throw new InvalidDataException("The watcher session descriptor has an unsupported semantic protocol version.");
         }
     }
 

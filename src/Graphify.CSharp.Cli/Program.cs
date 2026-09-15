@@ -29,6 +29,13 @@ public static class Program
         string[] args,
         CancellationToken cancellationToken = default)
     {
+        if (SemanticQueryCommandLine.IsSemanticCommand(args))
+        {
+            return await SemanticQueryCommandLine
+                .RunAsync(args, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         if (WatcherManagementCommandLine.IsManagementCommand(args))
         {
             try
@@ -72,9 +79,10 @@ public static class Program
                 options.TargetFramework);
             if (options.Watch)
             {
+                var watcherOutputPath = options.OutputSpecified ? options.OutputPath : null;
                 await using var host = new IncrementalWatcherHost(
                     request,
-                    options.OutputPath,
+                    watcherOutputPath,
                     new IncrementalWatcherOptions(options.WatchScanInterval),
                     managementOptions: new WatcherManagementOptions(
                         WatcherSessionRegistry.ResolveStateDirectory(),
@@ -98,8 +106,9 @@ public static class Program
                     return 0;
                 }
 
-                Console.WriteLine(
-                    $"Watching {options.RepositoryRoot}; refresh with graphify-csharp --input {options.InputPath}.");
+                Console.WriteLine(watcherOutputPath is null
+                    ? $"Watching {options.RepositoryRoot}; semantic queries are available through the registered session."
+                    : $"Watching {options.RepositoryRoot}; refresh with graphify-csharp --input {options.InputPath}.");
                 var shutdown = host.WaitForShutdownAsync(cancellationToken);
                 if (await Task.WhenAny(shutdown, stopRequested).ConfigureAwait(false) == stopRequested)
                 {

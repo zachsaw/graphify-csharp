@@ -157,3 +157,17 @@ jobs:
           GRAPHIFY_CSHARP_WATCH_E2E_SCAN_INTERVAL: '01:00:00'
           GRAPHIFY_CSHARP_WATCH_E2E_PACKAGE_PATH: ${{ steps.package.outputs.path }}
         run: ./scripts/run-watcher-e2e.sh
+
+      - name: Verify packaged semantic queries (net10 asset)
+        env:
+          GRAPHIFY_CSHARP_QUERY_E2E_FRAMEWORK: net10.0
+          GRAPHIFY_CSHARP_QUERY_E2E_TARGET_FRAMEWORK: net10.0
+          GRAPHIFY_CSHARP_QUERY_E2E_PACKAGE_PATH: ${{ steps.package.outputs.path }}
+        run: ./scripts/run-query-e2e.sh
+
+      - name: Verify packaged semantic queries (net11 asset)
+        env:
+          GRAPHIFY_CSHARP_QUERY_E2E_FRAMEWORK: net11.0
+          GRAPHIFY_CSHARP_QUERY_E2E_TARGET_FRAMEWORK: net10.0
+          GRAPHIFY_CSHARP_QUERY_E2E_PACKAGE_PATH: ${{ steps.package.outputs.path }}
+        run: ./scripts/run-query-e2e.sh

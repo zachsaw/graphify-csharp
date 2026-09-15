@@ -123,6 +123,42 @@ public sealed class WatcherSessionRegistryTests
     }
 
     [Fact]
+    public async Task Rejects_a_semantic_endpoint_not_derived_from_the_registry_state_directory()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var registry = new WatcherSessionRegistry(root);
+            var sessionId = Guid.NewGuid();
+            var valid = CreateDescriptor(sessionId) with
+            {
+                SemanticEndpoint = SemanticQueryProtocol.ForSession(sessionId, root),
+                SemanticProtocolVersion = SemanticQueryProtocol.CurrentVersion,
+            };
+            registry.Register(valid);
+
+            var swapped = valid with
+            {
+                SemanticEndpoint = SemanticQueryProtocol.ForSession(
+                    sessionId,
+                    Path.Combine(root, "another-state-directory")),
+            };
+            await File.WriteAllTextAsync(
+                registry.DescriptorPath(sessionId),
+                JsonSerializer.Serialize(swapped));
+
+            var record = Assert.Single(registry.ReadAll());
+            Assert.False(record.IsValid);
+            Assert.Equal("invalid_descriptor", record.ErrorCode);
+            Assert.Contains("does not match", record.Diagnostic!, StringComparison.Ordinal);
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(root);
+        }
+    }
+
+    [Fact]
     public void Removing_session_a_cannot_remove_session_b()
     {
         var root = CreateTemporaryDirectory();

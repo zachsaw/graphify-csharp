@@ -159,7 +159,8 @@ internal static class WatcherManagementCli
             Console.WriteLine($"root: {inspection.RepositoryRoot}");
             Console.WriteLine($"configuration: {inspection.Configuration}");
             Console.WriteLine($"target-framework: {inspection.TargetFramework ?? "<unresolved>"}");
-            Console.WriteLine($"output: {inspection.OutputPath}");
+            Console.WriteLine($"output: {inspection.OutputPath ?? "<none>"}");
+            Console.WriteLine($"semantic-endpoint: {inspection.SemanticEndpoint ?? "<none>"}");
             Console.WriteLine($"generations: events={inspection.EventGeneration}, indexed={inspection.IndexedGeneration}, published={inspection.PublishedGeneration}");
         }
 
@@ -224,7 +225,9 @@ internal static class WatcherManagementCli
             probe.Descriptor.ProtocolVersion,
             inspection?.EventGeneration,
             inspection?.IndexedGeneration,
-            inspection?.PublishedGeneration);
+            inspection?.PublishedGeneration,
+            probe.Descriptor.SemanticEndpoint,
+            probe.Descriptor.SemanticProtocolVersion);
     }
 
     private static int WriteFailure(
@@ -273,13 +276,15 @@ internal static class WatcherManagementCli
         [property: JsonPropertyName("repository_root")] string RepositoryRoot,
         [property: JsonPropertyName("configuration")] string Configuration,
         [property: JsonPropertyName("target_framework")] string? TargetFramework,
-        [property: JsonPropertyName("output_path")] string OutputPath,
+        [property: JsonPropertyName("output_path")] string? OutputPath,
         [property: JsonPropertyName("management_endpoint")] string ManagementEndpoint,
         [property: JsonPropertyName("tool_version")] string ToolVersion,
         [property: JsonPropertyName("protocol_version")] int ProtocolVersion,
         [property: JsonPropertyName("event_generation")] long? EventGeneration,
         [property: JsonPropertyName("indexed_generation")] long? IndexedGeneration,
-        [property: JsonPropertyName("published_generation")] long? PublishedGeneration);
+        [property: JsonPropertyName("published_generation")] long? PublishedGeneration,
+        [property: JsonPropertyName("semantic_endpoint")] string? SemanticEndpoint,
+        [property: JsonPropertyName("semantic_protocol_version")] int? SemanticProtocolVersion);
 
     private sealed record WatcherManagementErrorResponse(
         [property: JsonPropertyName("schema_version")] string SchemaVersion,

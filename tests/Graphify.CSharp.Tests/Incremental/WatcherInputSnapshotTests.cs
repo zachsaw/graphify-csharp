@@ -216,6 +216,44 @@ public sealed class WatcherInputSnapshotTests
     }
 
     [Fact]
+    public void A_later_evaluated_input_overrides_an_explicit_export_exclusion()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var exportedPath = Path.Combine(root, "generated", "semantic.json");
+            var snapshot = CreateSnapshot(
+                sources: [],
+                dependencies: [],
+                discoveryRoots: [root]);
+            var excluded = snapshot.WithAdditionalToolPath(exportedPath);
+            Assert.False(excluded.Classify(new FileChangeEvent(
+                FileChangeKind.Changed,
+                exportedPath)).Accepted);
+
+            var evaluatedInput = WatcherInputSnapshot.CreateForTests(
+                knownSources: [exportedPath],
+                knownDependencies: [],
+                sourceProjects: [],
+                discoveryRoots: [root],
+                outputPath: null,
+                cachePath: null);
+            var effective = evaluatedInput.WithAdditionalToolPath(exportedPath);
+            var classification = effective.Classify(new FileChangeEvent(
+                FileChangeKind.Changed,
+                exportedPath));
+
+            Assert.True(effective.IsKnownInput(exportedPath));
+            Assert.True(classification.Accepted);
+            Assert.False(classification.RequiresColdReconciliation);
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(root);
+        }
+    }
+
+    [Fact]
     public void Directory_events_preserve_known_input_ancestors_and_both_rename_endpoints()
     {
         var root = CreateTemporaryDirectory();
@@ -367,6 +405,40 @@ public sealed class WatcherInputSnapshotTests
                 FileChangeKind.Created,
                 temporaryOutput)).Accepted);
             Assert.False(snapshot.ShouldIncludeInInventory(temporaryOutput));
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(root);
+        }
+    }
+
+    [Fact]
+    public void Tool_paths_are_exact_and_do_not_hide_nearby_project_candidates()
+    {
+        var root = CreateTemporaryDirectory();
+        try
+        {
+            var output = Path.Combine(root, "graphify-out", "csharp.json");
+            var cache = Path.Combine(root, ".graphify-csharp", "manifest.json");
+            var snapshot = WatcherInputSnapshot.CreateForTests(
+                knownSources: [],
+                knownDependencies: [],
+                sourceProjects: [],
+                discoveryRoots: [root],
+                outputPath: output,
+                cachePath: cache,
+                inputDiscoveryComplete: false);
+
+            Assert.False(snapshot.Classify(new FileChangeEvent(FileChangeKind.Changed, output)).Accepted);
+            Assert.False(snapshot.Classify(new FileChangeEvent(FileChangeKind.Changed, cache)).Accepted);
+            Assert.True(snapshot.Classify(new FileChangeEvent(
+                FileChangeKind.Created,
+                Path.Combine(root, "graphify-out", "Generated.cs"),
+                IsDirectory: false)).Accepted);
+            Assert.True(snapshot.Classify(new FileChangeEvent(
+                FileChangeKind.Created,
+                Path.Combine(root, ".graphify-csharp", "Generated.cs"),
+                IsDirectory: false)).Accepted);
         }
         finally
         {

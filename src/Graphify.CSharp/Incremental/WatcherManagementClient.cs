@@ -1,4 +1,3 @@
-using System.IO.Pipes;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -126,16 +125,10 @@ internal sealed class WatcherManagementClient
         var token = timeoutSource.Token;
         try
         {
-            // Keep construction inside the transport boundary too. A descriptor
-            // can be supplied by an external caller instead of the registry,
-            // and named-pipe implementations may reject a malformed name with
-            // ArgumentException or NotSupportedException.
-            await using var pipe = new NamedPipeClientStream(
-                ".",
+            await using var pipe = await LocalIpcTransport.ConnectAsync(
                 descriptor.ManagementEndpoint,
-                PipeDirection.InOut,
-                PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-            await pipe.ConnectAsync(ToTimeoutMilliseconds(timeout), token).ConfigureAwait(false);
+                timeout,
+                token).ConfigureAwait(false);
             var request = new WatcherManagementRequest(
                 WatcherManagementProtocol.CurrentVersion,
                 descriptor.SessionId,
@@ -234,6 +227,4 @@ internal sealed class WatcherManagementClient
         }
     }
 
-    private static int ToTimeoutMilliseconds(TimeSpan timeout) =>
-        (int)Math.Clamp(Math.Ceiling(timeout.TotalMilliseconds), 1, int.MaxValue);
 }

@@ -48,6 +48,7 @@ internal sealed class WatcherInputSnapshot
         ImmutableHashSet.Create<string>(IncrementalPaths.PathComparer);
 
     private readonly ImmutableHashSet<string> _knownInputPaths;
+    private readonly Lazy<ImmutableHashSet<string>> _knownPhysicalInputPaths;
     private readonly ImmutableHashSet<string> _knownSourcePaths;
     private readonly ImmutableHashSet<string> _knownDependencyPaths;
     private readonly ImmutableDictionary<string, ImmutableArray<string>> _sourceProjects;
@@ -81,6 +82,7 @@ internal sealed class WatcherInputSnapshot
         bool isBootstrap = false)
     {
         _knownInputPaths = CreatePathSet(knownInputPaths);
+        _knownPhysicalInputPaths = new Lazy<ImmutableHashSet<string>>(BuildPhysicalInputPaths);
         _knownSourcePaths = CreatePathSet(knownSourcePaths);
         _knownDependencyPaths = CreatePathSet(knownDependencyPaths);
         _sourceProjects = sourceProjects
@@ -137,8 +139,8 @@ internal sealed class WatcherInputSnapshot
 
     public static WatcherInputSnapshot CreateBootstrap(
         IEnumerable<string> discoveryRoots,
-        string outputPath,
-        string cachePath,
+        string? outputPath,
+        string? cachePath,
         IEnumerable<WatcherRoot>? watchRoots = null,
         IEnumerable<string>? knownInputPaths = null)
     {
@@ -159,8 +161,8 @@ internal sealed class WatcherInputSnapshot
     public static WatcherInputSnapshot Create(
         LoadedSolution solution,
         ProjectLoadRequest request,
-        string outputPath,
-        string cachePath)
+        string? outputPath,
+        string? cachePath)
     {
         ArgumentNullException.ThrowIfNull(solution);
         ArgumentNullException.ThrowIfNull(request);
@@ -323,8 +325,8 @@ internal sealed class WatcherInputSnapshot
         IEnumerable<string> knownDependencies,
         IEnumerable<KeyValuePair<string, IEnumerable<string>>> sourceProjects,
         IEnumerable<string> discoveryRoots,
-        string outputPath,
-        string cachePath,
+        string? outputPath,
+        string? cachePath,
         IEnumerable<ProjectInputGlob>? inputGlobs = null,
         bool inputDiscoveryComplete = true,
         IEnumerable<string>? inputDiscoveryDiagnostics = null,
@@ -369,7 +371,86 @@ internal sealed class WatcherInputSnapshot
 
     public bool IsBootstrap => _isBootstrap;
 
+    internal WatcherInputSnapshot WithAdditionalToolPath(string path)
+    {
+        var canonicalPath = Canonicalize(path);
+        // MSBuild/Roslyn membership is authoritative. If a later evaluated
+        // snapshot makes an export destination a real input, an older
+        // explicit-export exclusion must not hide that input from the watcher.
+        if (_knownInputPaths.Contains(canonicalPath))
+        {
+            return this;
+        }
+
+        if (_ignoredRoots.Any(existing =>
+                string.Equals(existing, canonicalPath, IncrementalPaths.PathComparison)))
+        {
+            return this;
+        }
+
+        return new WatcherInputSnapshot(
+            _knownInputPaths,
+            _knownSourcePaths,
+            _knownDependencyPaths,
+            _sourceProjects.Select(pair =>
+                new KeyValuePair<string, IEnumerable<string>>(pair.Key, pair.Value)),
+            _discoveryRoots,
+            _ignoredRoots.Append(canonicalPath),
+            WatchRoots,
+            _inputGlobs.Select(glob => glob.Definition),
+            _inputDiscoveryComplete,
+            _inputDiscoveryDiagnostics,
+            _infrastructurePaths,
+            _outputRoots,
+            _isBootstrap);
+    }
+
     public bool IsKnownInput(string path) => _knownInputPaths.Contains(Canonicalize(path));
+
+    /// <summary>
+    /// Performs the slower, filesystem-aware form of input membership used by
+    /// explicit export validation. Ordinary watcher classification remains a
+    /// lexical lookup; resolving aliases for every file-system event would
+    /// make the hot path unnecessarily expensive.
+    /// </summary>
+    internal bool IsKnownInputOnFileSystem(string path)
+    {
+        var canonicalPath = Canonicalize(path);
+        if (_knownInputPaths.Contains(canonicalPath))
+        {
+            return true;
+        }
+
+        if (!IncrementalPaths.TryResolvePhysicalPath(canonicalPath, out var physicalPath))
+        {
+            return false;
+        }
+
+        if (_knownInputPaths.Contains(physicalPath))
+        {
+            return true;
+        }
+
+        // File aliases are not required to preserve their leaf name. Build
+        // this complete physical-identity set lazily because explicit export
+        // validation is rare; resolving every evaluated input on the ordinary
+        // watcher event path would be needlessly expensive.
+        return _knownPhysicalInputPaths.Value.Contains(physicalPath);
+    }
+
+    private ImmutableHashSet<string> BuildPhysicalInputPaths()
+    {
+        var physicalPaths = ImmutableHashSet.CreateBuilder<string>(IncrementalPaths.PathComparer);
+        foreach (var knownInputPath in _knownInputPaths)
+        {
+            if (IncrementalPaths.TryResolvePhysicalPath(knownInputPath, out var physicalPath))
+            {
+                physicalPaths.Add(physicalPath);
+            }
+        }
+
+        return physicalPaths.ToImmutable();
+    }
 
     public bool IsKnownSource(string path) => _knownSourcePaths.Contains(Canonicalize(path));
 
@@ -443,7 +524,7 @@ internal sealed class WatcherInputSnapshot
         ArgumentNullException.ThrowIfNull(change);
 
         var endpoints = change.Endpoints
-            .Select(Canonicalize)
+            .Select(path => Canonicalize(path!))
             .Distinct(IncrementalPaths.PathComparer)
             .ToArray();
         if (endpoints.Length == 0)
@@ -519,7 +600,9 @@ internal sealed class WatcherInputSnapshot
             RequiresColdReconciliation: conservativeEvent || globEvent);
     }
 
-    private bool IsToolPath(string path) => IsToolPath(path, _ignoredRoots);
+    private bool IsToolPath(string path) =>
+        !_knownInputPaths.Contains(path)
+        && IsToolPath(path, _ignoredRoots);
 
     private static bool IsToolPath(string path, IEnumerable<string> ignoredRoots) =>
         ignoredRoots.Any(root => IncrementalPaths.IsPathOrUnder(path, root)
@@ -571,10 +654,16 @@ internal sealed class WatcherInputSnapshot
     private static string Canonicalize(string path) =>
         IncrementalPaths.CanonicalAbsolutePath(path);
 
+    private static string GetLeafName(string path)
+    {
+        var separator = path.LastIndexOf('/');
+        return separator < 0 ? path : path[(separator + 1)..];
+    }
+
     private static ImmutableHashSet<string> CreatePathSet(IEnumerable<string> paths) =>
         paths
             .Where(path => !string.IsNullOrWhiteSpace(path))
-            .Select(Canonicalize)
+            .Select(path => Canonicalize(path!))
             .ToImmutableHashSet(IncrementalPaths.PathComparer);
 
     private static ImmutableArray<string> NormalizePaths(IEnumerable<string> paths) =>
@@ -615,11 +704,12 @@ internal sealed class WatcherInputSnapshot
         return ancestors.OrderBy(path => path, IncrementalPaths.PathComparer).ToImmutableArray();
     }
 
-    private static IReadOnlyList<string> BuildToolIgnoredRoots(string outputPath, string cachePath) =>
-    [
-        Canonicalize(outputPath),
-        Path.GetDirectoryName(Canonicalize(cachePath)) ?? Canonicalize(cachePath),
-    ];
+    private static IReadOnlyList<string> BuildToolIgnoredRoots(string? outputPath, string? cachePath) =>
+        new[] { outputPath, cachePath }
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(path => Canonicalize(path!))
+            .Distinct(IncrementalPaths.PathComparer)
+            .ToArray();
 
     private static string GetProjectDirectory(AnalyzedProject project, string repositoryRoot)
     {

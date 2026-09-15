@@ -57,6 +57,75 @@ Wait for successful completion before treating the JSON as current. Read
 A failed command may leave a previous complete document on disk; its existence
 does not establish a successful refresh.
 
+## Ask targeted semantic questions
+
+For a focused question, use the semantic query interface instead of generating
+the complete JSON document. The query interface belongs to `graphify-csharp`;
+it is not the separate `graphify query` command. A query-only watcher keeps the
+Roslyn workspace warm and creates no graph output:
+
+~~~bash
+graphify-csharp \
+  --input ./src/MyProduct.sln \
+  --root . \
+  --configuration Release \
+  --watch
+
+graphify-csharp ps --json
+graphify-csharp query symbols Submit --instance <session-id> --kind method --json
+~~~
+
+Use the symbol ID returned by `symbols` for exact queries:
+
+~~~bash
+graphify-csharp query signature --instance <session-id> --symbol <symbol-id> --json
+graphify-csharp query callers --instance <session-id> --symbol <symbol-id> --json
+graphify-csharp query usages --instance <session-id> --symbol <symbol-id> --json
+graphify-csharp query hierarchy --instance <session-id> --symbol <symbol-id> --direction implementations --json
+graphify-csharp query arguments --instance <session-id> --symbol <symbol-id> --json
+graphify-csharp query usage-summary --instance <session-id> --kind method --group-by project,namespace --json
+~~~
+
+The available verbs are `symbols`, `signature`, `usages`, `callers`,
+`hierarchy`, `arguments`, and `usage-summary`. `symbols` and `usage-summary`
+accept a positional case-insensitive substring; the other verbs require one
+exact symbol ID. `usage-summary` returns fixed inbound counts and origin
+groups. It does not label declarations as dead or test-only; classify those
+results using the user's project or namespace convention.
+
+For a summary, `edge_count` counts distinct merged relationships while
+`occurrence_count` counts source locations; a relationship with no location
+counts as one edge and zero occurrences. Scope filters select target
+declarations for `symbols` and `usage-summary`, origin/caller declarations for
+`usages` and `callers`, returned neighbors for `hierarchy`, and caller
+documents for `arguments`.
+
+Responses are bounded JSON pages. Continue a live query with the returned
+`page.next_cursor`, keeping the same verb, symbol, filters, and direction. A
+changed evidence revision or watcher recovery invalidates cursors and pinned
+snapshots. Cold queries use the same handlers without a persistent worker:
+
+~~~bash
+graphify-csharp query symbols Submit \
+  --input ./src/MyProduct.sln \
+  --root . \
+  --configuration Release \
+  --kind method \
+  --json
+~~~
+
+Cold queries do not support continuation cursors or snapshots. If a selected
+`--instance` is unavailable, report the routing error; never silently fall back
+to a cold analysis. Use `--target-framework` only when the analyzed input has
+multiple target frameworks; it selects the compilation and is unrelated to
+the global-tool `--framework`.
+
+Argument spans use Roslyn text offsets in UTF-16 code units. Line and column
+locations are one-based and repository-relative. A successful response is
+current for the worker's accepted, indexed evidence snapshot; it does not
+promise that a disk edit occurring after that event boundary has already been
+indexed.
+
 ## Read the evidence
 
 The output is one complete JSON document with `nodes`, `edges`, and
@@ -122,6 +191,13 @@ graphify-csharp \
   --watch
 ~~~
 
+That output-backed watcher exposes both the legacy JSON refresh channel and
+the semantic query endpoint. To keep only semantic state warm, omit `--output`
+as shown in the targeted-query section. A semantic query waits for startup and
+recovery through its endpoint; the legacy no-subcommand JSON refresh returns
+`not_ready` while an output-backed watcher is starting or recovering, and
+should be retried after `inspect` reports `ready: true`.
+
 Run the ordinary command without `--watch` whenever fresh evidence is needed.
 If a matching watcher is still starting or recovering, the command returns a
 `not_ready` error immediately and does not write JSON. Retry it after
@@ -177,8 +253,8 @@ scope; changing the indexer's code is not part of using this skill.
 
 `graphify-csharp` and `graphify` are separate executables. This skill works
 without Graphify. If Graphify is already part of the user's workflow, refresh
-the C# document as above before a C# query, path, explanation, or export, and
-pass that document explicitly:
+the C# document as above before a Graphify query, path, explanation, or export,
+and pass that document explicitly:
 
 ~~~bash
 graphify query "Which methods call the order service?" \
@@ -190,3 +266,15 @@ C# refresh and evidence-reading steps alongside it. Preserve raw
 `csharp.json` for audits: a clustered view can normalize parallel
 relationships, and name-based graph nodes cannot be joined to semantic IDs
 merely by matching labels.
+
+When a complete document is needed from a warm semantic worker, request it
+explicitly; this is the bridge to the optional Graphify workflow:
+
+~~~bash
+graphify-csharp export \
+  --instance <session-id> \
+  --output ./graphify-out/csharp.json \
+  --json
+~~~
+
+Export is not performed implicitly by a targeted query.
