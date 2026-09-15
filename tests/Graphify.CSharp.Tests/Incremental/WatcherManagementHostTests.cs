@@ -30,6 +30,7 @@ public sealed class WatcherManagementHostTests
             Assert.True(response.Success);
             Assert.Equal("starting", response.Inspection!.LifecycleState);
             Assert.False(response.Inspection.Ready);
+            Assert.Equal("loading_projects", response.Inspection.Observation!.Activity!.Stage);
             Assert.True(loader.LoadEntered.Task.IsCompleted);
 
             loader.Release();
@@ -132,6 +133,14 @@ public sealed class WatcherManagementHostTests
             var descriptor = await WaitForDescriptorAsync(registry);
             await scanner.ScanEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
+            var inspecting = await new WatcherManagementClient().InspectAsync(
+                descriptor,
+                TimeSpan.FromSeconds(2));
+            Assert.True(inspecting.Success);
+            Assert.False(inspecting.Inspection!.Ready);
+            Assert.True(inspecting.Inspection.Observation!.StartupPending);
+            Assert.Equal("inventory", inspecting.Inspection.Observation.Activity!.Stage);
+
             var stop = new WatcherManagementClient().StopAsync(
                 descriptor,
                 TimeSpan.FromSeconds(10));
@@ -144,6 +153,46 @@ public sealed class WatcherManagementHostTests
         }
         finally
         {
+            DeleteTemporaryDirectory(fixture.Root);
+            DeleteTemporaryDirectory(stateDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Info_remains_available_while_final_startup_inventory_is_pending()
+    {
+        var fixture = await CreateFixtureAsync();
+        var stateDirectory = Path.Combine(Path.GetDirectoryName(fixture.Root)!, $"state-{Guid.NewGuid():N}");
+        var scanner = new FinalInventoryBlockingScanner();
+        try
+        {
+            await using var host = new IncrementalWatcherHost(
+                fixture.Request,
+                fixture.OutputPath,
+                new IncrementalWatcherOptions(backupScanInterval: TimeSpan.FromHours(1)),
+                inventoryScanner: scanner,
+                managementOptions: new WatcherManagementOptions(stateDirectory, "test"));
+            var start = host.StartAsync();
+            var registry = new WatcherSessionRegistry(stateDirectory);
+            var descriptor = await WaitForDescriptorAsync(registry);
+            await scanner.SecondScanEntered.Task.WaitAsync(TimeSpan.FromSeconds(60));
+
+            var inspecting = await new WatcherManagementClient().InspectAsync(
+                descriptor,
+                TimeSpan.FromSeconds(2));
+            Assert.True(inspecting.Success);
+            Assert.False(inspecting.Inspection!.Ready);
+            Assert.True(inspecting.Inspection.Observation!.StartupPending);
+            Assert.Equal("final inventory", inspecting.Inspection.Observation.StartupDetail);
+            Assert.Null(inspecting.Inspection.Observation.Activity);
+
+            scanner.Release();
+            await start.WaitAsync(TimeSpan.FromSeconds(60));
+            Assert.True(host.IsReady);
+        }
+        finally
+        {
+            scanner.Release();
             DeleteTemporaryDirectory(fixture.Root);
             DeleteTemporaryDirectory(stateDirectory);
         }
@@ -336,5 +385,36 @@ public sealed class WatcherManagementHostTests
             cancellationToken.ThrowIfCancellationRequested();
             return Task.FromResult(new FileInventorySnapshot(Array.Empty<FileInventoryEntry>()));
         }
+    }
+
+    private sealed class FinalInventoryBlockingScanner : IFileInventoryScanner
+    {
+        private readonly IFileInventoryScanner _inner = new FileInventoryScanner();
+        private readonly TaskCompletionSource<bool> _release =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _scanCount;
+
+        public TaskCompletionSource<bool> SecondScanEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<FileInventorySnapshot> ScanAsync(
+            IReadOnlyList<string> roots,
+            string repositoryRoot,
+            bool includeContentHashes = false,
+            CancellationToken cancellationToken = default,
+            WatcherInputSnapshot? inputSnapshot = null)
+        {
+            if (Interlocked.Increment(ref _scanCount) == 2)
+            {
+                SecondScanEntered.TrySetResult(true);
+                await _release.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            return await _inner
+                .ScanAsync(roots, repositoryRoot, includeContentHashes, cancellationToken, inputSnapshot)
+                .ConfigureAwait(false);
+        }
+
+        public void Release() => _release.TrySetResult(true);
     }
 }

@@ -161,7 +161,9 @@ graphify-csharp ... --watch       # start the long-running worker
 graphify-csharp ...               # request a foreground refresh
 graphify-csharp ... --rebuild     # request a cache-invalidating rebuild
 graphify-csharp ps [--json]       # discover current-user watcher sessions
+graphify-csharp info <id>        # inspect progress, evidence, and resources
 graphify-csharp inspect <id>      # inspect one session
+graphify-csharp diagnostics <id> --output report.json
 graphify-csharp stop <id>         # request and confirm graceful shutdown
 ```
 
@@ -182,6 +184,30 @@ success only after indexing/publication work and leases have completed. The
 management server keeps the completion response path alive long enough to
 reply without awaiting its own disposal, while unrelated `inspect` requests
 remain available during a pending stop.
+
+`info` and `inspect` are exact aliases. Both read the same bounded live
+inspection envelope; the wire response is normalized to `command: "inspect"`.
+The enriched observation includes the current operation/stage, real completed
+work where a denominator exists, revision-qualified evidence counts, timing of
+the last completed operation, and cached process-resource samples. A bounded
+`startup_pending` state covers host-owned gaps such as final inventory and the
+health barrier when no worker operation is active. `ps` keeps only compact
+stage, uptime, and RSS fields. These reads do not load MSBuild, merge
+contributions, build the lazy query index, or run worker work.
+
+The watcher, cold extraction, and cold query paths print newline-delimited
+progress to stderr by default. `--no-progress` suppresses that presentation
+only; it does not change request identity, cache behavior, readiness, or result
+formats. Progress does not provide an ETA and does not itself prove readiness;
+host-startup heartbeats are explicitly labelled as such.
+
+For support, `diagnostics <id> --output <path>` requests one bounded report
+from a live watcher. The client writes the report locally after receiving the
+IPC response, using a new destination path; the watcher never writes it. The
+report includes the inspection identity, runtime, stage/timing history,
+evidence counts, recovery history, and process metrics. It contains paths and
+diagnostic text, is not a heap dump, and is not anonymized. An older watcher
+returns an unsupported-command error rather than being cold-loaded.
 
 The normal foreground invocation connects to a matching watcher when one exists.
 The watcher exposes its refresh channel throughout startup, but accepts legacy

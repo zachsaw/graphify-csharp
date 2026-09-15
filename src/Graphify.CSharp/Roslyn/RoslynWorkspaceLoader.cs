@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using Graphify.CSharp.Incremental;
 using Microsoft.Build.Locator;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.MSBuild;
@@ -8,6 +9,18 @@ namespace Graphify.CSharp.Roslyn;
 public sealed class RoslynWorkspaceLoader : IProjectLoader
 {
     public async Task<LoadedSolution> LoadAsync(ProjectLoadRequest request, CancellationToken cancellationToken = default)
+        => await LoadCoreAsync(request, operation: null, cancellationToken).ConfigureAwait(false);
+
+    internal async Task<LoadedSolution> LoadAsync(
+        ProjectLoadRequest request,
+        IndexingObservationOperation? operation,
+        CancellationToken cancellationToken = default)
+        => await LoadCoreAsync(request, operation, cancellationToken).ConfigureAwait(false);
+
+    private async Task<LoadedSolution> LoadCoreAsync(
+        ProjectLoadRequest request,
+        IndexingObservationOperation? operation,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
         MsBuildEnvironment.EnsureRegistered();
@@ -30,10 +43,14 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
 
         try
         {
-            opened = await OpenProjectsAsync(workspace, request, cancellationToken).ConfigureAwait(false);
+            using var loadPhase = operation?.BeginPhase(IndexingStages.LoadingProjects);
+            opened = await OpenProjectsAsync(workspace, request, loadPhase, cancellationToken).ConfigureAwait(false);
             var projects = opened.Projects;
             var analyzedProjects = new List<AnalyzedProject>(projects.Count);
             var seenProjectKeys = new HashSet<string>(StringComparer.Ordinal);
+            var completedProjects = 0;
+            var csharpProjectCount = projects.Count(project =>
+                string.Equals(project.Language, LanguageNames.CSharp, StringComparison.Ordinal));
             foreach (var project in projects.OrderBy(project => project.FilePath ?? project.Name, StringComparer.Ordinal))
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -42,6 +59,7 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
                     continue;
                 }
 
+                loadPhase?.SetStage(IndexingStages.Compiling, project.Name);
                 var compilation = await project.GetCompilationAsync(cancellationToken).ConfigureAwait(false);
                 if (compilation is null)
                 {
@@ -68,6 +86,7 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
                 }
 
                 analyzedProjects.Add(new AnalyzedProject(project, identity, compilation));
+                loadPhase?.ReportWork(++completedProjects, csharpProjectCount, "projects", project.Name);
             }
 
             if (analyzedProjects.Count == 0)
@@ -95,22 +114,26 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
     private static async Task<WorkspaceOpenResult> OpenProjectsAsync(
         MSBuildWorkspace workspace,
         ProjectLoadRequest request,
+        IndexingObservationPhase? phase,
         CancellationToken cancellationToken)
     {
         var extension = Path.GetExtension(request.InputPath);
         return extension.ToLowerInvariant() switch
         {
             ".sln" or ".slnx" => new WorkspaceOpenResult(
-                (await workspace.OpenSolutionAsync(request.InputPath, cancellationToken: cancellationToken).ConfigureAwait(false)).Projects.ToArray(),
+                (await workspace.OpenSolutionAsync(
+                    request.InputPath,
+                    new InlineProgress<ProjectLoadProgress>(progress => ReportLoadProgress(phase, progress)),
+                    cancellationToken).ConfigureAwait(false)).Projects.ToArray(),
                 request.InputPath,
                 request.InputPath,
                 Resources: null),
             ".csproj" => new WorkspaceOpenResult(
-                await OpenProjectAndReferencesAsync(workspace, request.InputPath, cancellationToken).ConfigureAwait(false),
+                await OpenProjectAndReferencesAsync(workspace, request.InputPath, phase, cancellationToken).ConfigureAwait(false),
                 request.InputPath,
                 request.InputPath,
                 Resources: null),
-            ".cs" => await OpenFileBasedAppAsync(workspace, request, cancellationToken).ConfigureAwait(false),
+            ".cs" => await OpenFileBasedAppAsync(workspace, request, phase, cancellationToken).ConfigureAwait(false),
             _ => throw new ArgumentException("Input must be a .sln, .slnx, .csproj, or file-based .cs app.", nameof(request)),
         };
     }
@@ -118,6 +141,7 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
     private static async Task<WorkspaceOpenResult> OpenFileBasedAppAsync(
         MSBuildWorkspace workspace,
         ProjectLoadRequest request,
+        IndexingObservationPhase? phase,
         CancellationToken cancellationToken)
     {
         var generated = await FileBasedAppProject.CreateAsync(
@@ -126,7 +150,11 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
             cancellationToken).ConfigureAwait(false);
         try
         {
-            await workspace.OpenProjectAsync(generated.ProjectPath, cancellationToken: cancellationToken).ConfigureAwait(false);
+            await workspace.OpenProjectAsync(
+                    generated.ProjectPath,
+                    new InlineProgress<ProjectLoadProgress>(progress => ReportLoadProgress(phase, progress)),
+                    cancellationToken)
+                .ConfigureAwait(false);
             var remappedSolution = await generated.RemapDocumentsAsync(
                 workspace.CurrentSolution,
                 cancellationToken).ConfigureAwait(false);
@@ -147,10 +175,38 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
     private static async Task<IReadOnlyList<Project>> OpenProjectAndReferencesAsync(
         MSBuildWorkspace workspace,
         string projectPath,
+        IndexingObservationPhase? phase,
         CancellationToken cancellationToken)
     {
-        await workspace.OpenProjectAsync(projectPath, cancellationToken: cancellationToken).ConfigureAwait(false);
+        await workspace.OpenProjectAsync(
+                projectPath,
+                new InlineProgress<ProjectLoadProgress>(progress => ReportLoadProgress(phase, progress)),
+                cancellationToken)
+            .ConfigureAwait(false);
         return workspace.CurrentSolution.Projects.ToArray();
+    }
+
+    private static void ReportLoadProgress(
+        IndexingObservationPhase? phase,
+        ProjectLoadProgress progress)
+    {
+        if (phase is null)
+        {
+            return;
+        }
+
+        var stage = progress.Operation == ProjectLoadOperation.Build
+            ? IndexingStages.Compiling
+            : IndexingStages.LoadingProjects;
+        var name = string.IsNullOrWhiteSpace(progress.FilePath)
+            ? null
+            : Path.GetFileName(progress.FilePath);
+        phase.SetStage(stage, name);
+    }
+
+    private sealed class InlineProgress<T>(Action<T> callback) : IProgress<T>
+    {
+        public void Report(T value) => callback(value);
     }
 
     private sealed record WorkspaceOpenResult(

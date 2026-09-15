@@ -246,6 +246,16 @@ completes before the watcher becomes healthy again. The previous complete JSON
 remains readable while recovery runs, and recovery does not delete user files.
 Stop the watcher with Ctrl-C, or use the management commands below.
 
+Cold extraction, cold semantic queries, and foreground watcher startup print
+newline-delimited progress to stderr by default. It is safe to redirect stdout
+for machine-readable output. Add `--no-progress` to suppress only those
+progress messages; errors and the normal result remain unchanged. Progress
+shows real stages and completed work where Roslyn supplies a denominator. If
+the host is between worker operations while completing final inventory or the
+health barrier, it reports a clearly labelled startup-pending heartbeat. It
+does not estimate completion time or decide readiness. A heartbeat proves only
+that the observation surface is alive, not that Roslyn completed work.
+
 ### Discover and manage watchers
 
 Watcher management is local to the current OS user and does not load a project
@@ -261,16 +271,34 @@ it is unique, to inspect or gracefully stop one watcher:
 
 ```text
 graphify-csharp inspect <session-id> --json
+graphify-csharp info <session-id> --json
+graphify-csharp diagnostics <session-id> \
+  --output ./graphify-out/graphify-csharp-diagnostics.json
 graphify-csharp stop <session-id> --json
 ```
 
-`inspect` reports the configured input, root, configuration, selected TFM,
+`info` and `inspect` are aliases. They report the configured input, root, configuration, selected TFM,
 output, process identity, reachability, lifecycle state, readiness, and
-generation counters. It remains useful while the watcher is starting,
-refreshing, recovering, or stopping. `stop` returns success only after the
+generation counters. `info` also reports the current stage, loaded scope and
+evidence counts, last operation timing, and cached process metrics when
+available. During host-owned startup gaps, `startup_pending` and its bounded
+detail distinguish final inventory/health work from an idle ready watcher. A
+management read never initializes Roslyn, builds a query index, or captures a
+fresh blocking resource sample.
+It remains useful while the watcher is starting, refreshing, recovering, or
+stopping. `ps` stays compact and adds only stage, uptime, and RSS. `stop` returns success only after the
 identified watcher has finished its indexing/publication work and released its
 owned resources. A timeout or unreachable endpoint is not treated as a
 successful stop; retry or use Ctrl-C in the worker terminal.
+
+`diagnostics` requests a bounded support report from one live session. The
+client writes it locally after receiving the IPC response; the watcher never
+writes to the requested path. The destination must not already exist. Reports
+include paths, runtime identity, stage/timing history, evidence counts,
+recovery history, and process metrics, but not source contents or a heap dump.
+Review a report before sharing because it is not anonymized. An older watcher
+that does not support the command returns an upgrade/unsupported-capability
+error.
 
 The registry is a small per-user discovery hint. A stale or unreachable entry
 may remain after a crash and is shown by `ps`; it is not used to terminate a PID.

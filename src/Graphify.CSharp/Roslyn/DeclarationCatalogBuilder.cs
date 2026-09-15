@@ -25,7 +25,15 @@ public sealed class DeclarationCatalogBuilder
         _parallelism = ExtractionParallelismOptions.Default;
     }
 
-    public async Task<DeclarationCatalog> BuildAsync(LoadedSolution solution, CancellationToken cancellationToken = default)
+    public Task<DeclarationCatalog> BuildAsync(
+        LoadedSolution solution,
+        CancellationToken cancellationToken = default) =>
+        BuildAsync(solution, progress: null, cancellationToken);
+
+    internal async Task<DeclarationCatalog> BuildAsync(
+        LoadedSolution solution,
+        Action<CatalogProgress>? progress,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(solution);
 
@@ -48,6 +56,7 @@ public sealed class DeclarationCatalogBuilder
         var work = projects
             .Select((project, index) => new ProjectWork(project, index))
             .ToArray();
+        var completedProjects = 0;
         if (projects.Length == 1)
         {
             projectResults[0] = await BuildProjectAsync(
@@ -57,6 +66,10 @@ public sealed class DeclarationCatalogBuilder
                     collectorParallelism,
                     cancellationToken)
                 .ConfigureAwait(false);
+            progress?.Invoke(new CatalogProgress(
+                ++completedProjects,
+                projects.Length,
+                projects[0].Project.Name));
         }
         else
         {
@@ -76,6 +89,10 @@ public sealed class DeclarationCatalogBuilder
                                 collectorParallelism,
                                 token)
                             .ConfigureAwait(false);
+                        progress?.Invoke(new CatalogProgress(
+                            Interlocked.Increment(ref completedProjects),
+                            projects.Length,
+                            item.Project.Project.Name));
                     })
                 .ConfigureAwait(false);
         }
@@ -428,4 +445,9 @@ public sealed class DeclarationCatalogBuilder
     private sealed record ProjectCatalogResult(
         IReadOnlyList<SymbolDeclaration> Declarations,
         IReadOnlyList<string> Diagnostics);
+
+    internal sealed record CatalogProgress(
+        int CompletedProjects,
+        int TotalProjects,
+        string? ProjectName);
 }

@@ -33,6 +33,7 @@ restore_state_directory="$fixture_root/restore-state"
 output_path="$fixture_root/graphify-out/csharp.json"
 alternate_output_path="$fixture_root/graphify-out/alternate.json"
 watcher_log="$temporary_root/watcher.log"
+watcher_stdout="$temporary_root/watcher.stdout"
 client_log="$temporary_root/client.log"
 watcher_pid=""
 watcher_session_id=""
@@ -42,6 +43,7 @@ e2e_stage="setup"
 state_directory="$temporary_root/state"
 second_output_path="$fixture_root/graphify-out/second.json"
 second_watcher_log="$temporary_root/second-watcher.log"
+second_watcher_stdout="$temporary_root/second-watcher.stdout"
 mkdir -p "$fixture_root" "$feed_directory" "$tool_directory" "$state_directory"
 export GRAPHIFY_CSHARP_STATE_DIR="$state_directory"
 
@@ -57,11 +59,15 @@ on_exit() {
     echo "watcher-e2e-failed stage=$e2e_stage exit=$exit_code" >&2
     echo '--- watcher log ---' >&2
     sed -n '1,200p' "$watcher_log" >&2 2>/dev/null || true
+    echo '--- watcher stdout ---' >&2
+    sed -n '1,200p' "$watcher_stdout" >&2 2>/dev/null || true
     echo '--- second watcher log ---' >&2
     sed -n '1,200p' "$second_watcher_log" >&2 2>/dev/null || true
+    echo '--- second watcher stdout ---' >&2
+    sed -n '1,200p' "$second_watcher_stdout" >&2 2>/dev/null || true
     echo '--- client log ---' >&2
     sed -n '1,200p' "$client_log" >&2 2>/dev/null || true
-    for evidence_path in "$temporary_root/ps.json" "$temporary_root/inspect.json" "$temporary_root/stop.json" "$temporary_root/noise-before.json" "$temporary_root/noise-after.json"; do
+    for evidence_path in "$temporary_root/ps.json" "$temporary_root/inspect.json" "$temporary_root/info.json" "$temporary_root/diagnostics-result.json" "$temporary_root/stop.json" "$temporary_root/noise-before.json" "$temporary_root/noise-after.json"; do
       if [[ -f "$evidence_path" ]]; then
         echo "--- $(basename "$evidence_path") ---" >&2
         sed -n '1,200p' "$evidence_path" >&2 || true
@@ -260,7 +266,14 @@ start_watcher_instance() {
   local requested_output_path="$1"
   local requested_log_path="$2"
   local role="$3"
+  local requested_stdout_path
+  if [[ "$role" == "first" ]]; then
+    requested_stdout_path="$watcher_stdout"
+  else
+    requested_stdout_path="$second_watcher_stdout"
+  fi
   : > "$requested_log_path"
+  : > "$requested_stdout_path"
   "$tool_directory/graphify-csharp" \
     --input "$fixture_root/ReferenceFixture.csproj" \
     --root "$fixture_root" \
@@ -268,7 +281,7 @@ start_watcher_instance() {
     --target-framework "$target_framework" \
     --output "$requested_output_path" \
     --watch \
-    --watch-scan-interval "$watch_scan_interval" > "$requested_log_path" 2>&1 &
+    --watch-scan-interval "$watch_scan_interval" > "$requested_stdout_path" 2> "$requested_log_path" &
   local started_pid=$!
   if [[ "$role" == "first" ]]; then
     watcher_pid="$started_pid"
@@ -278,7 +291,7 @@ start_watcher_instance() {
     second_watcher_session_id=""
   fi
   for _ in {1..120}; do
-    if [[ -s "$requested_output_path" ]] && grep -Fq 'Watching ' "$requested_log_path"; then
+    if [[ -s "$requested_output_path" ]] && grep -Fq 'Watching ' "$requested_stdout_path"; then
       local resolved_session_id
       resolved_session_id="$(resolve_session_id "$requested_output_path")"
       if [[ "$role" == "first" ]]; then
@@ -287,6 +300,18 @@ start_watcher_instance() {
         second_watcher_session_id="$resolved_session_id"
       fi
       wait_for_watcher_ready "$resolved_session_id"
+      for _ in {1..20}; do
+        if grep -Fq 'graphify-csharp: Starting;' "$requested_log_path" \
+          && grep -Fq 'graphify-csharp: Ready;' "$requested_log_path"; then
+          break
+        fi
+        sleep 0.1
+      done
+      grep -Fq 'graphify-csharp: Starting;' "$requested_log_path"
+      grep -Fq 'graphify-csharp: Ready;' "$requested_log_path"
+      starting_line="$(grep -n -m 1 -F 'graphify-csharp: Starting;' "$requested_log_path" | cut -d: -f1)"
+      ready_line="$(grep -n -m 1 -F 'graphify-csharp: Ready;' "$requested_log_path" | cut -d: -f1)"
+      test "$starting_line" -lt "$ready_line"
       return
     fi
 
@@ -539,6 +564,30 @@ jq -e --arg first "$watcher_session_id" --arg second "$second_watcher_session_id
 jq -e --arg session "$watcher_session_id" \
   '.success == true and .inspection.session_id == $session and (.inspection.lifecycle_state == "ready" or .inspection.lifecycle_state == "refreshing" or .inspection.lifecycle_state == "recovering")' \
   "$temporary_root/inspect.json" >/dev/null
+
+e2e_stage="management info and diagnostics"
+"$tool_directory/graphify-csharp" info "$watcher_session_id" --json > "$temporary_root/info.json"
+jq -e --arg session "$watcher_session_id" \
+  '.success == true
+   and .command == "inspect"
+   and .inspection.session_id == $session
+   and .inspection.observation.evidence.projects == 1
+   and (.inspection.observation.resources.working_set_bytes == null
+        or .inspection.observation.resources.working_set_bytes >= 0)' \
+  "$temporary_root/info.json" >/dev/null
+diagnostics_path="$temporary_root/diagnostics.json"
+"$tool_directory/graphify-csharp" diagnostics "$watcher_session_id" \
+  --output "$diagnostics_path" --json > "$temporary_root/diagnostics-result.json"
+jq -e --arg path "$diagnostics_path" \
+  '.success == true and .report_path == $path' "$temporary_root/diagnostics-result.json" >/dev/null
+jq -e --arg session "$watcher_session_id" \
+  '.schema_version == "graphify-csharp/diagnostics/v1"
+   and .inspection.session_id == $session
+   and .inspection.output_path != null
+   and .observation.evidence.projects == 1
+   and (.observation.recent_events | length) <= 32
+   and (.runtime.effective_processor_count > 0)' "$diagnostics_path" >/dev/null
+test "$(wc -c < "$diagnostics_path" | tr -d ' ')" -le 65536
 
 e2e_stage="management stop isolation"
 "$tool_directory/graphify-csharp" stop "$watcher_session_id" --json > "$temporary_root/stop.json"

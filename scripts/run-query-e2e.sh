@@ -23,6 +23,8 @@ fixture_b="$temporary_root/fixture-b"
 state_directory="$temporary_root/state"
 log_a="$temporary_root/watcher-a.log"
 log_b="$temporary_root/watcher-b.log"
+stdout_a="$temporary_root/watcher-a.stdout"
+stdout_b="$temporary_root/watcher-b.stdout"
 mkdir -p "$feed_directory" "$tool_directory" "$fixture_a" "$fixture_b" "$state_directory"
 export GRAPHIFY_CSHARP_STATE_DIR="$state_directory"
 
@@ -55,20 +57,20 @@ on_exit() {
   local exit_code=$?
   if [[ "$exit_code" -ne 0 ]]; then
     echo "query-e2e-failed stage=$stage exit=$exit_code" >&2
-    for log_path in "$log_a" "$log_b"; do
+    for log_path in "$log_a" "$log_b" "$stdout_a" "$stdout_b"; do
       if [[ -f "$log_path" ]]; then
         echo "--- $(basename -- "$log_path") ---" >&2
         sed -n '1,200p' "$log_path" >&2 || true
       fi
     done
-    for evidence_path in "$temporary_root/ps.json" "$temporary_root/startup-query.json" "$temporary_root/inspect-${watcher_a_session}.json" "$temporary_root/inspect-${watcher_b_session}.json"; do
+    for evidence_path in "$temporary_root/ps.json" "$temporary_root/startup-info.json" "$temporary_root/inspect-${watcher_a_session}.json" "$temporary_root/inspect-${watcher_b_session}.json"; do
       if [[ -f "$evidence_path" ]]; then
         echo "--- $(basename -- "$evidence_path") ---" >&2
         sed -n '1,200p' "$evidence_path" >&2 || true
       fi
     done
     for evidence_path in "$temporary_root"/*.json; do
-      if [[ -f "$evidence_path" && "$evidence_path" != "$temporary_root/ps.json" && "$evidence_path" != "$temporary_root/startup-query.json" && "$evidence_path" != "$temporary_root/inspect-${watcher_a_session}.json" && "$evidence_path" != "$temporary_root/inspect-${watcher_b_session}.json" ]]; then
+      if [[ -f "$evidence_path" && "$evidence_path" != "$temporary_root/ps.json" && "$evidence_path" != "$temporary_root/startup-info.json" && "$evidence_path" != "$temporary_root/inspect-${watcher_a_session}.json" && "$evidence_path" != "$temporary_root/inspect-${watcher_b_session}.json" ]]; then
         echo "--- $(basename -- "$evidence_path") ---" >&2
         sed -n '1,200p' "$evidence_path" >&2 || true
       fi
@@ -137,13 +139,20 @@ start_watcher() {
   local fixture_root="$1"
   local log_path="$2"
   local role="$3"
+  local stdout_path
+  if [[ "$role" == "a" ]]; then
+    stdout_path="$stdout_a"
+  else
+    stdout_path="$stdout_b"
+  fi
   : > "$log_path"
+  : > "$stdout_path"
   "$tool_directory/graphify-csharp" \
     --input "$fixture_root/ReferenceFixture.csproj" \
     --root "$fixture_root" \
     --configuration "$configuration" \
     --target-framework "$target_framework" \
-    --watch > "$log_path" 2>&1 &
+    --watch > "$stdout_path" 2> "$log_path" &
   local started_pid=$!
   if [[ "$role" == "a" ]]; then
     watcher_a_pid="$started_pid"
@@ -188,6 +197,19 @@ wait_ready() {
   return 1
 }
 
+wait_for_progress_line() {
+  local log_path="$1"
+  local expected_line="$2"
+  for _ in {1..120}; do
+    if grep -Fq "$expected_line" "$log_path"; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "Timed out waiting for '$expected_line' in '$log_path'." >&2
+  return 1
+}
+
 query_instance() {
   local session_id="$1"
   local output_path="$2"
@@ -212,14 +234,64 @@ watcher_a_session="$(resolve_session "$fixture_a/ReferenceFixture.csproj")"
 watcher_b_session="$(resolve_session "$fixture_b/ReferenceFixture.csproj")"
 test "$watcher_a_session" != "$watcher_b_session"
 
-# The listener is published before readiness. Issue the request as soon as the
-# descriptor is visible; deterministic startup interleavings are covered by
-# the in-process gate tests, while this installed test exercises real IPC.
-startup_query="$temporary_root/startup-query.json"
-query_instance "$watcher_a_session" "$startup_query" symbols Called --kind method --limit 10
-jq -e '.success == true and (.items | length) == 2 and .mode == "instance"' "$startup_query" >/dev/null
+# The listener is published before readiness. Issue an info request as soon as
+# the descriptor is visible; deterministic startup interleavings are covered
+# by the in-process gate tests, while this installed test exercises real IPC.
+startup_info="$temporary_root/startup-info.json"
+"$tool_directory/graphify-csharp" info "$watcher_a_session" --json > "$startup_info"
+jq -e --arg session "$watcher_a_session" \
+  '.success == true and .inspection.session_id == $session' \
+  "$startup_info" >/dev/null
 wait_ready "$watcher_a_session"
 wait_ready "$watcher_b_session"
+
+# The foreground watcher is deliberately machine-readable on stdout and
+# human-oriented on stderr. The initial notice must precede the final ready
+# summary even when the fixture is too small to expose an intermediate tick.
+for progress_log in "$log_a" "$log_b"; do
+  wait_for_progress_line "$progress_log" 'graphify-csharp: Starting;'
+  wait_for_progress_line "$progress_log" 'graphify-csharp: Ready;'
+  starting_line="$(grep -n -m 1 -F 'graphify-csharp: Starting;' "$progress_log" | cut -d: -f1)"
+  ready_line="$(grep -n -m 1 -F 'graphify-csharp: Ready;' "$progress_log" | cut -d: -f1)"
+  test "$starting_line" -lt "$ready_line"
+done
+grep -Fq 'semantic queries are available' "$stdout_a"
+grep -Fq 'semantic queries are available' "$stdout_b"
+
+stage="info-and-diagnostics"
+info_before_query="$temporary_root/info-before-query.json"
+"$tool_directory/graphify-csharp" info "$watcher_a_session" --json > "$info_before_query"
+jq -e --arg session "$watcher_a_session" \
+  '.success == true
+   and .command == "inspect"
+   and .inspection.session_id == $session
+   and .inspection.output_path == null
+   and .inspection.observation.evidence.projects == 1
+   and .inspection.observation.evidence.semantic_index_built == false' \
+  "$info_before_query" >/dev/null
+test ! -e "$fixture_a/graphify-out/graph.json"
+
+diagnostics_path="$temporary_root/query-diagnostics.json"
+diagnostics_result="$temporary_root/query-diagnostics-result.json"
+"$tool_directory/graphify-csharp" diagnostics "$watcher_a_session" \
+  --output "$diagnostics_path" --json > "$diagnostics_result"
+jq -e --arg path "$diagnostics_path" \
+  '.success == true and .report_path == $path' "$diagnostics_result" >/dev/null
+jq -e --arg session "$watcher_a_session" \
+  '.schema_version == "graphify-csharp/diagnostics/v1"
+   and .inspection.session_id == $session
+   and .observation.evidence.projects == 1
+   and (.observation.recent_events | length) <= 32
+   and (.runtime.runtime | length) > 0' "$diagnostics_path" >/dev/null
+test "$(wc -c < "$diagnostics_path" | tr -d ' ')" -le 65536
+diagnostics_digest_before="$(shasum -a 256 "$diagnostics_path" | awk '{print $1}')"
+diagnostics_collision="$temporary_root/query-diagnostics-collision.json"
+expect_failure "$diagnostics_collision" diagnostics "$watcher_a_session" \
+  --output "$diagnostics_path" --json
+jq -e '.success == false' "$diagnostics_collision" >/dev/null
+diagnostics_digest_after="$(shasum -a 256 "$diagnostics_path" | awk '{print $1}')"
+test "$diagnostics_digest_before" = "$diagnostics_digest_after"
+test -z "$(find "$temporary_root" -maxdepth 1 -name '.query-diagnostics.json.*.tmp' -print -quit)"
 
 stage="queries"
 first_page="$temporary_root/first-page.json"
@@ -261,12 +333,42 @@ grouped_summary="$temporary_root/grouped-summary.json"
 query_instance "$watcher_a_session" "$grouped_summary" usage-summary Unused --kind property --group-by project,namespace --limit 10
 jq -e '.success == true and .items[0].calls.edge_count == 0 and .items[0].references.edge_count == 0' "$grouped_summary" >/dev/null
 
+info_after_query="$temporary_root/info-after-query.json"
+"$tool_directory/graphify-csharp" info "$watcher_a_session" --json > "$info_after_query"
+jq -e \
+  '.success == true
+   and .inspection.observation.evidence.semantic_index_built == true
+   and ((.inspection.observation.evidence.query_caches_built | index("semantic_index")) != null)' \
+  "$info_after_query" >/dev/null
+
 stage="edit-and-snapshot"
 old_snapshot="$(jq -r '.snapshot.id' "$first_page")"
+revision_before_edit="$(jq -r '.inspection.observation.evidence.evidence_revision' "$info_after_query")"
 cat >> "$fixture_a/ReferenceTypes.cs" <<'EOF'
 
 public sealed class AddedAfterQueryE2e { }
 EOF
+
+# The watcher updates semantic evidence in the background, but it must not
+# build the lazy query index merely because info was requested.
+info_after_edit="$temporary_root/info-after-edit.json"
+for _ in {1..120}; do
+  if "$tool_directory/graphify-csharp" info "$watcher_a_session" --json > "$info_after_edit" 2>/dev/null \
+    && jq -e --argjson revision "$revision_before_edit" \
+      '.success == true
+       and .inspection.observation.evidence.evidence_revision > $revision
+       and .inspection.observation.evidence.semantic_index_built == false' \
+      "$info_after_edit" >/dev/null; then
+    break
+  fi
+  sleep 0.25
+done
+jq -e --argjson revision "$revision_before_edit" \
+  '.success == true
+   and .inspection.observation.evidence.evidence_revision > $revision
+   and .inspection.observation.evidence.semantic_index_built == false' \
+  "$info_after_edit" >/dev/null
+test ! -e "$fixture_a/graphify-out/graph.json"
 
 added="$temporary_root/added.json"
 for _ in {1..120}; do
@@ -301,10 +403,22 @@ export_digest_after_edit="$(shasum -a 256 "$export_path" | awk '{print $1}')"
 test "$export_digest_before" = "$export_digest_after_edit"
 
 stage="cold-and-stop"
-cold_result="$temporary_root/cold.json"
+cold_quiet_result="$temporary_root/cold-quiet.json"
+cold_quiet_stderr="$temporary_root/cold-quiet.stderr"
 "$tool_directory/graphify-csharp" query symbols Called --input "$fixture_b/ReferenceFixture.csproj" \
-  --root "$fixture_b" --configuration "$configuration" --target-framework "$target_framework" --limit 10 --json > "$cold_result"
+  --root "$fixture_b" --configuration "$configuration" --target-framework "$target_framework" \
+  --limit 10 --no-progress --json > "$cold_quiet_result" 2> "$cold_quiet_stderr"
+jq -e '.success == true and .mode == "cold"' "$cold_quiet_result" >/dev/null
+test ! -s "$cold_quiet_stderr"
+
+cold_result="$temporary_root/cold.json"
+cold_stderr="$temporary_root/cold.stderr"
+"$tool_directory/graphify-csharp" query symbols Called --input "$fixture_b/ReferenceFixture.csproj" \
+  --root "$fixture_b" --configuration "$configuration" --target-framework "$target_framework" --limit 10 --json > "$cold_result" 2> "$cold_stderr"
 jq -e '.success == true and .mode == "cold" and .session_id == null and (.snapshot.id | endswith(":1"))' "$cold_result" >/dev/null
+grep -Fq 'graphify-csharp: Starting;' "$cold_stderr"
+grep -Fq 'graphify-csharp: Completed;' "$cold_stderr"
+test "$(wc -l < "$cold_result" | tr -d ' ')" -gt 0
 
 stopped_session="$watcher_a_session"
 cleanup_session "$stopped_session"

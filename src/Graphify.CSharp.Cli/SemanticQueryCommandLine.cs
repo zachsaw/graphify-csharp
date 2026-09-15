@@ -12,6 +12,7 @@ internal sealed record SemanticQueryCommandLineOptions(
     ProjectLoadRequest? ColdRequest,
     TimeSpan Timeout,
     bool Json,
+    bool NoProgress,
     bool ShowHelp);
 
 internal static class SemanticQueryCommandLine
@@ -178,6 +179,7 @@ internal static class SemanticQueryCommandLine
                 null,
                 TimeSpan.FromMinutes(10),
                 args.Contains("--json", StringComparer.Ordinal),
+                NoProgress: false,
                 ShowHelp: true);
         }
 
@@ -194,6 +196,7 @@ internal static class SemanticQueryCommandLine
         var values = new Dictionary<string, string?>(StringComparer.Ordinal);
         var json = false;
         var showHelp = false;
+        var noProgress = false;
         string? positional = null;
         var startIndex = isExport ? 1 : 2;
         for (var index = startIndex; index < args.Count; index++)
@@ -218,6 +221,17 @@ internal static class SemanticQueryCommandLine
                 }
 
                 json = true;
+                continue;
+            }
+
+            if (argument == "--no-progress")
+            {
+                if (noProgress)
+                {
+                    throw new CommandLineException("Option '--no-progress' may only be supplied once.");
+                }
+
+                noProgress = true;
                 continue;
             }
 
@@ -283,6 +297,7 @@ internal static class SemanticQueryCommandLine
                 null,
                 TimeSpan.FromMinutes(10),
                 json,
+                noProgress,
                 ShowHelp: true);
         }
 
@@ -298,6 +313,7 @@ internal static class SemanticQueryCommandLine
                 null,
                 timeout,
                 json,
+                noProgress,
                 ShowHelp: false);
         }
 
@@ -351,6 +367,7 @@ internal static class SemanticQueryCommandLine
                 null,
                 timeoutValue,
                 json,
+                noProgress,
                 ShowHelp: false);
         }
 
@@ -374,6 +391,7 @@ internal static class SemanticQueryCommandLine
             request,
             timeoutValue,
             json,
+            noProgress,
             ShowHelp: false);
 
     }
@@ -388,12 +406,18 @@ internal static class SemanticQueryCommandLine
             options.ColdRequest!,
             outputPath: null,
             semanticMode: "cold");
+        await using var progress = options.NoProgress
+            ? null
+            : new CliProgressReporter(session.Observation);
+        progress?.Start();
         try
         {
             await session.StartAsync(deadline.Token).ConfigureAwait(false);
-            return await session
+            var response = await session
                 .ExecuteSemanticQueryAsync(options.Specification, deadline.Token)
                 .ConfigureAwait(false);
+            progress?.WriteCompletionSummary(response.Success ? "Completed" : "Failed");
+            return response;
         }
         catch (OperationCanceledException) when (
             deadline.IsCancellationRequested
@@ -664,7 +688,7 @@ internal static class SemanticQueryCommandLine
         + "  graphify-csharp export --instance <id|prefix> --output <path> [--json]\n\n"
         + "Query verbs: symbols, signature, usages, callers, hierarchy, arguments, usage-summary\n"
         + "Routing: --instance <id|prefix> or cold --input <solution|project|file.cs>\n"
-        + "Common: --json --limit <1..1000> --cursor <token> --snapshot <id> --timeout <TimeSpan>\n"
+        + "Common: --json --no-progress --limit <1..1000> --cursor <token> --snapshot <id> --timeout <TimeSpan>\n"
         + "Scope: --path <file|directory> --project <csproj> --namespace <name> --kind <declaration_kind>\n"
         + "Exact queries: --symbol <graph node id>\n"
         + "Hierarchy: --direction base|derived|contracts|implementations|all\n"

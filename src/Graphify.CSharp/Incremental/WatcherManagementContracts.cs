@@ -120,7 +120,8 @@ internal sealed record WatcherInspectionSnapshot(
     [property: JsonPropertyName("indexed_generation")] long IndexedGeneration,
     [property: JsonPropertyName("published_generation")] long? PublishedGeneration,
     [property: JsonPropertyName("semantic_endpoint")] string? SemanticEndpoint = null,
-    [property: JsonPropertyName("semantic_protocol_version")] int? SemanticProtocolVersion = null);
+    [property: JsonPropertyName("semantic_protocol_version")] int? SemanticProtocolVersion = null,
+    [property: JsonPropertyName("observation")] IndexingObservationSnapshot? Observation = null);
 
 internal sealed record WatcherManagementRequest(
     [property: JsonPropertyName("protocol_version")] int ProtocolVersion,
@@ -135,12 +136,14 @@ internal sealed record WatcherManagementResponse(
     [property: JsonPropertyName("success")] bool Success,
     [property: JsonPropertyName("error_code")] string? ErrorCode,
     [property: JsonPropertyName("message")] string? Message,
-    [property: JsonPropertyName("inspection")] WatcherInspectionSnapshot? Inspection)
+    [property: JsonPropertyName("inspection")] WatcherInspectionSnapshot? Inspection,
+    [property: JsonPropertyName("diagnostics")] WatcherDiagnosticsSnapshot? Diagnostics = null)
 {
     public static WatcherManagementResponse SuccessResponse(
         Guid sessionId,
         string command,
-        WatcherInspectionSnapshot inspection) =>
+        WatcherInspectionSnapshot? inspection,
+        WatcherDiagnosticsSnapshot? diagnostics = null) =>
         new(
             WatcherManagementProtocol.SchemaVersion,
             WatcherManagementProtocol.CurrentVersion,
@@ -149,7 +152,8 @@ internal sealed record WatcherManagementResponse(
             Success: true,
             ErrorCode: null,
             Message: null,
-            inspection);
+            inspection,
+            diagnostics);
 
     public static WatcherManagementResponse ErrorResponse(
         Guid sessionId,
@@ -167,9 +171,18 @@ internal sealed record WatcherManagementResponse(
             Inspection: null);
 }
 
+internal sealed record WatcherDiagnosticsSnapshot(
+    [property: JsonPropertyName("schema_version")] string SchemaVersion,
+    [property: JsonPropertyName("captured_at_utc")] DateTimeOffset CapturedAtUtc,
+    [property: JsonPropertyName("inspection")] WatcherInspectionSnapshot Inspection,
+    [property: JsonPropertyName("runtime")] ObservationRuntimeSnapshot Runtime,
+    [property: JsonPropertyName("observation")] IndexingObservationSnapshot Observation);
+
 internal interface IWatcherManagementHost
 {
     WatcherInspectionSnapshot GetInspectionSnapshot();
+
+    WatcherDiagnosticsSnapshot GetDiagnosticsSnapshot();
 
     void RequestStop();
 
@@ -181,6 +194,10 @@ internal sealed record InspectSessionRequest(
     Guid SessionId) : IRequest<WatcherManagementResponse>;
 
 internal sealed record StopSessionRequest(
+    IWatcherManagementHost Host,
+    Guid SessionId) : IRequest<WatcherManagementResponse>;
+
+internal sealed record DiagnosticsSessionRequest(
     IWatcherManagementHost Host,
     Guid SessionId) : IRequest<WatcherManagementResponse>;
 
@@ -218,10 +235,28 @@ internal sealed class StopSessionHandler : IRequestHandler<StopSessionRequest, W
     }
 }
 
+internal sealed class DiagnosticsSessionHandler : IRequestHandler<DiagnosticsSessionRequest, WatcherManagementResponse>
+{
+    public Task<WatcherManagementResponse> Handle(
+        DiagnosticsSessionRequest request,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var diagnostics = request.Host.GetDiagnosticsSnapshot();
+        return Task.FromResult(
+            WatcherManagementResponse.SuccessResponse(
+                request.SessionId,
+                "diagnostics",
+                inspection: null,
+                diagnostics));
+    }
+}
+
 internal sealed class WatcherManagementServiceProvider : ISwitchMediatorServiceProvider
 {
     private readonly InspectSessionHandler _inspect = new();
     private readonly StopSessionHandler _stop = new();
+    private readonly DiagnosticsSessionHandler _diagnostics = new();
 
     public T Get<T>() where T : notnull
     {
@@ -233,6 +268,11 @@ internal sealed class WatcherManagementServiceProvider : ISwitchMediatorServiceP
         if (typeof(T) == typeof(StopSessionHandler))
         {
             return (T)(object)_stop;
+        }
+
+        if (typeof(T) == typeof(DiagnosticsSessionHandler))
+        {
+            return (T)(object)_diagnostics;
         }
 
         if (typeof(T) == typeof(ExecuteSemanticQueryHandler))

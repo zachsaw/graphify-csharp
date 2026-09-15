@@ -1,5 +1,6 @@
 using Graphify.CSharp.Domain;
 using Graphify.CSharp.Graphify;
+using Graphify.CSharp.Incremental;
 using Graphify.CSharp.Roslyn;
 
 namespace Graphify.CSharp.Tests.Roslyn;
@@ -257,6 +258,49 @@ public sealed class SemanticReferenceExtractorTests
         var serializer = new GraphifyJsonSerializer();
         Assert.Equal(serializer.Serialize(graphs[0]), serializer.Serialize(graphs[1]));
         Assert.False(extractor.Diagnostics.IsDefault);
+    }
+
+    [Fact]
+    public async Task Reports_reference_extraction_before_the_first_batch_completes()
+    {
+        using var loaded = await LoadFixtureAsync();
+        var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
+        await using var observation = new IndexingObservation();
+        using var operation = observation.BeginOperation("startup");
+        using var phase = operation.BeginPhase(IndexingStages.ExtractingRelationships);
+        Assert.NotNull(phase);
+
+        var referenceStageEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirstBatch = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var extractor = new SemanticReferenceExtractor();
+        var extraction = Task.Run(() => extractor.ExtractContributionsAsync(
+            loaded,
+            catalog,
+            progress: progress =>
+            {
+                phase!.SetStage(progress.Stage, progress.Detail);
+                if (progress.Completed > 0
+                    || (progress.Stage == IndexingStages.ExtractingReferences && progress.Total is not null))
+                {
+                    phase.ReportWork(progress.Completed, progress.Total, progress.Unit, progress.Detail);
+                }
+
+                if (progress.Stage == IndexingStages.ExtractingReferences && progress.Completed == 0)
+                {
+                    referenceStageEntered.TrySetResult(true);
+                    releaseFirstBatch.Task.GetAwaiter().GetResult();
+                }
+            }));
+
+        await referenceStageEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var activity = observation.Snapshot().Activity!;
+        Assert.Equal(IndexingStages.ExtractingReferences, activity.Stage);
+        Assert.Equal(0, activity.Completed);
+        Assert.True(activity.Total > 0);
+        Assert.Null(activity.LastWorkAgeMilliseconds);
+
+        releaseFirstBatch.TrySetResult(true);
+        await extraction;
     }
 
     [Fact]

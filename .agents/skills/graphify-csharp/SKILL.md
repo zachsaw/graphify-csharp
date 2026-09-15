@@ -72,6 +72,7 @@ graphify-csharp \
   --watch
 
 graphify-csharp ps --json
+graphify-csharp info <session-id-or-unique-prefix> --json
 graphify-csharp query symbols Submit --instance <session-id> --kind method --json
 ~~~
 
@@ -198,6 +199,15 @@ recovery through its endpoint; the legacy no-subcommand JSON refresh returns
 `not_ready` while an output-backed watcher is starting or recovering, and
 should be retried after `inspect` reports `ready: true`.
 
+The watcher and cold extraction/query commands print newline-delimited
+progress to stderr by default, keeping stdout suitable for machine-readable
+results. Use `--no-progress` when the caller owns the terminal or wants quiet
+stderr. Progress reports the current stage and real completed work where a
+denominator exists. During a host-owned final-inventory or health-barrier gap,
+it may report a labelled startup-pending heartbeat. It is not an ETA or a
+readiness verdict; a heartbeat proves only that the observation surface is
+alive.
+
 Run the ordinary command without `--watch` whenever fresh evidence is needed.
 If a matching watcher is still starting or recovering, the command returns a
 `not_ready` error immediately and does not write JSON. Retry it after
@@ -223,15 +233,38 @@ repositories for the current OS user:
 
 ~~~bash
 graphify-csharp ps --json
+graphify-csharp info <session-id-or-unique-prefix> --json
 graphify-csharp inspect <session-id-or-unique-prefix> --json
 graphify-csharp stop <session-id-or-unique-prefix> --json
 ~~~
 
 Use the exact `session_id` returned by `ps`, or a prefix only when it is unique.
-`inspect` reports whether the worker is starting, ready, refreshing,
-recovering, or stopping. `stop` waits for confirmed graceful shutdown; an
-unreachable or timed-out worker is not considered stopped. Management does not
-kill processes by PID, search by process name, or offer `stop --all`.
+`info` and `inspect` are aliases. They report whether the worker is starting,
+ready, refreshing, recovering, or stopping, plus the active stage, loaded
+scope/evidence counts, last operation timing, and cached process metrics when
+available. A `startup_pending` flag/detail identifies host-owned startup work
+when no worker operation is active. They read published state and do not load
+the project, build a query index, or capture a fresh blocking resource sample.
+`ps` stays compact and adds only the current stage, uptime, and RSS. `stop`
+waits for confirmed graceful shutdown; an unreachable or timed-out worker is
+not considered stopped. Management does not kill processes by PID, search by
+process name, or offer `stop --all`.
+
+When a run needs support investigation, request a bounded report from the
+same session:
+
+~~~bash
+graphify-csharp diagnostics <session-id-or-unique-prefix> \
+  --output ./graphify-out/graphify-csharp-diagnostics.json
+~~~
+
+The report is written by the client after it receives the complete local IPC
+response; the watcher never writes to that destination. Choose a new output
+path if it already exists. The report contains input paths, runtime identity,
+stage/timing history, evidence counts, recovery history, and process metrics;
+it does not contain source contents, heap dumps, or an anonymization guarantee.
+Review it before sharing. An older watcher that does not know `diagnostics`
+returns an unsupported-command error; restart it with a compatible version.
 
 The management registry is only a discovery hint. A crashed worker may leave a
 stale entry, and `ps` reports that state without deleting it or contacting a
