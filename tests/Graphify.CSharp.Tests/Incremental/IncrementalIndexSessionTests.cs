@@ -177,6 +177,82 @@ public sealed class IncrementalIndexSessionTests
     }
 
     [Fact]
+    public async Task A_cancelled_queued_refresh_is_skipped_without_killing_the_active_worker()
+    {
+        var fixture = await CreateFixtureAsync();
+        var loader = new BlockingReloadLoader(new RoslynWorkspaceLoader());
+        try
+        {
+            await using var session = new IncrementalIndexSession(
+                fixture.Request,
+                fixture.OutputPath,
+                projectLoader: loader);
+            await session.StartAsync();
+
+            var active = session.RebuildAsync();
+            await loader.ReloadEntered.Task.WaitAsync(TimeSpan.FromSeconds(60));
+
+            using var cancellation = new CancellationTokenSource();
+            var queued = session.RebuildAsync(cancellation.Token);
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => queued.WaitAsync(TimeSpan.FromSeconds(5)));
+
+            loader.ReleaseReload();
+            await active.WaitAsync(TimeSpan.FromSeconds(60));
+
+            // The cancelled command was admitted while the worker was busy,
+            // but it must be observed and completed as cancelled before it can
+            // start another forced Roslyn load.
+            Assert.Equal(2, loader.LoadCount);
+            Assert.Equal(IncrementalSessionStatus.Ready, session.Status);
+        }
+        finally
+        {
+            loader.ReleaseReload();
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task Cancelling_an_active_refresh_keeps_the_worker_alive_and_forces_safe_recovery()
+    {
+        var fixture = await CreateFixtureAsync();
+        var loader = new BlockingReloadLoader(new RoslynWorkspaceLoader());
+        try
+        {
+            await using var session = new IncrementalIndexSession(
+                fixture.Request,
+                fixture.OutputPath,
+                projectLoader: loader);
+            await session.StartAsync();
+
+            using var cancellation = new CancellationTokenSource();
+            var active = session.RebuildAsync(cancellation.Token);
+            await loader.ReloadEntered.Task.WaitAsync(TimeSpan.FromSeconds(60));
+            cancellation.Cancel();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => active.WaitAsync(TimeSpan.FromSeconds(10)));
+            loader.ReleaseReload();
+
+            // Cancellation can interrupt after the old workspace has been
+            // discarded. The next foreground operation must therefore take a
+            // cold path, proving the worker survived and did not expose a
+            // partially reconciled state.
+            var recovered = await session.RefreshAsync().WaitAsync(TimeSpan.FromSeconds(60));
+            Assert.NotEmpty(recovered.Graph.Nodes);
+            Assert.True(loader.LoadCount >= 3);
+            Assert.Equal(IncrementalSessionStatus.Ready, session.Status);
+        }
+        finally
+        {
+            loader.ReleaseReload();
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
     public async Task Disposing_session_cancels_active_refresh_and_shares_disposal_completion()
     {
         var fixture = await CreateFixtureAsync();

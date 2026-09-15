@@ -282,6 +282,11 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         bool publishOutput = true,
         bool includeGraph = true)
     {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return Task.FromCanceled<IncrementalRefreshResult>(cancellationToken);
+        }
+
         EnsureWorkerStarted();
         var completion = new TaskCompletionSource<IncrementalRefreshResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (_lifecycleGate)
@@ -298,6 +303,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                     publishOutput,
                     includeGraph,
                     operationKind,
+                    cancellationToken,
                     completion)))
             {
                 completion.TrySetException(new InvalidOperationException("The incremental session is not accepting refresh requests."));
@@ -695,14 +701,19 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         switch (command)
         {
             case RefreshCommand refresh:
+            {
                 if (!TryBeginRefresh(refresh))
                 {
                     break;
                 }
 
+                using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken,
+                    refresh.RequestCancellationToken);
                 IndexingObservationOperation? operation = null;
                 try
                 {
+                    requestCancellation.Token.ThrowIfCancellationRequested();
                     operation = _observation.BeginOperation(refresh.OperationKind);
                     operation.SetStage(IndexingStages.ReconcilingChanges);
                     TrySetStatusIfActive(IncrementalSessionStatus.Refreshing);
@@ -712,7 +723,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                             publishOutput: refresh.PublishOutput,
                             includeGraph: refresh.IncludeGraph,
                             operation,
-                            cancellationToken)
+                            requestCancellation.Token)
                         .ConfigureAwait(false);
                     operation.Complete();
                     TrySetStatusIfActive(IncrementalSessionStatus.Ready);
@@ -722,9 +733,24 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                     // still reports itself as Refreshing.
                     refresh.Completion.TrySetResult(result);
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException) when (
+                    refresh.RequestCancellationToken.IsCancellationRequested
+                    && !cancellationToken.IsCancellationRequested)
                 {
                     operation?.Complete("cancelled", "The refresh was cancelled.");
+                    Volatile.Write(ref _requiresColdReconciliation, 1);
+                    if (!IsEventDeliveryUntrusted())
+                    {
+                        MarkEventDeliveryUntrusted(
+                            "A foreground refresh was cancelled before reconciliation completed.");
+                    }
+
+                    TrySetStatusIfActive(IncrementalSessionStatus.Ready);
+                    refresh.Completion.TrySetCanceled(refresh.RequestCancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    operation?.Complete("cancelled", "The refresh was cancelled during shutdown.");
                     refresh.Completion.TrySetCanceled(cancellationToken);
                     throw;
                 }
@@ -741,6 +767,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
                 }
 
                 break;
+            }
             case WatcherInvalidatedCommand:
                 Volatile.Write(ref _requiresColdReconciliation, 1);
                 break;
@@ -2098,6 +2125,12 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     {
         lock (_lifecycleGate)
         {
+            if (refresh.RequestCancellationToken.IsCancellationRequested)
+            {
+                refresh.Completion.TrySetCanceled(refresh.RequestCancellationToken);
+                return false;
+            }
+
             if (Volatile.Read(ref _disposeRequested) != 0)
             {
                 refresh.Completion.TrySetCanceled(_stop.Token);
@@ -2166,6 +2199,7 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         bool PublishOutput,
         bool IncludeGraph,
         string OperationKind,
+        CancellationToken RequestCancellationToken,
         TaskCompletionSource<IncrementalRefreshResult> Completion) : SessionCommand;
 
     private sealed record WatcherInvalidatedCommand(string Reason) : SessionCommand;
