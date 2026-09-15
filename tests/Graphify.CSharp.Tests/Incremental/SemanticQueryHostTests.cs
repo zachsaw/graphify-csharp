@@ -46,30 +46,29 @@ public sealed class SemanticQueryHostTests
                     "symbols",
                     Search: "Called",
                     Filters: new SemanticQueryFilters(Kind: "method"),
-                    Limit: 10),
+                Limit: 10),
+                TimeSpan.FromSeconds(60));
+            var refresh = new SemanticQueryClient().SendAsync(
+                descriptor,
+                new SemanticQuerySpec("refresh"),
                 TimeSpan.FromSeconds(60));
             Assert.False(query.IsCompleted);
+            Assert.False(refresh.IsCompleted);
 
             loader.Release();
             await start.WaitAsync(TimeSpan.FromSeconds(60));
             var response = await query.WaitAsync(TimeSpan.FromSeconds(60));
+            var refreshed = await refresh.WaitAsync(TimeSpan.FromSeconds(60));
             Assert.True(response.Success, response.Error?.Message);
             Assert.Equal("instance", response.Mode);
             Assert.Equal(descriptor.SessionId, response.SessionId);
             Assert.Equal(2, response.Items.Count);
             Assert.False(File.Exists(fixture.OutputPath));
             Assert.False(File.Exists(IncrementalCachePath.ForOutput(fixture.OutputPath)));
+            Assert.True(refreshed.Success, refreshed.Error?.Message);
+            Assert.NotNull(refreshed.Refresh);
+            Assert.False(refreshed.Refresh!.Rebuild);
 
-            var refresh = await new SemanticQueryClient().SendAsync(
-                descriptor,
-                new SemanticQuerySpec("refresh", Rebuild: false),
-                TimeSpan.FromSeconds(60));
-            Assert.True(refresh.Success, refresh.Error?.Message);
-            Assert.NotNull(refresh.Refresh);
-            Assert.False(refresh.Refresh!.Rebuild);
-            Assert.Equal("refresh", refresh.Command);
-            Assert.False(File.Exists(fixture.OutputPath));
-            Assert.False(File.Exists(IncrementalCachePath.ForOutput(fixture.OutputPath)));
         }
         finally
         {

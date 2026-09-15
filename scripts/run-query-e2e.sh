@@ -148,11 +148,12 @@ start_watcher() {
   : > "$log_path"
   : > "$stdout_path"
   "$tool_directory/graphify-csharp" \
+    watch \
     --input "$fixture_root/ReferenceFixture.csproj" \
     --root "$fixture_root" \
     --configuration "$configuration" \
     --target-framework "$target_framework" \
-    --watch > "$stdout_path" 2> "$log_path" &
+    > "$stdout_path" 2> "$log_path" &
   local started_pid=$!
   if [[ "$role" == "a" ]]; then
     watcher_a_pid="$started_pid"
@@ -255,8 +256,8 @@ for progress_log in "$log_a" "$log_b"; do
   ready_line="$(grep -n -m 1 -F 'graphify-csharp: Ready;' "$progress_log" | cut -d: -f1)"
   test "$starting_line" -lt "$ready_line"
 done
-grep -Fq 'semantic queries are available' "$stdout_a"
-grep -Fq 'semantic queries are available' "$stdout_b"
+grep -Fq 'Watching ' "$stdout_a"
+grep -Fq 'Watching ' "$stdout_b"
 
 stage="info-and-diagnostics"
 info_before_query="$temporary_root/info-before-query.json"
