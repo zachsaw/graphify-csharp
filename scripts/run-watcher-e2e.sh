@@ -44,6 +44,8 @@ state_directory="$temporary_root/state"
 second_output_path="$fixture_root/graphify-out/second.json"
 second_watcher_log="$temporary_root/second-watcher.log"
 second_watcher_stdout="$temporary_root/second-watcher.stdout"
+caller_export_root="$temporary_root/caller-export"
+default_export_path="$caller_export_root/graphify-out/csharp.json"
 mkdir -p "$fixture_root" "$feed_directory" "$tool_directory" "$state_directory"
 export GRAPHIFY_CSHARP_STATE_DIR="$state_directory"
 
@@ -67,7 +69,7 @@ on_exit() {
     sed -n '1,200p' "$second_watcher_stdout" >&2 2>/dev/null || true
     echo '--- client log ---' >&2
     sed -n '1,200p' "$client_log" >&2 2>/dev/null || true
-    for evidence_path in "$temporary_root/ps.json" "$temporary_root/inspect.json" "$temporary_root/info.json" "$temporary_root/diagnostics-result.json" "$temporary_root/stop.json" "$temporary_root/noise-before.json" "$temporary_root/noise-after.json"; do
+    for evidence_path in "$temporary_root/ps.json" "$temporary_root/inspect.json" "$temporary_root/info.json" "$temporary_root/diagnostics-result.json" "$temporary_root/default-export-result.json" "$temporary_root/stop.json" "$temporary_root/noise-before.json" "$temporary_root/noise-after.json"; do
       if [[ -f "$evidence_path" ]]; then
         echo "--- $(basename "$evidence_path") ---" >&2
         sed -n '1,200p' "$evidence_path" >&2 || true
@@ -399,6 +401,18 @@ test -s "$alternate_output_path"
 cmp -s "$temporary_root/before-change.json" "$output_path"
 
 e2e_stage="alternate instance export isolation"
+mkdir -p "$caller_export_root"
+default_export_result="$temporary_root/default-export-result.json"
+(
+  cd -- "$caller_export_root"
+  "$tool_directory/graphify-csharp" export --instance "$watcher_session_id" --json
+) > "$default_export_result"
+canonical_default_export_path="$(realpath "$default_export_path")"
+jq -e --arg output "$canonical_default_export_path" \
+  '.success == true and .export.output_path == $output and .export.nodes > 0 and .export.edges > 0' \
+  "$default_export_result" >/dev/null
+test -s "$default_export_path"
+
 export_instance "$watcher_session_id" "$alternate_output_path" > "$client_log"
 grep -Fq 'exported ' "$client_log"
 test -s "$alternate_output_path"

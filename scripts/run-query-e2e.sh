@@ -135,6 +135,18 @@ dotnet tool install \
   Graphify.CSharp \
   --version "$package_version"
 
+stage="caller-relative-defaults"
+mkdir -p "$fixture_b/graphify-out"
+printf '%s\n' 'graphify sentinel' > "$fixture_b/graphify-out/graph.json"
+(
+  cd -- "$fixture_b"
+  "$tool_directory/graphify-csharp" \
+    > "$temporary_root/default-export.stdout" \
+    2> "$temporary_root/default-export.stderr"
+)
+test -s "$fixture_b/graphify-out/csharp.json"
+test "$(cat "$fixture_b/graphify-out/graph.json")" = 'graphify sentinel'
+
 start_watcher() {
   local fixture_root="$1"
   local log_path="$2"
