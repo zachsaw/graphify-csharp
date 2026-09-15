@@ -122,6 +122,7 @@ internal static class DiskExportCommandLine
         var noProgress = false;
         var rebuild = false;
         var showHelp = false;
+        var callerDirectory = AnalysisInputResolver.CurrentDirectory(currentDirectory);
         for (var index = startIndex; index < args.Count; index++)
         {
             var argument = args[index];
@@ -214,8 +215,8 @@ internal static class DiskExportCommandLine
 
             return new DiskExportCommandLineOptions(
                 new ProjectLoadRequest(
-                    Path.Combine(Directory.GetCurrentDirectory(), "help.csproj"),
-                    Directory.GetCurrentDirectory(),
+                    Path.Combine(callerDirectory, "help.csproj"),
+                    callerDirectory,
                     "Debug",
                     null),
                 string.Empty,
@@ -225,7 +226,6 @@ internal static class DiskExportCommandLine
                 ShowHelp: true);
         }
 
-        var callerDirectory = AnalysisInputResolver.CurrentDirectory(currentDirectory);
         if (values.ContainsKey("input") && positionalInput is not null)
         {
             throw new CommandLineException("Input was supplied both positionally and with '--input'.");

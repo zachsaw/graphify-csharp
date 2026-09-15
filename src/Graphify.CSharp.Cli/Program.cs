@@ -28,6 +28,12 @@ public static class Program
         string[] args,
         CancellationToken cancellationToken = default)
     {
+        if (CliHelp.IsTopLevelHelp(args))
+        {
+            Console.WriteLine(CliHelp.Usage);
+            return 0;
+        }
+
         if (args.Length > 0 && args[0] == "watch")
         {
             return await WatchCommandLine
