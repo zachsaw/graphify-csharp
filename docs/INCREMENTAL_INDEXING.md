@@ -166,7 +166,8 @@ graphify-csharp stop <id>         # request and confirm graceful shutdown
 ```
 
 Management commands are client-side discovery plus a small per-session local
-named-pipe endpoint. They do not require an input path, load MSBuild/Roslyn, or
+IPC endpoint (a named pipe on Windows and a Unix-domain socket elsewhere). They
+do not require an input path, load MSBuild/Roslyn, or
 read the graph. `ps` reads one bounded descriptor per watcher from the
 current-user application-state directory and probes valid records with bounded
 timeouts. `inspect` and `stop` accept an exact session GUID or a unique prefix;
@@ -191,8 +192,9 @@ invocation performs the cold reconciliation itself and waits for completion.
 
 ### Targeted semantic queries
 
-Phase 2 adds a separate, current-user named pipe for bounded semantic queries.
-It shares the watcher's one Roslyn workspace and worker-owned evidence index,
+Phase 2 adds a separate, current-user local IPC endpoint for bounded semantic
+queries (a named pipe on Windows and a Unix-domain socket elsewhere). It shares
+the watcher's one Roslyn workspace and worker-owned evidence index,
 but it does not require a canonical output path, output lease, cache manifest,
 or Graphify installation. Start a query-only worker by omitting `--output`:
 

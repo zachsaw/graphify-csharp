@@ -1,4 +1,3 @@
-using System.IO.Pipes;
 using System.Text.Json;
 using Graphify.CSharp.Incremental;
 
@@ -134,12 +133,9 @@ public sealed class IncrementalRefreshControlServerTests
 
     private static async Task<JsonElement> SendRequestAsync(string pipeName, object request)
     {
-        await using var client = new NamedPipeClientStream(
-            ".",
+        await using var client = await LocalIpcTransport.ConnectAsync(
             pipeName,
-            PipeDirection.InOut,
-            PipeOptions.Asynchronous);
-        await client.ConnectAsync(5000);
+            TimeSpan.FromSeconds(5));
 
         using var writer = new StreamWriter(
             client,

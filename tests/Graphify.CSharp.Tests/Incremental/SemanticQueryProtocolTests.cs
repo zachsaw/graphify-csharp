@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.IO.Pipes;
 using System.Text.Json;
 using Graphify.CSharp.Incremental;
 
@@ -29,8 +28,7 @@ public sealed class SemanticQueryProtocolTests
         try
         {
             await server.StartAsync().WaitAsync(TimeSpan.FromSeconds(5));
-            await using var client = CreateClient(server.PipeName);
-            await client.ConnectAsync(5000);
+            await using var client = await ConnectClientAsync(server.PipeName);
             await WriteFrameInChunksAsync(client, CreatePayload(sessionId, analysis, "symbols"));
 
             var responsePayload = await SemanticQueryServer.ReadFrameAsync(
@@ -298,16 +296,15 @@ public sealed class SemanticQueryProtocolTests
     private static RefreshRequestIdentity CreateAnalysis(string root) =>
         new(Path.Combine(root, "Test.csproj"), root, "Release", "net10.0");
 
-    private static NamedPipeClientStream CreateClient(string pipeName) =>
-        new(".", pipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
+    private static Task<Stream> ConnectClientAsync(string pipeName) =>
+        LocalIpcTransport.ConnectAsync(pipeName, TimeSpan.FromSeconds(5));
 
     private static async Task<JsonDocument> SendAsync(
         SemanticQueryServer server,
         byte[] payload,
         byte[]? extraBytes = null)
     {
-        await using var client = CreateClient(server.PipeName);
-        await client.ConnectAsync(5000);
+        await using var client = await ConnectClientAsync(server.PipeName);
         await WriteFrameInChunksAsync(client, payload, extraBytes);
         var responsePayload = await SemanticQueryServer.ReadFrameAsync(
                 client,
@@ -319,8 +316,7 @@ public sealed class SemanticQueryProtocolTests
 
     private static async Task<JsonDocument> ReadAdmissionResponseAsync(SemanticQueryServer server)
     {
-        await using var client = CreateClient(server.PipeName);
-        await client.ConnectAsync(5000);
+        await using var client = await ConnectClientAsync(server.PipeName);
         var responsePayload = await SemanticQueryServer.ReadFrameAsync(
                 client,
                 CancellationToken.None,

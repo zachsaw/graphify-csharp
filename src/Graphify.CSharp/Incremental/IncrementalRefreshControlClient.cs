@@ -1,4 +1,3 @@
-using System.IO.Pipes;
 using System.Text.Json;
 
 namespace Graphify.CSharp.Incremental;
@@ -111,14 +110,46 @@ internal sealed class IncrementalRefreshControlClient
         bool rebuild,
         CancellationToken cancellationToken)
     {
-        await using var pipe = new NamedPipeClientStream(
-            ".",
-            pipeName,
-            PipeDirection.InOut,
-            PipeOptions.Asynchronous);
         try
         {
-            await pipe.ConnectAsync(100, cancellationToken).ConfigureAwait(false);
+            await using var pipe = await LocalIpcTransport.ConnectAsync(
+                pipeName,
+                TimeSpan.FromMilliseconds(100),
+                cancellationToken).ConfigureAwait(false);
+
+            using var writer = new StreamWriter(
+                pipe,
+                System.Text.Encoding.UTF8,
+                bufferSize: 1024,
+                leaveOpen: true)
+            {
+                AutoFlush = true,
+            };
+            using var reader = new StreamReader(
+                pipe,
+                System.Text.Encoding.UTF8,
+                detectEncodingFromByteOrderMarks: false,
+                bufferSize: 1024,
+                leaveOpen: true);
+            var command = rebuild ? "rebuild" : "refresh";
+            await writer.WriteLineAsync(JsonSerializer.Serialize(
+                    new
+                    {
+                        command,
+                        request_digest = requestDigest,
+                        output_path_identity = outputPathIdentity,
+                    },
+                    JsonOptions))
+                .WaitAsync(cancellationToken)
+                .ConfigureAwait(false);
+            var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                throw new IOException("The watcher closed the refresh control channel without a response.");
+            }
+
+            return JsonSerializer.Deserialize<IncrementalRefreshControlServer.ControlResponse>(line, JsonOptions)
+                ?? throw new InvalidDataException("The watcher returned an empty refresh response.");
         }
         catch (TimeoutException)
         {
@@ -132,39 +163,5 @@ internal sealed class IncrementalRefreshControlClient
         {
             return null;
         }
-
-        using var writer = new StreamWriter(
-            pipe,
-            System.Text.Encoding.UTF8,
-            bufferSize: 1024,
-            leaveOpen: true)
-        {
-            AutoFlush = true,
-        };
-        using var reader = new StreamReader(
-            pipe,
-            System.Text.Encoding.UTF8,
-            detectEncodingFromByteOrderMarks: false,
-            bufferSize: 1024,
-            leaveOpen: true);
-        var command = rebuild ? "rebuild" : "refresh";
-        await writer.WriteLineAsync(JsonSerializer.Serialize(
-                new
-                {
-                    command,
-                    request_digest = requestDigest,
-                    output_path_identity = outputPathIdentity,
-                },
-                JsonOptions))
-            .WaitAsync(cancellationToken)
-            .ConfigureAwait(false);
-        var line = await reader.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-        if (string.IsNullOrWhiteSpace(line))
-        {
-            throw new IOException("The watcher closed the refresh control channel without a response.");
-        }
-
-        return JsonSerializer.Deserialize<IncrementalRefreshControlServer.ControlResponse>(line, JsonOptions)
-            ?? throw new InvalidDataException("The watcher returned an empty refresh response.");
     }
 }

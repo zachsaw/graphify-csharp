@@ -1,4 +1,3 @@
-using System.IO.Pipes;
 using System.Text.Json;
 using Graphify.CSharp.Incremental;
 
@@ -130,12 +129,9 @@ public sealed class WatcherManagementServerTests
             new WatcherManagementOptions(root, "test"));
         await server.StartAsync().WaitAsync(TimeSpan.FromSeconds(5));
 
-        await using var client = new NamedPipeClientStream(
-            ".",
+        await using var client = await LocalIpcTransport.ConnectAsync(
             server.PipeName,
-            PipeDirection.InOut,
-            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-        await client.ConnectAsync(5000);
+            TimeSpan.FromSeconds(5));
         var header = new byte[4];
         System.Buffers.Binary.BinaryPrimitives.WriteInt32BigEndian(
             header,
@@ -169,13 +165,10 @@ public sealed class WatcherManagementServerTests
                 inspectTimeout: TimeSpan.FromMilliseconds(100)));
         await server.StartAsync().WaitAsync(TimeSpan.FromSeconds(5));
 
-        await using (var stalledClient = new NamedPipeClientStream(
-                         ".",
+        await using (var stalledClient = await LocalIpcTransport.ConnectAsync(
                          server.PipeName,
-                         PipeDirection.InOut,
-                         PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly))
+                         TimeSpan.FromSeconds(5)))
         {
-            await stalledClient.ConnectAsync(5000);
             await Assert.ThrowsAnyAsync<IOException>(
                 () => WatcherManagementServer
                     .ReadFrameAsync(stalledClient, CancellationToken.None)
@@ -194,12 +187,9 @@ public sealed class WatcherManagementServerTests
         string endpoint,
         WatcherManagementRequest request)
     {
-        await using var client = new NamedPipeClientStream(
-            ".",
+        await using var client = await LocalIpcTransport.ConnectAsync(
             endpoint,
-            PipeDirection.InOut,
-            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-        await client.ConnectAsync(5000);
+            TimeSpan.FromSeconds(5));
         var payload = JsonSerializer.SerializeToUtf8Bytes(request);
         await WatcherManagementServer.WriteFrameAsync(client, payload, CancellationToken.None);
         var responsePayload = await WatcherManagementServer.ReadFrameAsync(client, CancellationToken.None);

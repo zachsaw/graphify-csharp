@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.IO.Pipes;
 using System.Text.Json;
 using Graphify.CSharp.Incremental;
 
@@ -39,19 +38,12 @@ internal sealed class SemanticQueryClient
 
         using var overallTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         overallTimeout.CancelAfter(timeout);
-        await using var pipe = new NamedPipeClientStream(
-            ".",
-            descriptor.SemanticEndpoint,
-            PipeDirection.InOut,
-            PipeOptions.Asynchronous);
         try
         {
-            await pipe.ConnectAsync(
-                    (int)Math.Min(
-                        SemanticQueryProtocol.TransportTimeoutMilliseconds,
-                        Math.Max(1, timeout.TotalMilliseconds)),
-                    overallTimeout.Token)
-                .ConfigureAwait(false);
+            await using var pipe = await LocalIpcTransport.ConnectAsync(
+                descriptor.SemanticEndpoint,
+                TimeSpan.FromMilliseconds(SemanticQueryProtocol.TransportTimeoutMilliseconds),
+                overallTimeout.Token).ConfigureAwait(false);
             await WriteRequestFrameAsync(pipe, payload, overallTimeout.Token).ConfigureAwait(false);
             var responsePayload = await SemanticQueryServer.ReadFrameAsync(
                     pipe,
