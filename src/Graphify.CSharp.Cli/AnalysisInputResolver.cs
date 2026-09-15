@@ -43,6 +43,19 @@ internal static class AnalysisInputResolver
         return DiscoverInput(repositoryRoot);
     }
 
+    public static string ResolveOutput(string? output, string currentDirectory)
+    {
+        if (output is not null && string.IsNullOrWhiteSpace(output))
+        {
+            throw new CommandLineException("The output path cannot be empty.");
+        }
+
+        return ResolvePath(
+            output ?? Path.Combine("graphify-out", "csharp.json"),
+            currentDirectory,
+            "output");
+    }
+
     public static string ResolvePath(string path, string baseDirectory, string description)
     {
         if (string.IsNullOrWhiteSpace(path))

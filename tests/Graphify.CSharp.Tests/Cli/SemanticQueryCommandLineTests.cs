@@ -19,7 +19,8 @@ public sealed class SemanticQueryCommandLineTests
             "--kind", "class",
             "--limit", "2",
             "--json",
-        ]);
+        ],
+        "/caller");
         var summary = SemanticQueryCommandLine.Parse(
         [
             "query",
@@ -33,6 +34,7 @@ public sealed class SemanticQueryCommandLineTests
         Assert.Null(symbols.InstanceSelector);
         Assert.Equal("OrderService", symbols.Specification.Search);
         Assert.Equal("/repo", symbols.ColdRequest!.RepositoryRoot);
+        Assert.Equal("/caller/Product.sln", symbols.ColdRequest.InputPath);
         Assert.Equal("class", symbols.Specification.EffectiveFilters.Kind);
         Assert.Equal(2, symbols.Specification.Limit);
         Assert.Equal("Order", summary.Specification.Search);
@@ -55,6 +57,32 @@ public sealed class SemanticQueryCommandLineTests
     }
 
     [Fact]
+    public void Instance_export_defaults_to_the_callers_current_directory()
+    {
+        var options = SemanticQueryCommandLine.Parse(
+            ["export", "--instance", "abc"],
+            "/caller");
+
+        Assert.Equal("/caller/graphify-out/csharp.json", options.Specification.OutputPath);
+    }
+
+    [Fact]
+    public void Warm_query_filesystem_filters_are_relative_to_the_callers_current_directory()
+    {
+        var options = SemanticQueryCommandLine.Parse(
+            [
+                "query", "symbols", "Order",
+                "--instance", "abc",
+                "--path", "src",
+                "--project", "projects/Product.csproj",
+            ],
+            "/caller");
+
+        Assert.Equal("/caller/src", options.Specification.EffectiveFilters.Path);
+        Assert.Equal("/caller/projects/Product.csproj", options.Specification.EffectiveFilters.Project);
+    }
+
+    [Fact]
     public void Enforces_exact_routing_and_command_option_boundaries()
     {
         Assert.Throws<CommandLineException>(() => SemanticQueryCommandLine.Parse(
@@ -65,8 +93,10 @@ public sealed class SemanticQueryCommandLineTests
             ["query", "symbols", "--instance", "abc", "--output", "out.json"]));
         Assert.Throws<CommandLineException>(() => SemanticQueryCommandLine.Parse(
             ["export", "--input", "Product.sln", "--output", "out.json"]));
-        Assert.Throws<CommandLineException>(() => SemanticQueryCommandLine.Parse(
-            ["export", "--instance", "abc"]));
+        var export = SemanticQueryCommandLine.Parse(
+            ["export", "--instance", "abc"],
+            "/caller");
+        Assert.Equal("/caller/graphify-out/csharp.json", export.Specification.OutputPath);
         Assert.Throws<CommandLineException>(() => SemanticQueryCommandLine.Parse(
             ["refresh", "--input", "Product.sln"]));
         Assert.Throws<CommandLineException>(() => SemanticQueryCommandLine.Parse(

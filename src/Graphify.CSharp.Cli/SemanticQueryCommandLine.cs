@@ -328,10 +328,9 @@ internal static class SemanticQueryCommandLine
 
             RejectExportQueryOptions(values, positional);
             var instance = Required(values, "instance");
-            var output = AnalysisInputResolver.ResolvePath(
-                Required(values, "output"),
-                callerDirectory,
-                "output");
+            var output = AnalysisInputResolver.ResolveOutput(
+                Single(values, "output"),
+                callerDirectory);
             var timeout = ParseTimeout(values);
             return new SemanticQueryCommandLineOptions(
                 new SemanticQuerySpec("export", OutputPath: output),
@@ -415,6 +414,7 @@ internal static class SemanticQueryCommandLine
 
         if (hasInstance)
         {
+            specification = NormalizePaths(specification, callerDirectory);
             SemanticQueryJsonParser.ValidateSpec(specification);
             return new SemanticQueryCommandLineOptions(
                 specification,
@@ -503,9 +503,8 @@ internal static class SemanticQueryCommandLine
                 "The selected watcher does not expose the current semantic query endpoint. Restart it with this version.");
         }
 
-        var specification = NormalizePaths(options.Specification, descriptor.RepositoryRoot);
         return await new SemanticQueryClient()
-            .SendAsync(descriptor, specification, options.Timeout, cancellationToken)
+            .SendAsync(descriptor, options.Specification, options.Timeout, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -747,7 +746,7 @@ internal static class SemanticQueryCommandLine
 
     public static string Usage => "Usage:\n"
         + "  graphify-csharp query <verb> [options]\n"
-        + "  graphify-csharp export --instance <id|prefix> --output <path> [--json]\n"
+        + "  graphify-csharp export --instance <id|prefix> [--output <path>] [--json]\n"
         + "  graphify-csharp refresh --instance <id|prefix> [--rebuild] [--json]\n\n"
         + "Query verbs: symbols, signature, usages, callers, hierarchy, arguments, usage-summary\n"
         + "Routing: --instance <id|prefix> or cold --input <solution|project|file.cs>\n"

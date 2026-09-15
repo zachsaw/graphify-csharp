@@ -41,11 +41,21 @@ public sealed class DiskExportCommandLineTests
     }
 
     [Fact]
-    public void Disk_export_requires_an_explicit_input_and_output_until_defaults_are_enabled()
+    public void Disk_export_uses_the_caller_default_output()
     {
-        Assert.Throws<CommandLineException>(() => DiskExportCommandLine.Parse([]));
+        var options = DiskExportCommandLine.Parse(
+            ["export", "--input", "Product.sln"],
+            "/caller");
+
+        Assert.Equal("/caller/graphify-out/csharp.json", options.OutputPath);
+    }
+
+    [Fact]
+    public void Disk_export_rejects_an_explicit_empty_output()
+    {
         Assert.Throws<CommandLineException>(() => DiskExportCommandLine.Parse(
-            ["export", "--input", "Product.sln"]));
+            ["export", "--input", "Product.sln", "--output", ""],
+            "/caller"));
     }
 
     [Fact]

@@ -240,10 +240,9 @@ internal static class DiskExportCommandLine
             repositoryRoot,
             callerDirectory,
             "export");
-        var outputPath = AnalysisInputResolver.ResolvePath(
-            Required(values, "output"),
-            callerDirectory,
-            "output");
+        var outputPath = AnalysisInputResolver.ResolveOutput(
+            Single(values, "output"),
+            callerDirectory);
         var configuration = Single(values, "configuration") ?? "Debug";
         if (string.IsNullOrWhiteSpace(configuration))
         {
@@ -317,19 +316,16 @@ internal static class DiskExportCommandLine
     private static string? Single(IReadOnlyDictionary<string, string?> values, string key) =>
         values.TryGetValue(key, out var value) ? value : null;
 
-    private static string Required(IReadOnlyDictionary<string, string?> values, string key) =>
-        Single(values, key) is { Length: > 0 } value
-            ? value
-            : throw new CommandLineException($"Option '--{key}' is required.");
-
-    public static string Usage => "Usage: graphify-csharp export [--input <solution|project|file.cs>] --output <path> [options]\n"
-        + "       graphify-csharp [<input>] --output <path> [options]\n\n"
+    public static string Usage => "Usage: graphify-csharp export [--input <solution|project|file.cs>] [options]\n"
+        + "       graphify-csharp [<input>] [options]\n\n"
         + "When --input is omitted, one unambiguous solution or project is discovered\n"
         + "directly under --root (or the current directory).\n\n"
+        + "Output defaults to ./graphify-out/csharp.json under the caller's current\n"
+        + "directory; use --output to choose another destination.\n\n"
         + "Options:\n"
         + "  -i, --input <path>              C# solution/project/file-based app to export\n"
         + "  -r, --root <path>               Repository root for stable paths\n"
-        + "  -o, --output <path>             Graphify JSON output path\n"
+        + "  -o, --output <path>             Graphify JSON output path (default: ./graphify-out/csharp.json)\n"
         + "  -c, --configuration <name>      MSBuild configuration (default: Debug)\n"
         + "  -f, --target-framework <tfm>    Select one TFM when target selection is ambiguous\n"
         + "      --rebuild                  Ignore incremental cache and rebuild all projects\n"
