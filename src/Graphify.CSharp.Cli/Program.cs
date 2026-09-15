@@ -1,5 +1,4 @@
 using Graphify.CSharp.Incremental;
-using Graphify.CSharp.Roslyn;
 using System.Reflection;
 
 namespace Graphify.CSharp.Cli;
@@ -29,6 +28,20 @@ public static class Program
         string[] args,
         CancellationToken cancellationToken = default)
     {
+        if (args.Length > 0 && args[0] == "watch")
+        {
+            return await WatchCommandLine
+                .RunAsync(args, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        if (args.Length > 0 && args[0] == "export")
+        {
+            return await ExportCommandLine
+                .RunAsync(args, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
         if (SemanticQueryCommandLine.IsSemanticCommand(args))
         {
             return await SemanticQueryCommandLine
@@ -52,156 +65,16 @@ public static class Program
             }
         }
 
-        CommandLineOptions options;
-        try
-        {
-            options = CommandLineOptions.Parse(args);
-        }
-        catch (CommandLineException exception)
-        {
-            Console.Error.WriteLine($"Error: {exception.Message}");
-            Console.Error.WriteLine(CommandLineOptions.Usage);
-            return 2;
-        }
-
-        if (options.ShowHelp)
-        {
-            Console.WriteLine(CommandLineOptions.Usage);
-            return 0;
-        }
-
-        try
-        {
-            var request = new ProjectLoadRequest(
-                options.InputPath,
-                options.RepositoryRoot,
-                options.Configuration,
-                options.TargetFramework);
-            if (options.Watch)
-            {
-                var watcherOutputPath = options.OutputSpecified ? options.OutputPath : null;
-                await using var host = new IncrementalWatcherHost(
-                    request,
-                    watcherOutputPath,
-                    new IncrementalWatcherOptions(options.WatchScanInterval),
-                    managementOptions: new WatcherManagementOptions(
-                        WatcherSessionRegistry.ResolveStateDirectory(),
-                        GetToolVersion()));
-                await using var progress = options.NoProgress
-                    ? null
-                    : new CliProgressReporter(host.Observation);
-                progress?.Start();
-                var start = host.StartAsync(cancellationToken);
-                var stopRequested = host.WaitForStopRequestedAsync();
-                var startup = cancellationToken.CanBeCanceled
-                    ? start.WaitAsync(cancellationToken)
-                    : start;
-                if (await Task.WhenAny(startup, stopRequested).ConfigureAwait(false) == stopRequested)
-                {
-                    await host.DisposeAsync().ConfigureAwait(false);
-                    await IgnoreRequestedStopStartupAsync(start).ConfigureAwait(false);
-                    return 0;
-                }
-
-                await startup.ConfigureAwait(false);
-                progress?.WriteCompletionSummary("Ready");
-                if (stopRequested.IsCompleted)
-                {
-                    await host.DisposeAsync().ConfigureAwait(false);
-                    return 0;
-                }
-
-                Console.WriteLine(watcherOutputPath is null
-                    ? $"Watching {options.RepositoryRoot}; semantic queries are available through the registered session."
-                    : $"Watching {options.RepositoryRoot}; refresh with graphify-csharp --input {options.InputPath}.");
-                var shutdown = host.WaitForShutdownAsync(cancellationToken);
-                if (await Task.WhenAny(shutdown, stopRequested).ConfigureAwait(false) == stopRequested)
-                {
-                    await host.DisposeAsync().ConfigureAwait(false);
-                    await shutdown.ConfigureAwait(false);
-                }
-                else
-                {
-                    await shutdown.ConfigureAwait(false);
-                }
-
-                return 0;
-            }
-
-            var identity = new RefreshRequestIdentity(
-                request.InputPath,
-                request.RepositoryRoot,
-                request.Configuration,
-                request.TargetFramework);
-            var remote = await new IncrementalRefreshControlClient()
-                .TryRefreshAsync(identity, options.OutputPath, options.Rebuild, cancellationToken)
-                .ConfigureAwait(false);
-            if (remote is not null)
-            {
-                Console.WriteLine(
-                    $"Wrote {remote.NodeCount} nodes and {remote.EdgeCount} edges to {options.OutputPath} "
-                    + $"(watcher, extracted {remote.ExtractedProjectCount} project(s), reused {remote.ReusedProjectCount}).");
-                return 0;
-            }
-
-            var observation = new IndexingObservation();
-            var progressReporter = options.NoProgress
-                ? null
-                : new CliProgressReporter(observation);
-            progressReporter?.Start();
-            try
-            {
-                var result = await new IncrementalRefreshEngine(observation: observation).RefreshAsync(
-                        request,
-                        options.OutputPath,
-                        options.Rebuild,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                var mode = result.ExtractedProjectCount == 0 ? "reused" : $"extracted {result.ExtractedProjectCount} project(s)";
-                progressReporter?.WriteCompletionSummary("Completed");
-                Console.WriteLine(
-                    $"Wrote {result.Graph.Nodes.Length} nodes and {result.Graph.Edges.Length} edges to {options.OutputPath} ({mode}, reused {result.ReusedProjectCount}).");
-                return 0;
-            }
-            finally
-            {
-                if (progressReporter is not null)
-                {
-                    await progressReporter.DisposeAsync().ConfigureAwait(false);
-                }
-
-                await observation.DisposeAsync().ConfigureAwait(false);
-            }
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            return 0;
-        }
-        catch (Exception exception) when (exception is ArgumentException or IOException or InvalidOperationException or InvalidDataException)
-        {
-            Console.Error.WriteLine($"Error: {exception.Message}");
-            return 1;
-        }
+        return await DiskExportCommandLine
+            .RunAsync(args, cancellationToken)
+            .ConfigureAwait(false);
     }
 
-    private static string GetToolVersion() =>
+    internal static string GetToolVersion() =>
         typeof(Program).Assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
             .InformationalVersion
         ?? typeof(Program).Assembly.GetName().Version?.ToString()
         ?? "unknown";
 
-    private static async Task IgnoreRequestedStopStartupAsync(Task start)
-    {
-        try
-        {
-            await start.ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        catch (ObjectDisposedException)
-        {
-        }
-    }
 }
