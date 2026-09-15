@@ -251,6 +251,7 @@ wait_ready "$watcher_b_session"
 # summary even when the fixture is too small to expose an intermediate tick.
 for progress_log in "$log_a" "$log_b"; do
   wait_for_progress_line "$progress_log" 'graphify-csharp: Starting;'
+  wait_for_progress_line "$progress_log" 'session='
   wait_for_progress_line "$progress_log" 'graphify-csharp: Ready;'
   starting_line="$(grep -n -m 1 -F 'graphify-csharp: Starting;' "$progress_log" | cut -d: -f1)"
   ready_line="$(grep -n -m 1 -F 'graphify-csharp: Ready;' "$progress_log" | cut -d: -f1)"

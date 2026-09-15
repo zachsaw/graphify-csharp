@@ -298,6 +298,8 @@ start_watcher_instance() {
         sleep 0.1
       done
       grep -Fq 'graphify-csharp: Starting;' "$requested_log_path"
+      grep -Fq 'session=' "$requested_log_path"
+      grep -Fq "input=$fixture_root/ReferenceFixture.csproj" "$requested_log_path"
       grep -Fq 'graphify-csharp: Ready;' "$requested_log_path"
       starting_line="$(grep -n -m 1 -F 'graphify-csharp: Starting;' "$requested_log_path" | cut -d: -f1)"
       ready_line="$(grep -n -m 1 -F 'graphify-csharp: Ready;' "$requested_log_path" | cut -d: -f1)"

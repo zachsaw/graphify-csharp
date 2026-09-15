@@ -41,9 +41,16 @@ internal static class WatchCommandLine
             managementOptions: new WatcherManagementOptions(
                 WatcherSessionRegistry.ResolveStateDirectory(),
                 Program.GetToolVersion()));
+        var sessionId = host.Session.SessionId.ToString("D");
+        var targetFramework = options.Request.TargetFramework ?? "automatic";
         await using var progress = options.NoProgress
             ? null
-            : new CliProgressReporter(host.Observation);
+            : new CliProgressReporter(
+                host.Observation,
+                startingMessage:
+                    $"Starting; session={sessionId}; registering endpoints; "
+                    + $"input={options.Request.InputPath}; root={options.Request.RepositoryRoot}; "
+                    + $"configuration={options.Request.Configuration}; target-framework={targetFramework}.");
         progress?.Start();
         try
         {
@@ -69,7 +76,9 @@ internal static class WatchCommandLine
 
             Console.WriteLine(
                 $"Watching {options.Request.RepositoryRoot}; "
-                + $"session={host.Session.SessionId:D}; use 'graphify-csharp query ... --instance {host.Session.SessionId:D}'.");
+                + $"session={sessionId}; "
+                + $"query with 'graphify-csharp query symbols <name> --instance {sessionId}'; "
+                + $"export with 'graphify-csharp export --instance {sessionId}'.");
             var shutdown = host.WaitForShutdownAsync(cancellationToken);
             if (await Task.WhenAny(shutdown, stopRequested).ConfigureAwait(false) == stopRequested)
             {

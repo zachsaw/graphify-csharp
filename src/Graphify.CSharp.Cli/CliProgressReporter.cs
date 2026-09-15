@@ -12,6 +12,7 @@ internal sealed class CliProgressReporter : IAsyncDisposable
     private readonly IndexingObservation _observation;
     private readonly TextWriter _writer;
     private readonly Action? _beforeUpdateQueue;
+    private readonly string _startingMessage;
     private readonly CancellationTokenSource _stop = new();
     private Task? _task;
     private Task? _disposeTask;
@@ -32,11 +33,15 @@ internal sealed class CliProgressReporter : IAsyncDisposable
     internal CliProgressReporter(
         IndexingObservation observation,
         TextWriter? writer = null,
-        Action? beforeUpdateQueue = null)
+        Action? beforeUpdateQueue = null,
+        string? startingMessage = null)
     {
         _observation = observation ?? throw new ArgumentNullException(nameof(observation));
         _writer = writer ?? Console.Error;
         _beforeUpdateQueue = beforeUpdateQueue;
+        _startingMessage = string.IsNullOrWhiteSpace(startingMessage)
+            ? "Starting; waiting for the indexer to begin."
+            : startingMessage.Trim();
     }
 
     public void Start()
@@ -179,7 +184,7 @@ internal sealed class CliProgressReporter : IAsyncDisposable
 
             if (_startingPending)
             {
-                message = "Starting; waiting for the indexer to begin.";
+                message = _startingMessage;
                 _startingPending = false;
                 kind = PendingMessageKind.Starting;
             }
