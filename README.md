@@ -6,86 +6,103 @@
 [![CI](https://github.com/zachsaw/graphify-csharp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/zachsaw/graphify-csharp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-`graphify-csharp` is a free, headless Roslyn/MSBuild indexer that turns C#
-source into deterministic, queryable semantic evidence: compiler-resolved
-callers, references, implementations, inheritance, and overrides—even across
-overloads, generics, and projects.
+`graphify-csharp` is a free, headless Roslyn/MSBuild indexer for coding agents.
+It turns a C# solution or project into deterministic semantic evidence: exact
+callers, references, implementations, inheritance, overrides, and argument
+bindings—even across overloads, generics, and project boundaries.
 
-Think of it as the semantic-navigation slice of Rider/ReSharper, exported for
-Codex, Claude Code, and other coding agents.
+Think of the semantic-navigation part of Rider or ReSharper, exported for
+Codex, Claude Code, Cursor, and other tools that need to reason about a C#
+codebase without guessing from filenames or text matches.
 
-**MIT licensed · No IDE · No compiled project DLL required · No database · Graphify optional**
+MIT licensed · No IDE · No prebuilt project DLL as input · No database ·
+Graphify optional
 
-## Stop making your agent guess
+## The problem
 
-Suppose you ask:
+Ask an agent:
 
-> **Which methods are used only by tests?**
+> Which methods are used only by tests?
 
-A text search can find matching spellings. It cannot reliably tell which
-overload was bound, which project the caller belongs to, or whether an
-interface implementation is the symbol you meant.
+Text search can find a spelling. It cannot reliably tell whether a call binds
+to the `int` or `string` overload, whether an interface member dispatches to a
+derived implementation, or which project a caller belongs to. That is how
+plausible-looking dead-code reports become unsafe.
 
-Graphify C# loads the project through MSBuild and asks Roslyn what every symbol
-actually means. It emits stable identities and directed relationships that an
-agent can inspect instead of infer:
+Graphify C# loads the evaluated project with MSBuild and asks Roslyn which
+symbols and relationships the compiler resolved:
 
-| Without semantic indexing | With Graphify C# |
+| Text search | Graphify C# |
 | --- | --- |
-| Matching names look like usages | Roslyn resolves the exact declaration |
-| Overloads and generics are ambiguous | Bound signatures and project/TFM identity are retained |
-| Test-only usage requires manual inspection | Every caller carries project, namespace, and source location |
-| Type relationships are reconstructed from text | `inherits`, `implements`, and `overrides` are explicit edges |
+| Matching names look like usages | Exact declarations and bound symbols |
+| Overloads and generics are ambiguous | Stable identities retain signatures and project/TFM provenance |
+| Test-only usage needs manual sorting | Callers include project, namespace, and source location |
+| Inheritance is reconstructed from names | `inherits`, `implements`, and `overrides` are explicit relationships |
 
-For example, this repository contains an internal
-`DeclarationCatalogBuilder.ForTesting(...)` method. From the extracted graph,
-an agent can see one compiler-resolved incoming call:
-
-```text
-Graphify.CSharp.Roslyn.DeclarationCatalogBuilder.ForTesting(...)
-└── called by Graphify.CSharp.Tests.Roslyn.CSharp14FeatureTests.Reports_identity_failures_and_keeps_serializing_the_remaining_graph()
-    at tests/Graphify.CSharp.Tests/Roslyn/CSharp14FeatureTests.cs:143
-```
-
-That is semantic evidence, not a text-match count. A consumer can classify the
-caller by project or namespace convention and report the method as test-only
-for human review.
+The tool reports the evidence. Your agent can then classify callers using the
+repository's naming convention, such as projects or namespaces containing
+`Tests`, and decide what deserves human review.
 
 ## Quick start
 
-### 1. Install
+### 1. Install the global tool
 
 ```bash
 dotnet tool install --global Graphify.CSharp --framework net10.0
 ```
 
-### 2. Index your codebase
+Use the `net11.0` asset for C# 15 preview input when the .NET 11 SDK is
+installed:
 
 ```bash
-graphify-csharp \
+dotnet tool install --global Graphify.CSharp --framework net11.0
+```
+
+If the tool is already installed, use `dotnet tool update` with the same
+`--framework` instead.
+
+### 2. Export a complete graph
+
+From a repository containing one solution or project, the shortest form is:
+
+```bash
+graphify-csharp
+```
+
+It discovers one `.sln`/`.slnx` or, when no solution exists, one `.csproj`
+directly in the current directory and writes:
+
+```text
+./graphify-out/csharp.json
+```
+
+For a repository whose solution is under `src`, be explicit:
+
+```bash
+graphify-csharp export \
   --input ./src/MyProduct.sln \
   --root . \
   --configuration Release \
   --output ./graphify-out/csharp.json
 ```
 
-The result is one complete JSON document containing `nodes`, `edges`, and
-`hyperedges`. It can be read directly by an agent, queried with `jq`, consumed
-from your own code, or passed to Graphify.
+The output is one complete JSON document with `nodes`, `edges`, and
+`hyperedges`. It can be inspected by an agent, queried with `jq`, consumed by
+your own program, or passed to the optional Graphify executable.
 
-Supported inputs are `.sln`, `.slnx`, `.csproj`, and SDK file-based `.cs` apps.
-The repository's SDKs, packages, and MSBuild inputs must be available locally.
+Upgrading from v0.1? See the concise [v0.2 migration guide](docs/MIGRATING_TO_V0.2.md)
+for the `watch`/`export --instance` command split, output changes, and path
+semantics.
 
-### 3. Teach your agent to use it
+### 3. Give your agent the usage instructions
 
-The included [`graphify-csharp` skill](.agents/skills/graphify-csharp/SKILL.md)
-is a self-contained guide to using the installed CLI on your codebase: refresh
-the index, follow semantic edges, and interpret static-analysis limits. The
-NuGet installation above supplies the executable; this Markdown file supplies
-the agent's usage instructions. It contains no extractor development or
-release workflow.
+The repository includes a copyable [consumer skill](.agents/skills/graphify-csharp/SKILL.md).
+It teaches an agent how to start a warm session, use exact symbol IDs, inspect
+callers and relationships, interpret static-analysis limits, and export JSON
+when needed. Installing the NuGet package installs the executable; it does not
+install a skill.
 
-Install it in a Codex-compatible project:
+Project-local Codex setup:
 
 ```bash
 mkdir -p .agents/skills/graphify-csharp
@@ -94,229 +111,212 @@ curl -fsSL \
   -o .agents/skills/graphify-csharp/SKILL.md
 ```
 
-For Claude Code, use `.claude/skills/graphify-csharp/SKILL.md` instead. Reload
-an agent session after installing or updating the skill. If you installed an
-earlier copy, replace it with the current consumer-only version. See
-[agent setup](docs/USAGE.md#agent-setup) for personal, machine-wide locations.
+For a personal Codex installation, use `~/.codex/skills/graphify-csharp/`.
+For Claude Code, use `.claude/skills/graphify-csharp/` in a project or
+`~/.claude/skills/graphify-csharp/` for a personal installation. Reload the
+agent after installing or updating the file.
 
-If you do not use skills, add this to your project instructions:
+Without a skills system, put this in the repository's agent instructions:
 
-> For C# structure and usage questions, refresh
-> `graphify-out/csharp.json` with `graphify-csharp` before answering. Identify
-> declarations by `symbol_key` and inspect incoming `calls` and `references`
-> edges. Treat zero inbound edges as observed static evidence, not proof of
+> For C# structure and usage questions, use the `graphify-csharp` CLI. Identify
+> declarations by their exact `symbol_key`/node ID and inspect incoming
+> `calls`, `references`, `inherits`, `implements`, and `overrides` relationships.
+> Treat zero inbound edges as zero observed static references, not proof of
 > runtime unreachability.
 
-Now ask your agent:
+## What an agent can ask
 
 - What calls this exact overload or constructor?
-- Which source declarations reference this field, property, event, or type?
-- Which classes implement this interface?
-- Which members override this virtual or interface member?
-- Which declarations have zero observed inbound references?
-- Which methods are referenced only from test projects?
+- Which declarations reference this field, property, event, type, or enum member?
+- Which classes inherit from this type or implement this interface?
+- Which overrides satisfy this virtual or interface member?
+- Which arguments bind to which formal parameters?
+- Which declarations have zero observed inbound static references?
+- Which callers originate from projects or namespaces named `Tests`?
+- Which declarations are candidates for a test-only usage report?
 
-## From IDE navigation to agent evidence
+The last two are analysis questions, not hard-coded classifications. The tool
+returns caller provenance; the agent applies the naming convention you choose
+and reports the scope and caveats.
 
-| What a developer does in Rider | What an agent gets from Graphify C# |
-| --- | --- |
-| Find Usages | Directed, compiler-resolved `calls` and `references` edges |
-| Jump to Implementation | `implements` edges to the exact interface contract |
-| Navigate base and derived types | `inherits` and `overrides` edges |
-| Disambiguate overloads and generics | Stable symbol identities with bound signature information |
-| Inspect a large solution | Project, target-framework, source-location, and provenance metadata |
-| Keep navigating while editing | Incremental indexing with an optional warm watcher |
+## Warm semantic navigation
 
-The extractor supplies the facts. Your agent or downstream consumer decides
-what those facts mean: test-only usage, zero observed references, a deletion
-candidate, or something requiring human review.
-
-## Ask targeted questions without a JSON dump
-
-The same semantic evidence is available as bounded CLI queries. This is useful
-when an agent needs one answer—or when a large complete JSON document would be
-more data than the question requires. Start a watcher without `--output` to
-keep the workspace warm without publishing a graph file:
+For repeated agent work, keep a Roslyn workspace warm. `watch` is a foreground,
+output-free session; it does not write JSON. Run it in one terminal:
 
 ```bash
-graphify-csharp \
-  --input ./src/MyProduct.sln \
-  --root . \
-  --configuration Release \
-  --watch
-
-graphify-csharp ps --json
-graphify-csharp query symbols OrderService --instance <session-id> --kind class --json
-graphify-csharp query callers --instance <session-id> --symbol <symbol-id> --json
-graphify-csharp query usage-summary --instance <session-id> --kind method --group-by project,namespace --json
+graphify-csharp watch
 ```
 
-Queries return small, deterministic pages and include the snapshot and scope
-used to answer them. `callers`, `usages`, `hierarchy`, `signature`, and
-`arguments` take an exact symbol ID; use `symbols` first to choose between
-overloads. A query can also run cold with `--input` instead of `--instance`,
-but cursors and snapshots require a live watcher. The semantic query commands
-do not require Graphify and do not create `csharp.json`.
-
-When a complete Graphify document is needed, request it explicitly from a live
-worker:
+If discovery is ambiguous, specify the input and root:
 
 ```bash
-graphify-csharp export \
+graphify-csharp watch \
+  --input ./src/MyProduct.sln \
+  --root . \
+  --configuration Release
+```
+
+The watcher prints a full session ID and resolved analysis context on stderr
+while it starts. In another terminal, use that ID (or a unique prefix):
+
+```bash
+graphify-csharp ps --json
+graphify-csharp info <session-id> --json
+graphify-csharp query symbols OrderService --instance <session-id> --kind class --json
+graphify-csharp query callers --instance <session-id> --symbol <symbol-id> --json
+graphify-csharp query usage-summary \
   --instance <session-id> \
-  --output ./graphify-out/csharp.json \
+  --kind method \
+  --group-by project,namespace \
   --json
 ```
 
-This keeps the targeted-query path and the optional whole-graph export as two
-clear workflows.
+Use `symbols` first when a name has overloads. Then pass the exact returned
+symbol ID to `signature`, `callers`, `usages`, `hierarchy`, or `arguments`.
+Queries return bounded JSON pages with the evidence snapshot used to answer
+them. A live session is also useful for edits: queries, exports, and explicit
+refreshes wait for the session's startup/recovery barrier.
 
-## Where it fits
-
-Graphify C# deliberately covers a focused layer:
-
-- **Rider and ReSharper** provide interactive navigation, inspections,
-  refactorings, and quick fixes for developers inside an IDE.
-- **NDepend** provides a broad, commercial architecture and code-quality suite
-  built around dependency analysis, metrics, rules, reports, baselines, and
-  visualizations.
-- **Graphify C#** provides source-level C# semantic evidence for coding agents,
-  headlessly and in an open format.
-
-There is real overlap with NDepend around callers, dependencies, inheritance,
-and dead-code investigation. The difference is the product boundary: Graphify
-C# is not a free NDepend clone or an IDE replacement. It is a Roslyn-native
-semantic index that other tools and agents can build on.
-
-## Use it with Graphify—or without it
-
-Graphify C# is standalone. It does not invoke, load, or require Graphify.
-
-Without Graphify, query the JSON with an agent, `jq`, C#, Python, or any other
-consumer. For example, list every indexed method:
+When the agent needs a complete graph, request it explicitly:
 
 ```bash
-jq '.nodes[] | select(.properties.node_kind == "method")' \
-  graphify-out/csharp.json
+graphify-csharp export --instance <session-id>
 ```
 
-With Graphify, refresh the C# evidence and use its higher-level query, path,
-explanation, clustering, and export workflows:
+This writes the default `./graphify-out/csharp.json` under the calling
+terminal's current directory. Choose another destination with `--output`.
+The watcher does not publish a new JSON file merely because a source file
+changed; export is the explicit publication request.
+
+Useful lifecycle commands:
 
 ```bash
-graphify-csharp \
+graphify-csharp refresh --instance <session-id>
+graphify-csharp refresh --instance <session-id> --rebuild
+graphify-csharp diagnostics <session-id> --output ./graphify-out/diagnostics.json
+graphify-csharp stop <session-id>
+```
+
+`refresh` updates trusted in-memory evidence without creating a graph file.
+`--rebuild` invalidates reusable contributions for that refresh. `stop` targets
+only the selected session; multiple sessions can run at once.
+
+## One-shot queries
+
+You do not need a watcher or a JSON dump for a single question:
+
+```bash
+graphify-csharp query callers \
   --input ./src/MyProduct.sln \
   --root . \
   --configuration Release \
+  --symbol '<exact-symbol-id>' \
+  --json
+```
+
+Cold queries require explicit `--input`. They do not create a persistent
+session, output file, cursor, or snapshot. A selected `--instance` never falls
+back to cold analysis if that session is missing.
+
+## The JSON shape
+
+The complete export is deliberately simple to consume. This is an abridged
+shape; IDs and symbol keys are generated from the actual Roslyn declarations:
+
+```json
+{
+  "nodes": [
+    {
+      "id": "cs_<stable-node-id>",
+      "label": "OrderService.Submit(int)",
+      "properties": {
+        "node_kind": "method",
+        "symbol_key": "csharp/v1|...",
+        "project": "src/Orders/Orders.csproj",
+        "target_framework": "net10.0"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "source": "cs_<caller-node-id>",
+      "target": "cs_<stable-node-id>",
+      "relation": "calls",
+      "source_file": "src/Orders/OrderController.cs"
+    }
+  ]
+}
+```
+
+`calls`, `references`, `inherits`, `implements`, and `overrides` are compiler-
+resolved relationships. Locations identify where the relationship was
+observed. Invocation and constructor arguments can also be mapped to their
+source formal parameters.
+
+## Graphify is optional—and a separate tool
+
+`graphify-csharp` does not invoke, load, or require the separate `graphify`
+executable. You can use the CLI and JSON directly with an agent, `jq`, C#,
+Python, or another consumer.
+
+If you use Graphify as well, keep the roles separate:
+
+1. `graphify-csharp` produces the C# semantic document or answers a C# query.
+2. The separate `graphify` executable consumes that document for its own
+   higher-level graph queries, paths, explanations, clustering, or exports.
+
+```bash
+graphify-csharp export \
+  --input ./src/MyProduct.sln \
+  --root . \
   --output ./graphify-out/csharp.json
 
 graphify query "Which methods call the order service?" \
   --graph ./graphify-out/csharp.json
 ```
 
-Graphify remains the general graph workflow. `graphify-csharp` contributes the
-C# layer where compiler binding matters. If you use Graphify's general skill,
-keep it alongside the C# skill and refresh the C# evidence before each C# graph
-query or export. Installing either skill does not install its executable.
-
-## What gets indexed
-
-### Source declarations
-
-- Namespaces, classes, structs, interfaces, records, enums, and delegates
-- Constructors, methods, operators, and local functions
-- Properties, indexers, fields, enum members, and events
-- Parameters, locals, type parameters, aliases, labels, and query range variables
-
-### Compiler-resolved relationships
-
-- Direct calls, constructor calls, method groups, and member access
-- Field, type, attribute, generic, `typeof`, and declaration-header references
-- `inherits`, `implements`, and `overrides`
-- Compiler-selected operators, conversions, deconstruction, `foreach`,
-  `await`, `using`, patterns, ranges, and collection expressions
-- Invocation and constructor arguments bound to source formal parameters
-- Cross-project relationships with overload-aware, project/TFM-aware identity
-
-Every edge points from the declaration where the relationship was observed to
-the declaration Roslyn resolved. Source location and provenance are retained.
-Unsupported semantic shapes are reported as diagnostics instead of silently
-disappearing or crashing the entire extraction.
-
-See [Compatibility](docs/COMPATIBILITY.md) for the complete language and
-compiler-feature matrix.
-
-## Keep the index warm
-
-For repeated agent work, start a watcher:
-
-```bash
-graphify-csharp \
-  --input ./src/MyProduct.sln \
-  --root . \
-  --configuration Release \
-  --output ./graphify-out/csharp.json \
-  --watch
-```
-
-The watcher keeps the Roslyn workspace warm and prepares changed projects in
-the background. For an output-backed watcher, the normal `graphify-csharp`
-invocation is the explicit JSON refresh command. It requires the watcher to
-report `ready=true`; while the watcher is starting or recovering it returns a
-structured `not_ready` error, so retry after `inspect` reports ready. The
-separate `query` commands wait for semantic readiness and return targeted
-evidence without publishing JSON.
-
-If no matching watcher is running, the same command performs a one-shot
-refresh. Use `--rebuild` to invalidate the incremental cache. A watcher started
-without `--output` is query-only and has no canonical JSON refresh destination;
-use `export` when you explicitly want a complete document.
-
-See [Usage](docs/USAGE.md) and
-[Incremental indexing](docs/INCREMENTAL_INDEXING.md) for watcher ownership,
-filtering, recovery, and cache behavior.
+The optional Graphify skill teaches the `graphify` tool. The
+`graphify-csharp` skill in this repository teaches this CLI. Install both
+alongside one another only when you want both workflows; one does not install
+or silently invoke the other.
 
 ## Runtime and language support
 
-The package contains two tool assets:
+The package contains two global-tool assets:
 
 | Tool asset | Runtime | Compiler surface |
 | --- | --- | --- |
-| `net10.0` | .NET 10 | Roslyn 5.9 / C# 14 |
-| `net11.0` | .NET 11 | .NET 11 SDK Roslyn / C# 15 preview |
+| `net10.0` | .NET 10 | C# 14 Roslyn path |
+| `net11.0` | .NET 11 | C# 15 preview Roslyn path |
 
-Install or update the package with `dotnet tool ... --framework` to select the
-tool runtime and Roslyn asset:
-
-```bash
-dotnet tool update --global Graphify.CSharp --framework net11.0
-```
-
-This is separate from the optional `--target-framework` argument, which chooses
-one analyzed compilation when an input project targets multiple frameworks.
-Single-target projects do not need `--target-framework`.
+The install-time `--framework` chooses which executable asset runs. The
+optional analysis-time `--target-framework` chooses one target framework when
+the analyzed project itself targets multiple frameworks. A single-target
+project normally needs no target selector.
 
 ## Static-analysis boundary
 
-Graphify C# reports what Roslyn can observe statically. Reflection, dependency
-injection, native callbacks, dynamic invocation, and code absent from the
-loaded compilation may create runtime relationships that are not represented
-as direct edges.
+This is compiler evidence, not a runtime reachability proof. Reflection,
+dependency injection, dynamic invocation, native callbacks, generated code
+outside the evaluated compilation, and external consumers can create runtime
+relationships that do not appear as direct static edges.
 
-Consequently:
+Therefore:
 
-- zero inbound references means **zero observed static references**;
-- a test-only result depends on your project or namespace classification; and
-- every deletion candidate still requires judgment.
+- zero inbound edges means zero observed static references in the selected
+  scope;
+- test-only usage depends on the project/namespace convention applied by the
+  agent; and
+- a deletion candidate still needs review of entry points, reflection, DI,
+  source generators, public API consumers, and build/test behavior.
 
-The tool exposes this boundary instead of pretending static evidence is a
-runtime reachability proof.
+Unsupported or unrepresentable semantic shapes are reported as diagnostics
+where possible instead of crashing the entire extraction.
 
 ## Development
 
-Contributing to the indexer itself? The repository's [AGENTS.md](AGENTS.md)
-contains its architecture, performance, and testing guidance. Those rules apply
-here and are separate from the consumer skill installed in your projects.
+To contribute to the indexer itself:
 
 ```bash
 dotnet restore Graphify.CSharp.sln

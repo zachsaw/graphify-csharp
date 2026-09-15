@@ -1,127 +1,150 @@
 # Usage
 
-The incremental indexing, watcher, refresh, and cache-rebuild behavior is
-described in [Incremental indexing and refresh design](INCREMENTAL_INDEXING.md).
+`graphify-csharp` has two independent workflows:
+
+| Need | Command | Result |
+| --- | --- | --- |
+| Create a complete file | `export` or bare invocation | One Graphify-compatible JSON document on disk |
+| Keep a Roslyn workspace warm | `watch` | A foreground session; no JSON output |
+| Ask one semantic question | `query` | A bounded JSON or human-readable response |
+| Refresh trusted evidence | `refresh --instance ID` | A small acknowledgement; no JSON output |
+| Inspect or control sessions | `ps`, `info`, `inspect`, `diagnostics`, `stop` | Management responses |
+
+`graphify-csharp` is usable without the separate `graphify` executable. The
+optional Graphify workflow is documented at the end of this page.
 
 ## Install
 
-The release artifact is a .NET global tool:
+The release artifact is a .NET global tool. Choose the runtime asset that
+matches the C# language surface you need:
 
 ```text
 dotnet tool install --global Graphify.CSharp --framework net10.0
 ```
 
-For C# 15 input, select the .NET 11 tool asset from the same package:
+For C# 15 preview input, use the `net11.0` asset and install the corresponding
+.NET 11 SDK:
 
 ```text
-dotnet tool update --global Graphify.CSharp --framework net11.0
+dotnet tool install --global Graphify.CSharp --framework net11.0
 ```
 
-To build and run the current checkout instead:
+If the tool is already installed, use `dotnet tool update` with the same
+`--framework` instead.
+
+The install-time `--framework` selects the executable asset. It is unrelated
+to the optional analysis-time `--target-framework`, which selects one target
+framework from a multi-targeted project.
+
+To run the current checkout while developing the tool:
 
 ```text
 dotnet run --project src/Graphify.CSharp.Cli --framework net10.0 -- --help
 dotnet pack src/Graphify.CSharp.Cli --configuration Release
 ```
 
+If you are upgrading from v0.1, read the [v0.2 migration guide](MIGRATING_TO_V0.2.md)
+before changing automation. It covers the explicit `watch`, `query`, `refresh`,
+and `export --instance` routes, the new default output name, and caller-relative
+path resolution.
+
 ## Agent setup
 
-Install the executable using the NuGet command above. Then copy the
-[consumer skill](../.agents/skills/graphify-csharp/SKILL.md) into the agent's
-skill directory. The skill is a self-contained Markdown guide for using the
-installed tool on the repository being analyzed; no extractor source checkout
-or contributor instructions are needed.
+The [consumer skill](../.agents/skills/graphify-csharp/SKILL.md) teaches an
+agent how to use the installed executable. It does not install the executable,
+and it contains no maintainer instructions.
 
-Choose the location that fits your workflow:
-
-| Agent | Project-local directory | Personal directory |
-| --- | --- | --- |
-| Codex | `.agents/skills/graphify-csharp/` | `~/.codex/skills/graphify-csharp/` |
-| Claude Code | `.claude/skills/graphify-csharp/` | `~/.claude/skills/graphify-csharp/` |
-
-For example, install the usage skill for Codex across your projects:
-
-```bash
-mkdir -p ~/.codex/skills/graphify-csharp
-curl -fsSL \
-  https://raw.githubusercontent.com/zachsaw/graphify-csharp/main/.agents/skills/graphify-csharp/SKILL.md \
-  -o ~/.codex/skills/graphify-csharp/SKILL.md
-```
-
-Use the corresponding directory for Claude Code or a project-local copy.
-Reload an agent session after installation. To update an older skill, replace
-its `SKILL.md`; updating the NuGet tool does not update copied skills.
-
-Graphify's general skill and executable are optional, separate installations.
-When using both tools, the C# skill teaches the refresh and semantic-evidence
-steps before Graphify consumes the JSON. Development rules for the extractor
-live in this repository's [AGENTS.md](../AGENTS.md); do not copy them into an
-application merely to use the tool.
-
-## Query semantic evidence
-
-Use the query commands when the agent needs a bounded answer rather than the
-complete Graphify document. They use the same Roslyn-backed workspace and are
-available with or without Graphify:
+Project-local Codex setup:
 
 ```text
-# Start a warm semantic worker. No JSON output or output lease is created.
-graphify-csharp \
+mkdir -p .agents/skills/graphify-csharp
+curl -fsSL \
+  https://raw.githubusercontent.com/zachsaw/graphify-csharp/main/.agents/skills/graphify-csharp/SKILL.md \
+  -o .agents/skills/graphify-csharp/SKILL.md
+```
+
+Use `~/.codex/skills/graphify-csharp/SKILL.md` for a personal Codex install.
+Use `.claude/skills/graphify-csharp/SKILL.md` in a project or
+`~/.claude/skills/graphify-csharp/SKILL.md` for a personal Claude Code install.
+Reload the agent after installing or updating the skill.
+
+If the separate `graphify` tool is also part of the workflow, install its
+general skill alongside this one. Their responsibilities are different:
+
+- the `graphify-csharp` skill teaches this CLI's C# extraction, semantic
+  queries, sessions, and export;
+- the `graphify` skill teaches the separate `graphify` executable's graph
+  queries, paths, explanations, clustering, and exports.
+
+Neither skill installs or silently invokes the other tool.
+
+## Paths and input discovery
+
+Capture the caller's current directory once. Explicit relative `--input`,
+`--root`, `--output`, `--path`, and `--project` values are resolved against
+that directory. `--root` controls analysis scope and omitted-input discovery;
+it does not rebase other explicitly supplied paths.
+
+When `--input` is omitted for disk export or `watch`, the tool examines only
+the immediate `--root` directory (or the caller's current directory):
+
+1. one `.sln` or `.slnx` is selected;
+2. multiple solutions, including a `.sln`/`.slnx` pair, are an error;
+3. if there is no solution, one `.csproj` is selected;
+4. multiple projects or no candidates are an error.
+
+Discovery is case-insensitive and does not recurse. A lone `.cs` file is not
+auto-selected, but an explicitly supplied file-based `.cs` app is supported.
+An explicit input always wins over discovery, while supplying both a positional
+input and `--input` is an error.
+
+Other defaults are:
+
+- `--root`: caller's current directory;
+- `--configuration`: `Debug`;
+- `--target-framework`: automatic selection when unambiguous;
+- export output: `./graphify-out/csharp.json` under the caller's current
+  directory; and
+- watcher backup scan: five minutes.
+
+The output default is deliberately caller-relative. For example, running from
+`/work/tools` with `--root /work/product` writes
+`/work/tools/graphify-out/csharp.json`, not inside `/work/product`.
+
+## Export a complete document
+
+Use the explicit verb when a complete JSON document is wanted:
+
+```text
+graphify-csharp export \
   --input ./src/Product/Product.sln \
   --root . \
   --configuration Release \
-  --watch
-
-# Find the session ID, then choose an exact overload.
-graphify-csharp ps --json
-graphify-csharp query symbols Submit --instance <session-id> --kind method --json
-
-# Use the selected node ID for exact navigation and call-site questions.
-graphify-csharp query signature --instance <session-id> --symbol <symbol-id> --json
-graphify-csharp query callers --instance <session-id> --symbol <symbol-id> --json
-graphify-csharp query usages --instance <session-id> --symbol <symbol-id> --json
-graphify-csharp query hierarchy --instance <session-id> --symbol <symbol-id> --direction implementations --json
-graphify-csharp query arguments --instance <session-id> --symbol <symbol-id> --json
+  --output ./graphify-out/csharp.json
 ```
 
-The query verbs are `symbols`, `signature`, `usages`, `callers`, `hierarchy`,
-`arguments`, and `usage-summary`. `symbols` and `usage-summary` accept an
-optional positional case-insensitive substring search. The other verbs use an
-exact graph node ID, so overloads and generic instantiations cannot be confused
-by a matching name. `usage-summary` returns fixed counts for inbound calls,
-references, inheritance, implementations, and overrides. Add
-`--group-by project,namespace` for flat origin groups; it does not classify
-results as dead or test-only.
-
-For a summary, `edge_count` counts distinct merged relationships while
-`occurrence_count` counts their source locations; a relationship with no
-location counts as one edge and zero occurrences. Scope filters select target
-declarations for `symbols` and `usage-summary`, origin/caller declarations for
-`usages` and `callers`, returned neighbors for `hierarchy`, and caller
-documents for `arguments`.
-
-Each response is a bounded JSON object when `--json` is supplied. It includes
-the snapshot, selected scope, diagnostics, and page state. Use the returned
-`next_cursor` with the same verb, symbol, filters, and direction to continue a
-live-watcher query; the limit may change:
+The following are equivalent disk routes:
 
 ```text
-graphify-csharp query callers \
-  --instance <session-id> \
-  --symbol <symbol-id> \
-  --limit 100 \
-  --json
-graphify-csharp query callers \
-  --instance <session-id> \
-  --symbol <symbol-id> \
-  --cursor <next-cursor> \
-  --limit 250 \
-  --json
+graphify-csharp
+graphify-csharp export
+graphify-csharp Product.sln
 ```
 
-An evidence revision or trust-loss recovery invalidates cursors and pinned
-snapshots with a structured error. Cold queries use the same handlers without
-starting a persistent worker, pipe, or JSON export:
+They use the same discovery, defaults, cache, and output transaction. `--json`
+changes the command response to one structured envelope on stdout; progress
+remains on stderr. `--rebuild` bypasses reusable project contributions:
+
+```text
+graphify-csharp export --input ./src/Product.sln --rebuild --json
+```
+
+The complete output contains `nodes`, `edges`, and `hyperedges`. It is written
+atomically and is the only public JSON publication performed by this CLI.
+
+## Query semantic evidence
+
+A cold query answers one question without a persistent worker or graph file:
 
 ```text
 graphify-csharp query symbols Submit \
@@ -132,366 +155,195 @@ graphify-csharp query symbols Submit \
   --json
 ```
 
-Cold results do not support `--cursor` or `--snapshot`. If a cold result is
-truncated by the response limit, it reports that continuation is unavailable;
-narrow the filters or use a watcher. A query sent to an explicit `--instance`
-never falls back to cold analysis when that session is missing or incompatible.
-Argument spans use Roslyn text offsets in UTF-16 code units. Line and column
-locations are one-based and repository-relative. A successful response is
-current for the worker's accepted, indexed evidence snapshot; it does not
-promise that a disk edit occurring after that event boundary has already been
-indexed.
+Cold queries require explicit `--input`; they do not use discovery. They do not
+support cursors or snapshots. A selected `--instance` never falls back to cold
+analysis when that session is missing or incompatible.
 
-The `query` command is distinct from the optional `graphify` executable and
-from `graphify query`: the former asks this tool for compiler-bound C# facts,
-while the latter consumes a complete graph document. To create that document
-from a warm worker, use explicit export:
+For repeated questions, use a warm session as described below, then route every
+query explicitly:
 
 ```text
-graphify-csharp export \
-  --instance <session-id> \
-  --output ./graphify-out/csharp.json \
-  --json
+graphify-csharp query symbols Submit --instance <session-id> --kind method --json
+graphify-csharp query signature --instance <session-id> --symbol <symbol-id> --json
+graphify-csharp query callers --instance <session-id> --symbol <symbol-id> --json
+graphify-csharp query usages --instance <session-id> --symbol <symbol-id> --json
+graphify-csharp query hierarchy --instance <session-id> --symbol <symbol-id> --direction implementations --json
+graphify-csharp query arguments --instance <session-id> --symbol <symbol-id> --json
+graphify-csharp query usage-summary --instance <session-id> --kind method --group-by project,namespace --json
 ```
 
-Export writes one complete Graphify-compatible JSON file only when requested.
-It does not change the query-only worker into an output-backed watcher or
-reserve the export directory. A query-only worker has no output-derived
-persistent cache; its descriptor is only a discovery hint and may remain as a
-stale record after an abnormal exit. For the legacy output workflow, start the
-watcher with `--output` as shown below; the ordinary no-subcommand invocation
-then refreshes that canonical output and retains its existing `not_ready`
-behavior during startup or recovery.
+`symbols` and `usage-summary` accept an optional case-insensitive substring.
+The other verbs require one exact symbol ID, so overloaded and generic members
+are not selected by spelling alone. `usage-summary` returns fixed inbound
+counts and origin groups; it does not decide whether a declaration is dead or
+test-only. Apply the repository's project/namespace convention to the returned
+caller provenance.
 
-## Extract a repository
+The evidence includes project, namespace, target framework, source locations,
+diagnostics, and a snapshot/scope. `calls`, `references`, `inherits`,
+`implements`, and `overrides` are separate relationship kinds. Argument results
+include the source call site and the compiler-bound formal parameter where it
+can be represented.
 
-Use a repository-relative root so symbol keys and source files do not depend on
-the machine’s absolute path:
+Live responses are bounded pages. Continue with `page.next_cursor` while
+keeping the same query, filters, symbol, and direction. A changed evidence
+revision or recovery invalidates cursors and snapshots with a structured
+`stale_snapshot` response.
+
+## Keep a warm session
+
+Start `watch` in a foreground terminal. It never takes an output path and never
+writes a graph file:
 
 ```text
-graphify-csharp \
+graphify-csharp watch
+```
+
+For an input under `src` or an ambiguous repository, specify it explicitly:
+
+```text
+graphify-csharp watch \
   --input ./src/Product/Product.sln \
   --root . \
   --configuration Release \
-  --output ./graphify-out/csharp.json
+  --watch-scan-interval 00:05:00
 ```
 
-The first run performs a cold reconciliation and stores internal contribution
-state under `.graphify-csharp/` beside the output. Later one-shot runs compare
-project/source fingerprints, reuse unchanged project contributions, and still
-write one complete Graphify document. To intentionally invalidate that state:
+The watcher prints a full session ID and resolved input/root/configuration/TFM
+context on stderr while startup is in progress, followed by a ready message
+and concrete query/export examples. Use another terminal for operations:
 
 ```text
-graphify-csharp \
-  --input ./src/Product/Product.sln \
-  --root . \
-  --configuration Release \
-  --output ./graphify-out/csharp.json \
-  --rebuild
+graphify-csharp ps --json
+graphify-csharp info <session-id-or-unique-prefix> --json
+graphify-csharp query callers --instance <session-id> --symbol <symbol-id> --json
 ```
 
-The cache contents are an implementation detail and are safe to discard. Stop
-the watcher before deleting its `.graphify-csharp/` directory because that
-directory also contains live lease files; alternatively use `--rebuild`. A
-missing, incompatible, corrupt, or incomplete cache causes a cold extraction;
-it is never treated as evidence for a partial graph.
+Every session is independent. No command selects a session by matching input,
+root, configuration, or output, and starting a second watcher does not attach
+to the first. Use the full ID or a prefix that matches exactly one session.
 
-## Keep a warm watcher
-
-For repeated refreshes, start one watcher for the selected input identity:
+File events and backup inventory scans update trusted in-memory evidence when
+possible, but they do not publish JSON. Queries, explicit refreshes, and live
+exports wait through startup and recovery barriers:
 
 ```text
-graphify-csharp \
-  --input ./src/Product/Product.sln \
-  --root . \
-  --configuration Release \
-  --output ./graphify-out/csharp.json \
-  --watch
+graphify-csharp refresh --instance <session-id>
+graphify-csharp refresh --instance <session-id> --rebuild
+graphify-csharp export --instance <session-id>
 ```
 
-The watcher subscribes before its cold startup, keeps the loaded Roslyn
-workspace alive, and queues file-system paths without doing extraction in an
-OS callback. It may index dirty projects in the background, but ordinary file
-changes do not publish a new JSON document. Run the normal command when a
-consumer needs a fresh snapshot; it connects only to a watcher with the
-matching analysis configuration and exact output path. If that watcher is
-still starting or recovering, the command returns a `not_ready` error and does
-not write JSON; retry after `inspect` reports `ready: true`:
+`refresh` returns a small acknowledgement and no graph file. `--rebuild`
+invalidates reusable contributions for that refresh. `export --instance`
+writes the current session to the caller's default output, or to a path given
+with `--output`. Export is the explicit JSON publication boundary.
 
-```text
-graphify-csharp \
-  --input ./src/Product/Product.sln \
-  --root . \
-  --configuration Release \
-  --output ./graphify-out/csharp.json
-```
+The watcher uses the evaluated MSBuild/Roslyn input set, not `.gitignore` or a
+hard-coded directory-name blacklist. Evaluated source/additional documents,
+project files, imports, restore metadata, linked files, and relevant generated
+inputs are covered. Output/intermediate roots and exact tool-owned paths are
+pruned only when evaluated project policy proves them irrelevant. A project
+membership or dependency change triggers a conservative reload so MSBuild
+remains authoritative.
 
-If there is no live matching watcher, the normal command performs a cold
-one-shot refresh. This includes the case where a watcher is warm for the same
-project but was started with a different output path: the request is never
-silently redirected to that watcher's file. Separate output files have
-output-specific cache and lease state, so they can be refreshed independently.
-The canonical output destination is still exclusive: if a live watcher owns
-that exact output with a different input, configuration, or target framework,
-the command fails with an ownership conflict instead of overwriting the
-watcher's graph. Use another output path or stop the watcher. A standalone
-refresh holds the same destination lease for its complete operation.
-`--rebuild` forces a full cache-invalidating extraction in either mode. The
-watcher keeps an OS file watcher for low latency and runs an independent
-metadata inventory scan every five minutes by default. Change the interval at
-startup with `--watch-scan-interval 00:02:00`. Watcher errors, native-buffer
-overflow, bounded-queue overflow, missing roots, or an incomplete backup scan
-invalidate the session; subscriptions are recreated and a cold reconciliation
-completes before the watcher becomes healthy again. The previous complete JSON
-remains readable while recovery runs, and recovery does not delete user files.
-Stop the watcher with Ctrl-C, or use the management commands below.
+Native file-watcher errors, queue overflow, missing roots, or an incomplete
+backup scan invalidate the session and trigger cold recovery. A restarted
+watcher always creates a new session and re-establishes a trusted boundary.
+`--no-progress` suppresses presentation only; it does not change indexing or
+routing.
 
-Cold extraction, cold semantic queries, and foreground watcher startup print
-newline-delimited progress to stderr by default. It is safe to redirect stdout
-for machine-readable output. Add `--no-progress` to suppress only those
-progress messages; errors and the normal result remain unchanged. Progress
-shows real stages and completed work where Roslyn supplies a denominator. If
-the host is between worker operations while completing final inventory or the
-health barrier, it reports a clearly labelled startup-pending heartbeat. It
-does not estimate completion time or decide readiness. A heartbeat proves only
-that the observation surface is alive, not that Roslyn completed work.
+## Inspect, diagnose, and stop sessions
 
-### Discover and manage watchers
-
-Watcher management is local to the current OS user and does not load a project
-or Roslyn. List sessions across repositories with:
+Management does not load a project or Roslyn. It reads bounded per-user
+descriptors and probes a selected local endpoint:
 
 ```text
 graphify-csharp ps
 graphify-csharp ps --json
-```
-
-Each session has an opaque `session_id`. Use the full ID, or a prefix only when
-it is unique, to inspect or gracefully stop one watcher:
-
-```text
-graphify-csharp inspect <session-id> --json
-graphify-csharp info <session-id> --json
-graphify-csharp diagnostics <session-id> \
+graphify-csharp info <session-id-or-unique-prefix> --json
+graphify-csharp inspect <session-id-or-unique-prefix> --json
+graphify-csharp diagnostics <session-id-or-unique-prefix> \
   --output ./graphify-out/graphify-csharp-diagnostics.json
-graphify-csharp stop <session-id> --json
+graphify-csharp stop <session-id-or-unique-prefix> --json
 ```
 
-`info` and `inspect` are aliases. They report the configured input, root, configuration, selected TFM,
-output, process identity, reachability, lifecycle state, readiness, and
-generation counters. `info` also reports the current stage, loaded scope and
-evidence counts, last operation timing, and cached process metrics when
-available. During host-owned startup gaps, `startup_pending` and its bounded
-detail distinguish final inventory/health work from an idle ready watcher. A
-management read never initializes Roslyn, builds a query index, or captures a
-fresh blocking resource sample.
-It remains useful while the watcher is starting, refreshing, recovering, or
-stopping. `ps` stays compact and adds only stage, uptime, and RSS. `stop` returns success only after the
-identified watcher has finished its indexing/publication work and released its
-owned resources. A timeout or unreachable endpoint is not treated as a
-successful stop; retry or use Ctrl-C in the worker terminal.
+`info` and `inspect` are aliases. They report lifecycle state, readiness,
+input identity, active stage, evidence counts, last operation, recovery state,
+and cached resource samples. `ps` is intentionally smaller. Management reads
+do not build the lazy semantic index or take a fresh blocking resource sample.
 
-`diagnostics` requests a bounded support report from one live session. The
-client writes it locally after receiving the IPC response; the watcher never
-writes to the requested path. The destination must not already exist. Reports
-include paths, runtime identity, stage/timing history, evidence counts,
-recovery history, and process metrics, but not source contents or a heap dump.
-Review a report before sharing because it is not anonymized. An older watcher
-that does not support the command returns an upgrade/unsupported-capability
-error.
+The registry is a discovery hint. A crashed process can leave a stale record;
+stale records are reported, not used to kill a PID. `stop` requests graceful
+shutdown and succeeds only after the selected process releases its resources.
+There is no PID/name-based selection and no `stop --all`.
 
-The registry is a small per-user discovery hint. A stale or unreachable entry
-may remain after a crash and is shown by `ps`; it is not used to terminate a PID.
-Do not use a PID or a process-name search as a management selector. Management
-does not provide a force-kill or `stop --all` command.
-
-### What the watcher watches
-
-The project and Roslyn workspace are authoritative for input membership; the
-watcher does not read `.gitignore` and does not guess that every file beneath a
-project directory belongs to the compilation. Evaluated source documents,
-additional files, analyzer configuration, project/solution files, evaluated
-imports, references, and other discovered inputs are kept as exact paths.
-
-For performance, ordinary traversal prunes only roots identified by evaluated
-MSBuild output/intermediate properties, candidate-glob coverage that cannot
-admit a descendant, and the tool's exact output/cache paths. A project
-directory name is not a filter. An exact evaluated input wins over root
-pruning, and an evaluated candidate glob can reopen a root when its
-include/exclude rules admit the path. This means a physical generated file
-explicitly included from any directory still refreshes correctly while
-unrelated generated files beside it are ignored. If input discovery is
-incomplete, traversal stays conservative. The same policy is used by the native
-watcher and the backup inventory scan. Exact non-source inputs outside the
-repository are scanned by path; only source/additional-input roots that need
-live coverage add external watch roots, avoiding a recursive watch over SDK or
-package installation trees.
-
-Evaluated wildcard inputs are also retained as candidate rules. A new file with
-an arbitrary extension that matches an existing `Compile` or `AdditionalFiles`
-glob is therefore considered by both the native watcher and the backup scan;
-the project is re-evaluated before the change is published. An evaluated
-candidate rule whose include/exclude semantics admit a path inside a prunable
-root reopens that part of the root. This includes broad custom globs; the rule
-does not need to spell out a conventional directory name.
-
-Content edits to an existing evaluated source document use the warm Roslyn
-path. A created, deleted, or renamed source, a project-membership change, or
-any project/build/dependency input change goes through a complete MSBuild
-workspace reload so `Compile`, `Remove`, conditions, linked files, and disabled
-default globs remain authoritative. The reload may be broader than the one
-file that changed; that is the deliberate correctness boundary.
-
-During a cold reload, the watcher briefly enters a conservative transition
-state. It retains known viable coverage and coalesces events in a bounded
-journal. Once MSBuild has evaluated the next project boundary, each event is
-reclassified against exact inputs, candidate globs, and evaluated output roots;
-unrelated build output is discarded, while relevant edits are replayed through
-the normal warm/cold path. Once MSBuild/Roslyn has evaluated the new inputs, the
-new immutable snapshot is published before extraction continues, and watcher
-coverage is extended or replaced from that snapshot. Scans captured against an
-old or transitional snapshot are discarded; existing inventory changes,
-including newly discovered
-exact inputs, are reconciled before a post-load baseline is accepted. This
-closes the edit window around project membership changes without resurrecting
-deleted external roots.
-
-If auxiliary MSBuild input discovery is incomplete, the watcher reports a
-diagnostic and treats the warm view as untrusted for foreground refreshes. The
-next refresh performs a cold load and retries discovery; it does not silently
-return the incomplete warm graph as current.
-
-To exercise the packaged tool rather than the solution test doubles, run the
-repeatable watcher lifecycle check from the repository root:
-
-```text
-./scripts/run-watcher-e2e.sh
-```
-
-The input may be a solution, solution filter supported by MSBuild, project
-file, or SDK file-based `.cs` app. A project input also loads its project
-references that MSBuildWorkspace reports. For a file-based app, the SDK
-conversion honors `#:sdk`, `#:property`, `#:package`, `#:project`, and
-`#:include` directives, then maps generated-document locations back to the
-original source files. The SDK and any referenced packages/projects must be
-available locally. The TFM selector is optional for single-target projects.
-For a multi-target project, specify one TFM; the tool refuses to silently merge
-different compilations.
-
-Example file-based app invocation:
-
-```text
-graphify-csharp \
-  --input ./src/App.cs \
-  --root . \
-  --configuration Release \
-  --output ./graphify-out/csharp.json
-```
-
-To check repeatability, run the local CLI twice and compare the complete output:
-
-```text
-./scripts/check-deterministic-extraction.sh \
-  --input ./src/Product/Product.sln \
-  --root . \
-  --configuration Release
-```
-
-For watcher changes, use the focused tests while iterating and the packaged
-end-to-end script before a release boundary:
-
-```text
-dotnet test tests/Graphify.CSharp.Tests/Graphify.CSharp.Tests.csproj \
-  --configuration Release --framework net10.0 \
-  --filter 'FullyQualifiedName~Incremental'
-GRAPHIFY_CSHARP_WATCH_E2E_FRAMEWORK=net10.0 ./scripts/run-watcher-e2e.sh
-GRAPHIFY_CSHARP_WATCH_E2E_FRAMEWORK=net11.0 \
-  GRAPHIFY_CSHARP_WATCH_E2E_TARGET_FRAMEWORK=net10.0 \
-  ./scripts/run-watcher-e2e.sh
-```
-
-## Read the graph
-
-Nodes contain stable C# properties:
-
-- `symbol_key`: the complete project/TFM-aware semantic identity;
-- `namespace`: the containing namespace, or an empty string for the global
-  namespace;
-- `project`: repository-relative project path; and
-- `target_framework`: the compilation’s selected TFM; and
-- `declaration_kind`: the Roslyn declaration shape, such as `class`, `enum`,
-  `enum_member`, `method`, `localfunction`, `parameter`, `local`, `alias`,
-  `label`, `range_variable`, `indexer`, or `union` (with the .NET 11 tool asset).
-  Closed hierarchy types additionally carry `is_closed=true`.
-
-Edges point from the source declaration to the referenced declaration. Inspect
-incoming `calls` edges to obtain callers and incoming `references` edges to
-obtain other referencers. `calls`, `references`, `implements`, `inherits`, and
-`overrides` are direct Roslyn evidence; invocation and constructor arguments
-also reference their bound source formal parameters.
-Locations on each edge explain where the relationship was observed.
-Compiler-known entry points are marked on their node as `is_entry_point=true`.
-
-The `graphify_csharp.diagnostics` array reports workspace-load issues and
-recoverable declaration or semantic-extraction issues. An unsupported or
-otherwise unrepresentable Roslyn declaration or operation is identified with
-its kind or affected document and repository-relative source location where
-available; unaffected declarations and documents continue to be emitted.
-
-The declaration catalog covers source namespaces, named types, constructors,
-methods/operators/local functions, properties/indexers, fields/enum values,
-events, parameters, locals, type parameters, aliases, labels, and query range
-variables. Unnamed syntax artifacts and compiler-generated implementation
-details are not separate graph nodes in v0.1.
-
-This output is evidence for downstream analysis. The enricher deliberately does
-not decide whether a caller is a test, whether a target has zero inbound edges,
-or whether code is safe to delete.
-
-## Standalone use
-
-Graphify C# does not invoke, load, or require Graphify. The command emits a
-complete JSON document that an agent, `jq`, a C# program, or another analysis
-tool can consume directly. Graphify is an optional consumer of the same
-Graphify-compatible document; install it only when its graph queries, paths,
-explanations, clustering, or exports are useful.
+`diagnostics` asks a live session for a bounded report, then the requesting CLI
+writes it locally. The watcher never writes to that destination, and the
+destination must not already exist. Reports contain paths, runtime identity,
+stage/timing history, evidence counts, recovery history, and process metrics;
+they do not contain source contents or a heap dump and are not anonymized.
 
 ## Graphify integration
 
-The file is valid Graphify extraction JSON: it has the base `nodes`, `edges`, and
-`hyperedges` arrays, required `file_type`/`source_file` node fields, and the
-required edge confidence fields. It also marks itself as directed and
-multigraph so Graphify’s raw JSON loader preserves edge direction and parallel
-relationships. Generate the file before each Graphify query or export:
+Graphify is optional. `graphify-csharp` does not invoke or require the separate
+`graphify` executable. Without it, consume query responses or the complete JSON
+with an agent, `jq`, C#, Python, or another program.
+
+When both tools are installed, run two explicit stages:
 
 ```text
-graphify-csharp \
+# This tool: compiler-bound C# extraction
+graphify-csharp export \
   --input ./src/Product/Product.sln \
   --root . \
-  --configuration Release \
   --output ./graphify-out/csharp.json
 
+# The separate Graphify tool: higher-level graph workflow
 graphify query "Which methods call the service?" \
   --graph ./graphify-out/csharp.json
 ```
 
-The semantic node IDs are stable hashes of full C# symbol keys, so this output
-is intended to be the authoritative C# semantic extraction for the selected
-scope; merging it with a name-only C# extraction requires an explicit ID-join
-layer. Graphify’s clustered NetworkX view can normalize multiple relationships
-between the same endpoints; retain `csharp.json` when relation-level evidence
-matters.
-The CLI emits one complete document. If a future workflow shards extraction,
-each shard must keep this same envelope and stable IDs. JSON Lines fragments
-are not directly compatible. Graphify’s current `merge-graphs` command is for
-independent graph sources and prefixes each input’s IDs, so a same-repository
-shard workflow needs a deterministic merger that unions stable IDs, preserves
-parallel relations, validates endpoints, and then emits one complete document.
+The `graphify-csharp` skill teaches the first stage. Graphify's general skill
+teaches the second. Do not confuse `graphify-csharp query` with `graphify query`:
+the former asks this tool for semantic C# evidence; the latter reads a graph
+document using the separate tool.
 
-## Known limitations
+## Static-analysis boundary
 
-The extractor follows Roslyn-resolved source symbols. It does not claim to
-resolve arbitrary reflection strings, DI registrations, function pointers,
-P/Invoke, generated code excluded by the project, or host callbacks. Add
-consumer-specific roots and policies in downstream analysis, and review static
-limitations before acting on zero-inbound-reference results.
+The output describes what Roslyn can observe in the selected compilation. It is
+not runtime reachability. Reflection, dependency injection, dynamic invocation,
+native callbacks, external consumers, and generated code excluded from the
+evaluated project can create relationships absent from the graph.
+
+In particular:
+
+- zero inbound edges means zero observed static references in the selected
+  scope;
+- a test-only classification depends on the project/namespace convention the
+  consumer applies; and
+- deletion candidates still need review of entry points, reflection, DI,
+  source generators, public API consumers, and build/test behavior.
+
+Unsupported or unrepresentable semantic shapes are surfaced as diagnostics
+where possible instead of crashing the complete extraction.
+
+## Qualification and development
+
+The repository includes repeatable package-installed E2E checks:
+
+```text
+./scripts/run-query-e2e.sh
+./scripts/run-watcher-e2e.sh
+```
+
+For source development:
+
+```text
+dotnet restore Graphify.CSharp.sln
+dotnet build Graphify.CSharp.sln --configuration Release
+dotnet test Graphify.CSharp.sln --configuration Release
+dotnet pack src/Graphify.CSharp.Cli --configuration Release
+```
+
+See also [Compatibility](COMPATIBILITY.md), [Incremental indexing](INCREMENTAL_INDEXING.md),
+and [Release and NuGet publishing](RELEASING.md).
