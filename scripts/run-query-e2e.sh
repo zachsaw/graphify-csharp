@@ -135,6 +135,18 @@ dotnet tool install \
   Graphify.CSharp \
   --version "$package_version"
 
+stage="caller-relative-defaults"
+mkdir -p "$fixture_b/graphify-out"
+printf '%s\n' 'graphify sentinel' > "$fixture_b/graphify-out/graph.json"
+(
+  cd -- "$fixture_b"
+  "$tool_directory/graphify-csharp" \
+    > "$temporary_root/default-export.stdout" \
+    2> "$temporary_root/default-export.stderr"
+)
+test -s "$fixture_b/graphify-out/csharp.json"
+test "$(cat "$fixture_b/graphify-out/graph.json")" = 'graphify sentinel'
+
 start_watcher() {
   local fixture_root="$1"
   local log_path="$2"
@@ -148,11 +160,12 @@ start_watcher() {
   : > "$log_path"
   : > "$stdout_path"
   "$tool_directory/graphify-csharp" \
+    watch \
     --input "$fixture_root/ReferenceFixture.csproj" \
     --root "$fixture_root" \
     --configuration "$configuration" \
     --target-framework "$target_framework" \
-    --watch > "$stdout_path" 2> "$log_path" &
+    > "$stdout_path" 2> "$log_path" &
   local started_pid=$!
   if [[ "$role" == "a" ]]; then
     watcher_a_pid="$started_pid"
@@ -250,13 +263,14 @@ wait_ready "$watcher_b_session"
 # summary even when the fixture is too small to expose an intermediate tick.
 for progress_log in "$log_a" "$log_b"; do
   wait_for_progress_line "$progress_log" 'graphify-csharp: Starting;'
+  wait_for_progress_line "$progress_log" 'session='
   wait_for_progress_line "$progress_log" 'graphify-csharp: Ready;'
   starting_line="$(grep -n -m 1 -F 'graphify-csharp: Starting;' "$progress_log" | cut -d: -f1)"
   ready_line="$(grep -n -m 1 -F 'graphify-csharp: Ready;' "$progress_log" | cut -d: -f1)"
   test "$starting_line" -lt "$ready_line"
 done
-grep -Fq 'semantic queries are available' "$stdout_a"
-grep -Fq 'semantic queries are available' "$stdout_b"
+grep -Fq 'Watching ' "$stdout_a"
+grep -Fq 'Watching ' "$stdout_b"
 
 stage="info-and-diagnostics"
 info_before_query="$temporary_root/info-before-query.json"

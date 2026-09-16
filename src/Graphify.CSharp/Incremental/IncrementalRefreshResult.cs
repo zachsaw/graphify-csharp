@@ -11,7 +11,8 @@ internal sealed class IncrementalRefreshResult
         int extractedProjectCount,
         int reusedProjectCount,
         bool outputRepublished,
-        RefreshGeneration? generation = null)
+        RefreshGeneration? generation = null,
+        SemanticQueryResponse? semanticRefreshResponse = null)
     {
         Graph = graph ?? throw new ArgumentNullException(nameof(graph));
         OutputDigest = outputDigest;
@@ -20,6 +21,7 @@ internal sealed class IncrementalRefreshResult
         ReusedProjectCount = reusedProjectCount;
         OutputRepublished = outputRepublished;
         Generation = generation;
+        SemanticRefreshResponse = semanticRefreshResponse;
     }
 
     public GraphSnapshot Graph { get; }
@@ -35,4 +37,17 @@ internal sealed class IncrementalRefreshResult
     public bool OutputRepublished { get; }
 
     public RefreshGeneration? Generation { get; }
+
+    public SemanticQueryResponse? SemanticRefreshResponse { get; }
+
+    internal IncrementalRefreshResult WithSemanticRefreshResponse(SemanticQueryResponse response) =>
+        new(
+            Graph,
+            OutputDigest,
+            CacheStatus,
+            ExtractedProjectCount,
+            ReusedProjectCount,
+            OutputRepublished,
+            Generation,
+            response ?? throw new ArgumentNullException(nameof(response)));
 }

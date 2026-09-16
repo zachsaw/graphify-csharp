@@ -257,6 +257,17 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     public Task<IncrementalRefreshResult> RebuildAsync(CancellationToken cancellationToken = default)
         => RefreshCoreAsync(rebuild: true, operationKind: "rebuild", cancellationToken: cancellationToken);
 
+    internal Task<IncrementalRefreshResult> RefreshSemanticAsync(
+        bool rebuild = false,
+        CancellationToken cancellationToken = default)
+        => RefreshCoreAsync(
+            rebuild,
+            operationKind: rebuild ? "rebuild" : "refresh",
+            cancellationToken,
+            publishOutput: false,
+            includeGraph: false,
+            captureSemanticResponse: true);
+
     internal Task<IncrementalRefreshResult> RecoverAsync(CancellationToken cancellationToken = default)
         => RefreshCoreAsync(
             rebuild: true,
@@ -270,8 +281,14 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         string operationKind,
         CancellationToken cancellationToken,
         bool publishOutput = true,
-        bool includeGraph = true)
+        bool includeGraph = true,
+        bool captureSemanticResponse = false)
     {
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return Task.FromCanceled<IncrementalRefreshResult>(cancellationToken);
+        }
+
         EnsureWorkerStarted();
         var completion = new TaskCompletionSource<IncrementalRefreshResult>(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (_lifecycleGate)
@@ -282,7 +299,15 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             // refresh target under the same gate so a target can never include
             // an event whose queue entry is still being published.
             var target = CaptureCurrentTargetLocked();
-            if (!_commands.Writer.TryWrite(new RefreshCommand(target, rebuild, publishOutput, operationKind, completion)))
+            if (!_commands.Writer.TryWrite(new RefreshCommand(
+                    target,
+                    rebuild,
+                    publishOutput,
+                    includeGraph,
+                    operationKind,
+                    cancellationToken,
+                    captureSemanticResponse,
+                    completion)))
             {
                 completion.TrySetException(new InvalidOperationException("The incremental session is not accepting refresh requests."));
             }
@@ -679,52 +704,81 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         switch (command)
         {
             case RefreshCommand refresh:
-                if (!TryBeginRefresh(refresh))
                 {
+                    if (!TryBeginRefresh(refresh))
+                    {
+                        break;
+                    }
+
+                    using var requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                        cancellationToken,
+                        refresh.RequestCancellationToken);
+                    IndexingObservationOperation? operation = null;
+                    try
+                    {
+                        requestCancellation.Token.ThrowIfCancellationRequested();
+                        operation = _observation.BeginOperation(refresh.OperationKind);
+                        operation.SetStage(IndexingStages.ReconcilingChanges);
+                        TrySetStatusIfActive(IncrementalSessionStatus.Refreshing);
+                        var result = await ReconcileAsync(
+                                refresh.Target,
+                                forceCold: refresh.Rebuild,
+                                publishOutput: refresh.PublishOutput,
+                                includeGraph: refresh.IncludeGraph,
+                            operation,
+                            requestCancellation.Token)
+                        .ConfigureAwait(false);
+                        requestCancellation.Token.ThrowIfCancellationRequested();
+                        if (refresh.CaptureSemanticResponse)
+                        {
+                            result = result.WithSemanticRefreshResponse(
+                                CreateSemanticRefreshResponse(result, refresh.Target, refresh.Rebuild));
+                        }
+
+                        requestCancellation.Token.ThrowIfCancellationRequested();
+                        operation.Complete();
+                        TrySetStatusIfActive(IncrementalSessionStatus.Ready);
+                        // A completed refresh is the foreground readiness barrier.
+                        // Publish the state before completing the task so callers
+                        // cannot observe a completed refresh while the session
+                        // still reports itself as Refreshing.
+                        refresh.Completion.TrySetResult(result);
+                    }
+                    catch (OperationCanceledException) when (
+                        refresh.RequestCancellationToken.IsCancellationRequested
+                        && !cancellationToken.IsCancellationRequested)
+                    {
+                        operation?.Complete("cancelled", "The refresh was cancelled.");
+                        Volatile.Write(ref _requiresColdReconciliation, 1);
+                        if (!IsEventDeliveryUntrusted())
+                        {
+                            MarkEventDeliveryUntrusted(
+                                "A foreground refresh was cancelled before reconciliation completed.");
+                        }
+
+                        TrySetStatusIfActive(IncrementalSessionStatus.Ready);
+                        refresh.Completion.TrySetCanceled(refresh.RequestCancellationToken);
+                    }
+                    catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                    {
+                        operation?.Complete("cancelled", "The refresh was cancelled during shutdown.");
+                        refresh.Completion.TrySetCanceled(cancellationToken);
+                        throw;
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        operation?.Complete("failed", exception.Message);
+                        TrySetStatusIfActive(IncrementalSessionStatus.Ready);
+                        refresh.Completion.TrySetException(exception);
+                    }
+                    finally
+                    {
+                        operation?.Dispose();
+                        EndRefresh(refresh.Completion);
+                    }
+
                     break;
                 }
-
-                IndexingObservationOperation? operation = null;
-                try
-                {
-                    operation = _observation.BeginOperation(refresh.OperationKind);
-                    operation.SetStage(IndexingStages.ReconcilingChanges);
-                    TrySetStatusIfActive(IncrementalSessionStatus.Refreshing);
-                    var result = await ReconcileAsync(
-                            refresh.Target,
-                            forceCold: refresh.Rebuild,
-                            publishOutput: refresh.PublishOutput,
-                            includeGraph: true,
-                            operation,
-                            cancellationToken)
-                        .ConfigureAwait(false);
-                    operation.Complete();
-                    TrySetStatusIfActive(IncrementalSessionStatus.Ready);
-                    // A completed refresh is the foreground readiness barrier.
-                    // Publish the state before completing the task so callers
-                    // cannot observe a completed refresh while the session
-                    // still reports itself as Refreshing.
-                    refresh.Completion.TrySetResult(result);
-                }
-                catch (OperationCanceledException)
-                {
-                    operation?.Complete("cancelled", "The refresh was cancelled.");
-                    refresh.Completion.TrySetCanceled(cancellationToken);
-                    throw;
-                }
-                catch (Exception exception) when (exception is not OperationCanceledException)
-                {
-                    operation?.Complete("failed", exception.Message);
-                    TrySetStatusIfActive(IncrementalSessionStatus.Ready);
-                    refresh.Completion.TrySetException(exception);
-                }
-                finally
-                {
-                    operation?.Dispose();
-                    EndRefresh(refresh.Completion);
-                }
-
-                break;
             case WatcherInvalidatedCommand:
                 Volatile.Write(ref _requiresColdReconciliation, 1);
                 break;
@@ -1222,6 +1276,51 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
             reusedProjectCount,
             outputRepublished: false,
             _generation);
+    }
+
+    internal SemanticQueryResponse CreateSemanticRefreshResponse(
+        IncrementalRefreshResult result,
+        RefreshTarget target,
+        bool rebuild)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        ArgumentNullException.ThrowIfNull(target);
+        ValidateTarget(target);
+        var generation = result.Generation
+            ?? throw new InvalidOperationException("A refresh result did not include its generation.");
+        var diagnostics = _globalDiagnostics
+            .Concat(_contributions.Values.SelectMany(contribution => contribution.Diagnostics))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(diagnostic => diagnostic, StringComparer.Ordinal)
+            .ToArray();
+        var displayedDiagnostics = SemanticQueryEngine.DisplayDiagnostics(
+            diagnostics,
+            out var diagnosticsTruncated);
+        return SemanticQueryResponse.SuccessResponse(
+            _semanticMode == "cold" ? null : _sessionId,
+            _semanticMode,
+            "refresh",
+            new SemanticQuerySnapshot(
+                $"{(_semanticMode == "cold" ? Guid.Empty : _sessionId):D}:{_evidenceRevision}",
+                target.EventGeneration,
+                generation.IndexedGeneration,
+                generation.EventGeneration),
+            new SemanticQueryScope(
+                _requestIdentity.CanonicalKey,
+                new SemanticQueryFilters(),
+                "observed_static",
+                Volatile.Read(ref _inputSnapshot).InputDiscoveryComplete,
+                diagnostics.Length > 0,
+                OperationComplete: true,
+                Array.Empty<string>()),
+            Array.Empty<System.Text.Json.JsonElement>(),
+            new SemanticQueryPage(0, false, null),
+            displayedDiagnostics,
+            diagnosticsTruncated,
+            refresh: new SemanticRefreshResult(
+                rebuild,
+                result.ExtractedProjectCount,
+                result.ReusedProjectCount));
     }
 
     private async Task<IncrementalRefreshResult> PublishCurrentAsync(
@@ -2041,6 +2140,12 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
     {
         lock (_lifecycleGate)
         {
+            if (refresh.RequestCancellationToken.IsCancellationRequested)
+            {
+                refresh.Completion.TrySetCanceled(refresh.RequestCancellationToken);
+                return false;
+            }
+
             if (Volatile.Read(ref _disposeRequested) != 0)
             {
                 refresh.Completion.TrySetCanceled(_stop.Token);
@@ -2107,7 +2212,10 @@ internal sealed class IncrementalIndexSession : IAsyncDisposable
         RefreshTarget Target,
         bool Rebuild,
         bool PublishOutput,
+        bool IncludeGraph,
         string OperationKind,
+        CancellationToken RequestCancellationToken,
+        bool CaptureSemanticResponse,
         TaskCompletionSource<IncrementalRefreshResult> Completion) : SessionCommand;
 
     private sealed record WatcherInvalidatedCommand(string Reason) : SessionCommand;

@@ -8,7 +8,7 @@ repository_url="${GRAPHIFY_CSHARP_E2E_REPOSITORY_URL:-https://github.com/DapperL
 repository_commit="${GRAPHIFY_CSHARP_E2E_REPOSITORY_COMMIT:-6d48ef664acc7298c649e2d449d903b3360d5a90}"
 target_framework="${GRAPHIFY_CSHARP_E2E_TARGET_FRAMEWORK:-net10.0}"
 configuration="${GRAPHIFY_CSHARP_E2E_CONFIGURATION:-Release}"
-package_version="${GRAPHIFY_CSHARP_E2E_PACKAGE_VERSION:-0.1.0-e2e}"
+package_version="${GRAPHIFY_CSHARP_E2E_PACKAGE_VERSION:-0.2.0-e2e}"
 
 temporary_base="${TMPDIR:-/tmp}"
 temporary_base="${temporary_base%/}"
@@ -163,7 +163,7 @@ esac
 
 for output_path in "$output_root/csharp.json" "$output_root/csharp-repeat.json"; do
   "$real_world_tool/graphify-csharp" \
-    --input Dapper/Dapper.csproj \
+    --input "$fixture_root/Dapper/Dapper.csproj" \
     --root "$fixture_root" \
     --configuration "$configuration" \
     --target-framework "$target_framework" \

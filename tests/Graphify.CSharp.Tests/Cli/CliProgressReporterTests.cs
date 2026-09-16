@@ -121,6 +121,22 @@ public sealed class CliProgressReporterTests
         Assert.Equal(1, CountOccurrences(output, "Completed;"));
     }
 
+    [Fact]
+    public async Task Custom_starting_notice_is_rendered_before_indexing_updates()
+    {
+        await using var observation = new IndexingObservation();
+        var writer = new RecordingWriter();
+        await using var reporter = new CliProgressReporter(
+            observation,
+            writer,
+            startingMessage: "Starting; session=01234567-89ab-cdef-0123-456789abcdef; input=/repo/Product.sln.");
+
+        reporter.Start();
+        await WaitUntilAsync(() => writer.Text.Contains("session=01234567-89ab-cdef-0123-456789abcdef", StringComparison.Ordinal));
+
+        Assert.Contains("graphify-csharp: Starting; session=", writer.Text, StringComparison.Ordinal);
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition)
     {
         for (var attempt = 0; attempt < 100; attempt++)

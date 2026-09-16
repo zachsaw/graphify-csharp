@@ -24,7 +24,7 @@ internal static class SemanticQueryCommandLine
     };
 
     public static bool IsSemanticCommand(IReadOnlyList<string> args) =>
-        args.Count > 0 && args[0] is "query" or "export";
+        args.Count > 0 && args[0] is "query" or "export" or "refresh";
 
     public static async Task<int> RunAsync(
         IReadOnlyList<string> args,
@@ -161,20 +161,23 @@ internal static class SemanticQueryCommandLine
         }
     }
 
-    public static SemanticQueryCommandLineOptions Parse(IReadOnlyList<string> args)
+    public static SemanticQueryCommandLineOptions Parse(
+        IReadOnlyList<string> args,
+        string? currentDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(args);
         if (!IsSemanticCommand(args))
         {
-            throw new CommandLineException("A semantic command must start with 'query' or 'export'.");
+            throw new CommandLineException("A semantic command must start with 'query', 'export', or 'refresh'.");
         }
 
         var isExport = args[0] == "export";
+        var isRefresh = args[0] == "refresh";
         if (args.Count == 2
             && args[1] is "--help" or "-h")
         {
             return new SemanticQueryCommandLineOptions(
-                new SemanticQuerySpec(isExport ? "export" : "symbols"),
+                new SemanticQuerySpec(isExport ? "export" : isRefresh ? "refresh" : "symbols"),
                 null,
                 null,
                 TimeSpan.FromMinutes(10),
@@ -185,6 +188,8 @@ internal static class SemanticQueryCommandLine
 
         var command = isExport
             ? "export"
+            : isRefresh
+                ? "refresh"
             : args.Count > 1 && !args[1].StartsWith("-", StringComparison.Ordinal)
                 ? args[1]
                 : throw new CommandLineException("The 'query' command requires a query verb.");
@@ -197,8 +202,9 @@ internal static class SemanticQueryCommandLine
         var json = false;
         var showHelp = false;
         var noProgress = false;
+        var rebuild = false;
         string? positional = null;
-        var startIndex = isExport ? 1 : 2;
+        var startIndex = isExport || isRefresh ? 1 : 2;
         for (var index = startIndex; index < args.Count; index++)
         {
             var argument = args[index];
@@ -235,6 +241,17 @@ internal static class SemanticQueryCommandLine
                 continue;
             }
 
+            if (argument == "--rebuild")
+            {
+                if (rebuild)
+                {
+                    throw new CommandLineException("Option '--rebuild' may only be supplied once.");
+                }
+
+                rebuild = true;
+                continue;
+            }
+
             if (!argument.StartsWith("-", StringComparison.Ordinal))
             {
                 if (positional is not null)
@@ -264,7 +281,7 @@ internal static class SemanticQueryCommandLine
                 "--cursor" => "cursor",
                 "--snapshot" => "snapshot",
                 "--timeout" => "timeout",
-                "--output" => "output",
+                "--output" or "-o" => "output",
                 _ => throw new CommandLineException($"Unknown option '{argument}'."),
             };
             if (++index >= args.Count)
@@ -301,11 +318,19 @@ internal static class SemanticQueryCommandLine
                 ShowHelp: true);
         }
 
+        var callerDirectory = AnalysisInputResolver.CurrentDirectory(currentDirectory);
         if (isExport)
         {
+            if (rebuild)
+            {
+                throw new CommandLineException("The export command does not accept '--rebuild'.");
+            }
+
             RejectExportQueryOptions(values, positional);
             var instance = Required(values, "instance");
-            var output = FullPath(Required(values, "output"), Directory.GetCurrentDirectory());
+            var output = AnalysisInputResolver.ResolveOutput(
+                Single(values, "output"),
+                callerDirectory);
             var timeout = ParseTimeout(values);
             return new SemanticQueryCommandLineOptions(
                 new SemanticQuerySpec("export", OutputPath: output),
@@ -315,6 +340,34 @@ internal static class SemanticQueryCommandLine
                 json,
                 noProgress,
                 ShowHelp: false);
+        }
+
+        if (isRefresh)
+        {
+            if (positional is not null)
+            {
+                throw new CommandLineException("The refresh command does not accept positional arguments.");
+            }
+
+            var invalid = values.Keys.FirstOrDefault(key => key is not ("instance" or "timeout"));
+            if (invalid is not null)
+            {
+                throw new CommandLineException($"The refresh command does not accept '--{invalid}'.");
+            }
+
+            return new SemanticQueryCommandLineOptions(
+                new SemanticQuerySpec("refresh", Rebuild: rebuild),
+                Required(values, "instance"),
+                null,
+                ParseTimeout(values),
+                json,
+                noProgress,
+                ShowHelp: false);
+        }
+
+        if (rebuild)
+        {
+            throw new CommandLineException($"The '{command}' query does not accept '--rebuild'.");
         }
 
         if (positional is not null && command is not ("symbols" or "usage-summary"))
@@ -356,10 +409,12 @@ internal static class SemanticQueryCommandLine
             groupBy,
             ParseLimit(values),
             Single(values, "cursor"),
-            Single(values, "snapshot"));
+            Single(values, "snapshot"),
+            Rebuild: false);
 
         if (hasInstance)
         {
+            specification = NormalizePaths(specification, callerDirectory);
             SemanticQueryJsonParser.ValidateSpec(specification);
             return new SemanticQueryCommandLineOptions(
                 specification,
@@ -371,14 +426,19 @@ internal static class SemanticQueryCommandLine
                 ShowHelp: false);
         }
 
-        var root = FullPath(Single(values, "root") ?? Directory.GetCurrentDirectory(), Directory.GetCurrentDirectory());
-        var input = FullPath(Required(values, "input"), root);
+        var root = AnalysisInputResolver.ResolveRoot(
+            Single(values, "root"),
+            callerDirectory);
+        var input = AnalysisInputResolver.ResolvePath(
+            Required(values, "input"),
+            callerDirectory,
+            "input");
         var request = new ProjectLoadRequest(
             input,
             root,
             Single(values, "configuration") ?? "Debug",
             Single(values, "target-framework"));
-        specification = NormalizePaths(specification, root);
+        specification = NormalizePaths(specification, callerDirectory);
         SemanticQueryJsonParser.ValidateSpec(specification);
         if (specification.Cursor is not null || specification.SnapshotId is not null)
         {
@@ -443,9 +503,8 @@ internal static class SemanticQueryCommandLine
                 "The selected watcher does not expose the current semantic query endpoint. Restart it with this version.");
         }
 
-        var specification = NormalizePaths(options.Specification, descriptor.RepositoryRoot);
         return await new SemanticQueryClient()
-            .SendAsync(descriptor, specification, options.Timeout, cancellationToken)
+            .SendAsync(descriptor, options.Specification, options.Timeout, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -486,8 +545,12 @@ internal static class SemanticQueryCommandLine
         {
             Filters = filters with
             {
-                Path = filters.Path is null ? null : FullPath(filters.Path, root),
-                Project = filters.Project is null ? null : FullPath(filters.Project, root),
+                Path = filters.Path is null
+                    ? null
+                    : AnalysisInputResolver.ResolvePath(filters.Path, root, "path filter"),
+                Project = filters.Project is null
+                    ? null
+                    : AnalysisInputResolver.ResolvePath(filters.Project, root, "project filter"),
             },
         };
     }
@@ -603,18 +666,8 @@ internal static class SemanticQueryCommandLine
         string key) =>
         values.TryGetValue(key, out var value) ? value : null;
 
-    private static string FullPath(string path, string basePath)
-    {
-        if (string.IsNullOrWhiteSpace(path))
-        {
-            throw new CommandLineException("A path value cannot be empty.");
-        }
-
-        return Path.GetFullPath(path, basePath);
-    }
-
     private static string InferCommand(IReadOnlyList<string> args) =>
-        args.Count > 1 && !args[0].Equals("export", StringComparison.Ordinal)
+        args.Count > 1 && args[0] is not ("export" or "refresh")
             ? args[1]
             : args.Count > 0 ? args[0] : "query";
 
@@ -646,6 +699,14 @@ internal static class SemanticQueryCommandLine
             Console.WriteLine(
                 $"exported {response.Export.NodeCount} nodes and {response.Export.EdgeCount} edges "
                 + $"to {response.Export.OutputPath}");
+        }
+
+        if (response.Refresh is not null)
+        {
+            Console.WriteLine(
+                $"refreshed (rebuild={response.Refresh.Rebuild}, "
+                + $"extracted={response.Refresh.ExtractedProjectCount}, "
+                + $"reused={response.Refresh.ReusedProjectCount})");
         }
     }
 
@@ -685,7 +746,8 @@ internal static class SemanticQueryCommandLine
 
     public static string Usage => "Usage:\n"
         + "  graphify-csharp query <verb> [options]\n"
-        + "  graphify-csharp export --instance <id|prefix> --output <path> [--json]\n\n"
+        + "  graphify-csharp export --instance <id|prefix> [-o, --output <path>] [--json]\n"
+        + "  graphify-csharp refresh --instance <id|prefix> [--rebuild] [--json]\n\n"
         + "Query verbs: symbols, signature, usages, callers, hierarchy, arguments, usage-summary\n"
         + "Routing: --instance <id|prefix> or cold --input <solution|project|file.cs>\n"
         + "Common: --json --no-progress --limit <1..1000> --cursor <token> --snapshot <id> --timeout <TimeSpan>\n"

@@ -257,6 +257,82 @@ public sealed class SemanticQuerySessionTests
     }
 
     [Fact]
+    public async Task Semantic_refresh_reconciles_without_building_or_publishing_the_compatibility_graph()
+    {
+        var fixture = await CreateFixtureAsync();
+        try
+        {
+            await using var session = new IncrementalIndexSession(
+                fixture.Request,
+                outputPath: null,
+                semanticMode: "instance");
+            await session.StartAsync().WaitAsync(TimeSpan.FromSeconds(60));
+
+            var result = await session.RefreshSemanticAsync().WaitAsync(TimeSpan.FromSeconds(60));
+            var response = result.SemanticRefreshResponse
+                ?? throw new Xunit.Sdk.XunitException(
+                    "The semantic refresh did not capture its response in the worker.");
+
+            Assert.True(response.Success, response.Error?.Message);
+            Assert.Equal("refresh", response.Command);
+            Assert.NotNull(response.Refresh);
+            Assert.False(response.Refresh!.Rebuild);
+            Assert.Empty(result.Graph.Nodes);
+            Assert.Empty(result.Graph.Edges);
+            Assert.Equal(0, session.CompatibilityGraphBuildCount);
+            Assert.False(File.Exists(fixture.OutputPath));
+            Assert.False(File.Exists(IncrementalCachePath.ForOutput(fixture.OutputPath)));
+        }
+        finally
+        {
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
+    public async Task Semantic_refresh_response_keeps_its_target_when_a_later_event_arrives_during_reconciliation()
+    {
+        var fixture = await CreateFixtureAsync();
+        var loader = new BlockingReloadLoader(new RoslynWorkspaceLoader());
+        try
+        {
+            await using var session = new IncrementalIndexSession(
+                fixture.Request,
+                outputPath: null,
+                projectLoader: loader,
+                semanticMode: "instance");
+            await session.StartAsync().WaitAsync(TimeSpan.FromSeconds(60));
+
+            session.ReportFileChanged(fixture.Request.InputPath);
+            var targetGeneration = session.EventGeneration;
+            var refresh = session.RefreshSemanticAsync();
+            await loader.ReloadEntered.Task.WaitAsync(TimeSpan.FromSeconds(60));
+
+            await File.AppendAllTextAsync(
+                fixture.SourcePath,
+                "\npublic sealed class ArrivedAfterRefreshTarget { }\n");
+            session.ReportFileChanged(fixture.SourcePath);
+            Assert.Equal(targetGeneration + 1, session.EventGeneration);
+            loader.ReleaseReload();
+
+            var result = await refresh.WaitAsync(TimeSpan.FromSeconds(60));
+            var response = result.SemanticRefreshResponse
+                ?? throw new Xunit.Sdk.XunitException(
+                    "The semantic refresh did not capture its response in the worker.");
+            var snapshot = Assert.IsType<SemanticQuerySnapshot>(response.Snapshot);
+
+            Assert.Equal(targetGeneration, snapshot.TargetGeneration);
+            Assert.Equal(targetGeneration, snapshot.IndexedGeneration);
+            Assert.True(snapshot.EventGeneration > snapshot.TargetGeneration);
+        }
+        finally
+        {
+            loader.ReleaseReload();
+            DeleteTemporaryDirectory(fixture.Root);
+        }
+    }
+
+    [Fact]
     public async Task Summary_pages_create_only_the_bounded_candidate_rows_and_seek_on_continuation()
     {
         var fixture = await CreateFixtureAsync();
@@ -863,6 +939,37 @@ public sealed class SemanticQuerySessionTests
                 StringComparison.Ordinal));
 
     private static string Id(JsonElement item) => item.GetProperty("id").GetString()!;
+
+    private sealed class BlockingReloadLoader : IProjectLoader
+    {
+        private readonly IProjectLoader _inner;
+        private readonly TaskCompletionSource<bool> _releaseReload =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _loadCount;
+
+        public BlockingReloadLoader(IProjectLoader inner)
+        {
+            _inner = inner;
+        }
+
+        public TaskCompletionSource<bool> ReloadEntered { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<LoadedSolution> LoadAsync(
+            ProjectLoadRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Increment(ref _loadCount) == 2)
+            {
+                ReloadEntered.TrySetResult(true);
+                await _releaseReload.Task.WaitAsync(cancellationToken);
+            }
+
+            return await _inner.LoadAsync(request, cancellationToken);
+        }
+
+        public void ReleaseReload() => _releaseReload.TrySetResult(true);
+    }
 
     private static Task<Fixture> CreateFixtureAsync() => CreateFixtureAsync(
         "ReferenceFixture",
