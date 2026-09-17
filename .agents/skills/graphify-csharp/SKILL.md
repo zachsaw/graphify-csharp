@@ -84,6 +84,12 @@ The output is one complete JSON document with `nodes`, `edges`, and
 project contributions and `--json` to receive one structured command result on
 stdout. Progress stays on stderr; use `--no-progress` to suppress it.
 
+If an `.sln` or `.slnx` cannot be loaded by Roslyn/MSBuild, the command exits
+nonzero. Structured output reports `error.code` as `solution_load_failed` and
+includes the input path and the underlying loader message. Repair the solution
+or host SDK before treating the result as usable evidence; a load failure is
+not an empty graph.
+
 ## Query semantic evidence
 
 Cold query, without a persistent worker or JSON export:

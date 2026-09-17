@@ -160,6 +160,43 @@ public sealed class WorkspaceLoaderTests
     }
 
     [Fact]
+    public async Task Reports_solution_parser_failures_with_a_stable_load_exception()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "graphify-csharp-solution-load-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var solutionPath = Path.Combine(root, "Duplicate.slnx");
+        await File.WriteAllTextAsync(
+            solutionPath,
+            """
+            <Solution>
+              <Project Path="Missing.csproj" />
+              <Project Path="Missing.csproj" />
+            </Solution>
+            """);
+
+        try
+        {
+            var exception = await Assert.ThrowsAsync<SolutionLoadException>(() =>
+                new RoslynWorkspaceLoader().LoadAsync(new ProjectLoadRequest(solutionPath, root)));
+
+            Assert.Equal(solutionPath, exception.SolutionPath);
+            Assert.Contains("Could not load solution", exception.Message, StringComparison.Ordinal);
+            Assert.Contains("Duplicate item 'Missing.csproj'", exception.Message, StringComparison.Ordinal);
+            Assert.NotNull(exception.InnerException);
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void Resolves_single_target_framework_when_the_selector_is_omitted()
     {
         var path = Path.Combine(RepositoryRoot(), "tests/Fixtures/LoaderFixture/LoaderFixture.csproj");

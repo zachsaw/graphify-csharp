@@ -86,6 +86,15 @@ internal static class DiskExportCommandLine
                 "The export was cancelled.",
                 exitCode: 130);
         }
+        catch (SolutionLoadException exception)
+        {
+            return WriteFailure(
+                options.Json,
+                "export",
+                exception.Message,
+                exitCode: 1,
+                errorCode: SolutionLoadException.ErrorCode);
+        }
         catch (Exception exception) when (
             exception is ArgumentException
                 or IOException
@@ -292,13 +301,14 @@ internal static class DiskExportCommandLine
         bool json,
         string command,
         string message,
-        int exitCode)
+        int exitCode,
+        string? errorCode = null)
     {
         var response = SemanticQueryResponse.Failure(
             sessionId: null,
             mode: "disk",
             command,
-            errorCode: exitCode == 130 ? "cancelled" : "io_error",
+            errorCode: errorCode ?? (exitCode == 130 ? "cancelled" : "io_error"),
             message);
         if (json)
         {

@@ -134,6 +134,16 @@ internal static class SemanticQueryCommandLine
                 ExitCode("timeout"),
                 options.ColdRequest is null ? "instance" : "cold");
         }
+        catch (SolutionLoadException exception)
+        {
+            return WriteFailure(
+                options.Json,
+                options.Specification.Command,
+                SolutionLoadException.ErrorCode,
+                exception.Message,
+                ExitCode(SolutionLoadException.ErrorCode),
+                options.ColdRequest is null ? "instance" : "cold");
+        }
         catch (WatcherManagementException exception)
         {
             return WriteFailure(
@@ -739,7 +749,7 @@ internal static class SemanticQueryCommandLine
         "session_not_found" or "ambiguous_session" or "unreachable" or "session_failed"
             or "session_stopping" or "incompatible_protocol" or "session_mismatch" => 3,
         "server_busy" or "timeout" or "stale_snapshot" => 4,
-        "output_conflict" or "io_error" or "internal_error" => 5,
+        "output_conflict" or "io_error" or "solution_load_failed" or "internal_error" => 5,
         "cancelled" => 130,
         _ => 5,
     };

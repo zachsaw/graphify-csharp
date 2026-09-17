@@ -139,6 +139,12 @@ remains on stderr. `--rebuild` bypasses reusable project contributions:
 graphify-csharp export --input ./src/Product.sln --rebuild --json
 ```
 
+If Roslyn or MSBuild cannot load the supplied `.sln` or `.slnx`, the command
+returns a nonzero exit code. With `--json`, the response uses the stable error
+code `solution_load_failed` and includes the input path plus the underlying
+loader message. Treat this as an input or environment failure, not as an empty
+semantic graph.
+
 The complete output contains `nodes`, `edges`, and `hyperedges`. It is written
 atomically and is the only public JSON publication performed by this CLI.
 

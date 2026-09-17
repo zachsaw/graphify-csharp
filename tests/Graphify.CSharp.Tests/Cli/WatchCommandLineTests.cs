@@ -2,6 +2,7 @@ using Graphify.CSharp.Cli;
 
 namespace Graphify.CSharp.Tests.Cli;
 
+[Collection("CLI console")]
 public sealed class WatchCommandLineTests
 {
     [Fact]
@@ -62,6 +63,52 @@ public sealed class WatchCommandLineTests
         finally
         {
             Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Watch_reports_solution_load_failures_as_user_facing_errors()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "graphify-csharp-cli-watch-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var solutionPath = Path.Combine(root, "Duplicate.slnx");
+        await File.WriteAllTextAsync(
+            solutionPath,
+            """
+            <Solution>
+              <Project Path="Missing.csproj" />
+              <Project Path="Missing.csproj" />
+            </Solution>
+            """);
+
+        var originalError = Console.Error;
+        using var error = new StringWriter();
+        Console.SetError(error);
+        try
+        {
+            var exitCode = await WatchCommandLine.RunAsync(
+            [
+                "watch",
+                "--input", solutionPath,
+                "--root", root,
+                "--target-framework", "net10.0",
+                "--no-progress",
+            ]);
+
+            Assert.Equal(1, exitCode);
+            Assert.Contains("Error (solution_load_failed):", error.ToString(), StringComparison.Ordinal);
+            Assert.Contains("Duplicate item 'Missing.csproj'", error.ToString(), StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetError(originalError);
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
         }
     }
 }

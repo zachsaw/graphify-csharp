@@ -96,6 +96,11 @@ internal static class WatchCommandLine
         {
             return 130;
         }
+        catch (SolutionLoadException exception)
+        {
+            Console.Error.WriteLine($"Error ({SolutionLoadException.ErrorCode}): {exception.Message}");
+            return 1;
+        }
         catch (Exception exception) when (
             exception is ArgumentException
                 or IOException

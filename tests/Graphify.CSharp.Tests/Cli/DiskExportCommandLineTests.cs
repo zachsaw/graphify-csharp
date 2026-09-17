@@ -1,7 +1,10 @@
+using System.Text.Json;
 using Graphify.CSharp.Cli;
+using Graphify.CSharp.Roslyn;
 
 namespace Graphify.CSharp.Tests.Cli;
 
+[Collection("CLI console")]
 public sealed class DiskExportCommandLineTests
 {
     [Fact]
@@ -65,5 +68,62 @@ public sealed class DiskExportCommandLineTests
             ["--input", "Product.sln", "--output", "out.json", "--watch"]));
 
         Assert.Contains("use 'watch'", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Reports_solution_parser_failures_as_structured_errors()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "graphify-csharp-cli-solution-load-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var solutionPath = Path.Combine(root, "Duplicate.slnx");
+        var outputPath = Path.Combine(root, "output.json");
+        await File.WriteAllTextAsync(
+            solutionPath,
+            """
+            <Solution>
+              <Project Path="Missing.csproj" />
+              <Project Path="Missing.csproj" />
+            </Solution>
+            """);
+
+        var originalOutput = Console.Out;
+        using var output = new StringWriter();
+        Console.SetOut(output);
+        try
+        {
+            var exitCode = await DiskExportCommandLine.RunAsync(
+            [
+                "export",
+                "--input", solutionPath,
+                "--root", root,
+                "--output", outputPath,
+                "--target-framework", "net10.0",
+                "--no-progress",
+                "--json",
+            ]);
+
+            Assert.Equal(1, exitCode);
+            using var document = JsonDocument.Parse(output.ToString());
+            Assert.False(document.RootElement.GetProperty("success").GetBoolean());
+            Assert.Equal(
+                SolutionLoadException.ErrorCode,
+                document.RootElement.GetProperty("error").GetProperty("code").GetString());
+            Assert.Contains(
+                "Duplicate item 'Missing.csproj'",
+                document.RootElement.GetProperty("error").GetProperty("message").GetString(),
+                StringComparison.Ordinal);
+            Assert.False(File.Exists(outputPath));
+        }
+        finally
+        {
+            Console.SetOut(originalOutput);
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
     }
 }
