@@ -185,6 +185,26 @@ counts and origin groups; it does not decide whether a declaration is dead or
 test-only. Apply the repository's project/namespace convention to the returned
 caller provenance.
 
+Use `--namespace` to scope results to a fully qualified namespace and its
+descendants:
+
+```text
+graphify-csharp query symbols OrderService \
+  --instance <session-id> \
+  --namespace MyCompany.Orders.Services \
+  --kind class \
+  --json
+```
+
+The filter matches `MyCompany.Orders.Services` and namespaces such as
+`MyCompany.Orders.Services.Internal`, but not `MyCompany.Orders.ServicesExtra`.
+Namespace matching is case-sensitive. A fully qualified name used as the
+positional search remains a case-insensitive substring search, not an exact
+symbol lookup. For `callers`, `usages`, and `hierarchy`, the namespace filter
+limits returned callers or neighboring declarations; the target still comes
+from the exact `--symbol` ID. `signature` accepts no scope filters, and
+`arguments` accepts only `--path` and `--project` filters.
+
 The evidence includes project, namespace, target framework, source locations,
 diagnostics, and a snapshot/scope. `calls`, `references`, `inherits`,
 `implements`, and `overrides` are separate relationship kinds. Argument results
