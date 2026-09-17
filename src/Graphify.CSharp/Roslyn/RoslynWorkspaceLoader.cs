@@ -121,10 +121,9 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
         return extension.ToLowerInvariant() switch
         {
             ".sln" or ".slnx" => new WorkspaceOpenResult(
-                (await workspace.OpenSolutionAsync(
-                    request.InputPath,
-                    new InlineProgress<ProjectLoadProgress>(progress => ReportLoadProgress(phase, progress)),
-                    cancellationToken).ConfigureAwait(false)).Projects.ToArray(),
+                (await OpenSolutionAsync(workspace, request.InputPath, phase, cancellationToken).ConfigureAwait(false))
+                    .Projects
+                    .ToArray(),
                 request.InputPath,
                 request.InputPath,
                 Resources: null),
@@ -136,6 +135,30 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
             ".cs" => await OpenFileBasedAppAsync(workspace, request, phase, cancellationToken).ConfigureAwait(false),
             _ => throw new ArgumentException("Input must be a .sln, .slnx, .csproj, or file-based .cs app.", nameof(request)),
         };
+    }
+
+    private static async Task<Solution> OpenSolutionAsync(
+        MSBuildWorkspace workspace,
+        string solutionPath,
+        IndexingObservationPhase? phase,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await workspace.OpenSolutionAsync(
+                    solutionPath,
+                    new InlineProgress<ProjectLoadProgress>(progress => ReportLoadProgress(phase, progress)),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new SolutionLoadException(solutionPath, exception);
+        }
     }
 
     private static async Task<WorkspaceOpenResult> OpenFileBasedAppAsync(

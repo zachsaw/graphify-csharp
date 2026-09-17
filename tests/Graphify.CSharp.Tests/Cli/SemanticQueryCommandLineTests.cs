@@ -1,8 +1,10 @@
 using Graphify.CSharp.Cli;
 using System.Text.Json;
+using Graphify.CSharp.Roslyn;
 
 namespace Graphify.CSharp.Tests.Cli;
 
+[Collection("CLI console")]
 public sealed class SemanticQueryCommandLineTests
 {
     [Fact]
@@ -182,6 +184,60 @@ public sealed class SemanticQueryCommandLineTests
         finally
         {
             Console.SetOut(originalOutput);
+        }
+    }
+
+    [Fact]
+    public async Task Cold_query_reports_solution_load_failures_as_structured_errors()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "graphify-csharp-cli-cold-query-tests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var solutionPath = Path.Combine(root, "Duplicate.slnx");
+        await File.WriteAllTextAsync(
+            solutionPath,
+            """
+            <Solution>
+              <Project Path="Missing.csproj" />
+              <Project Path="Missing.csproj" />
+            </Solution>
+            """);
+
+        var originalOutput = Console.Out;
+        using var output = new StringWriter();
+        Console.SetOut(output);
+        try
+        {
+            var exitCode = await SemanticQueryCommandLine.RunAsync(
+            [
+                "query", "symbols", "Thing",
+                "--input", solutionPath,
+                "--root", root,
+                "--target-framework", "net10.0",
+                "--no-progress",
+                "--json",
+            ]);
+
+            Assert.Equal(5, exitCode);
+            using var document = JsonDocument.Parse(output.ToString());
+            Assert.False(document.RootElement.GetProperty("success").GetBoolean());
+            Assert.Equal(
+                SolutionLoadException.ErrorCode,
+                document.RootElement.GetProperty("error").GetProperty("code").GetString());
+            Assert.Contains(
+                "Duplicate item 'Missing.csproj'",
+                document.RootElement.GetProperty("error").GetProperty("message").GetString(),
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            Console.SetOut(originalOutput);
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
         }
     }
 }

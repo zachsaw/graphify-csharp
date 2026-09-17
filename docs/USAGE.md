@@ -139,6 +139,12 @@ remains on stderr. `--rebuild` bypasses reusable project contributions:
 graphify-csharp export --input ./src/Product.sln --rebuild --json
 ```
 
+If Roslyn or MSBuild cannot load the supplied `.sln` or `.slnx`, the command
+returns a nonzero exit code. With `--json`, the response uses the stable error
+code `solution_load_failed` and includes the input path plus the underlying
+loader message. Treat this as an input or environment failure, not as an empty
+semantic graph.
+
 The complete output contains `nodes`, `edges`, and `hyperedges`. It is written
 atomically and is the only public JSON publication performed by this CLI.
 
@@ -178,6 +184,26 @@ are not selected by spelling alone. `usage-summary` returns fixed inbound
 counts and origin groups; it does not decide whether a declaration is dead or
 test-only. Apply the repository's project/namespace convention to the returned
 caller provenance.
+
+Use `--namespace` to scope results to a fully qualified namespace and its
+descendants:
+
+```text
+graphify-csharp query symbols OrderService \
+  --instance <session-id> \
+  --namespace MyCompany.Orders.Services \
+  --kind class \
+  --json
+```
+
+The filter matches `MyCompany.Orders.Services` and namespaces such as
+`MyCompany.Orders.Services.Internal`, but not `MyCompany.Orders.ServicesExtra`.
+Namespace matching is case-sensitive. A fully qualified name used as the
+positional search remains a case-insensitive substring search, not an exact
+symbol lookup. For `callers`, `usages`, and `hierarchy`, the namespace filter
+limits returned callers or neighboring declarations; the target still comes
+from the exact `--symbol` ID. `signature` accepts no scope filters, and
+`arguments` accepts only `--path` and `--project` filters.
 
 The evidence includes project, namespace, target framework, source locations,
 diagnostics, and a snapshot/scope. `calls`, `references`, `inherits`,

@@ -84,6 +84,12 @@ The output is one complete JSON document with `nodes`, `edges`, and
 project contributions and `--json` to receive one structured command result on
 stdout. Progress stays on stderr; use `--no-progress` to suppress it.
 
+If an `.sln` or `.slnx` cannot be loaded by Roslyn/MSBuild, the command exits
+nonzero. Structured output reports `error.code` as `solution_load_failed` and
+includes the input path and the underlying loader message. Repair the solution
+or host SDK before treating the result as usable evidence; a load failure is
+not an empty graph.
+
 ## Query semantic evidence
 
 Cold query, without a persistent worker or JSON export:
@@ -116,6 +122,29 @@ graphify-csharp query usage-summary --instance <session-id> --kind method --grou
 `symbols` and `usage-summary` accept a bounded case-insensitive substring.
 Exact queries require a symbol ID so overloads, generic members, constructors,
 and interface/override contracts are not confused by a spelling match.
+
+Use scope filters to narrow the declaration or relationship origins before
+interpreting the result:
+
+```bash
+graphify-csharp query symbols OrderService \
+  --instance <session-id> \
+  --namespace MyCompany.Orders.Services \
+  --kind class \
+  --json
+```
+
+`--namespace` accepts a fully qualified namespace. It matches that namespace
+and descendants such as `MyCompany.Orders.Services.Internal`, but not a merely
+similar prefix such as `MyCompany.Orders.ServicesExtra`. Namespace matching is
+case-sensitive. The positional search is still only a substring search, even
+when the fully qualified name is included in a declaration's display label.
+
+For `callers`, `usages`, and `hierarchy`, `--namespace` filters the returned
+caller or neighboring declarations; it does not replace the exact target
+selected by `--symbol`. `--namespace` also works with `symbols` and
+`usage-summary`. `signature` accepts no scope filters, while `arguments`
+accepts only `--path` and `--project` filters.
 
 Responses include bounded items, page state, the evidence snapshot/scope,
 project/namespace/TFM provenance, source locations, and diagnostics. Continue
