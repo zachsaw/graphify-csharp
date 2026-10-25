@@ -128,4 +128,69 @@ public sealed class GeneratedSourceTests
             Assert.Equal(new SourceLocation($"{directory}/Generated.cs", 4, 1), locations.Create(declarations[1].GetLocation()));
         }
     }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("1")]
+    public async Task Pages_all_calls_when_distinct_trees_map_to_the_same_file(string argument)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "graphify-mapped-pagination-tests");
+        using var workspace = MSBuildWorkspace.Create();
+        var projectId = ProjectId.CreateNewId();
+        var project = workspace.CurrentSolution
+            .AddProject(projectId, "GeneratedFixture", "GeneratedFixture", LanguageNames.CSharp)
+            .WithProjectFilePath(projectId, Path.Combine(root, "GeneratedFixture.csproj"))
+            .GetProject(projectId)!
+            .WithCompilationOptions(new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary))
+            .AddMetadataReference(MetadataReference.CreateFromFile(typeof(object).Assembly.Location))
+            .AddDocument("Service.cs", SourceText.From("""
+                namespace GeneratedFixture;
+                public static class Service
+                {
+                    public static void Get() { }
+                    public static void Get(int value) { }
+                }
+                """), filePath: Path.Combine(root, "Service.cs"))
+            .Project;
+        var trees = new[] { "First", "Other" }.Select(name => CSharpSyntaxTree.ParseText($$"""
+            namespace GeneratedFixture;
+            #line 1 "../View.razor"
+            public class {{name}} { public void Run() => Service.Get({{argument}}); }
+            """, path: Path.Combine(root, "generated", name + ".g.cs")));
+        var compilation = (await project.GetCompilationAsync())!.AddSyntaxTrees(trees);
+        Assert.Empty(compilation.GetDiagnostics().Where(diagnostic => diagnostic.Severity == DiagnosticSeverity.Error));
+        var identity = new ProjectIdentity("GeneratedFixture.csproj", "net10.0");
+        using var loaded = new LoadedSolution(workspace, [new AnalyzedProject(project, identity, compilation)], root);
+        var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
+        var graph = await new SemanticReferenceExtractor().ExtractAsync(loaded, catalog);
+        Assert.Empty(catalog.Diagnostics);
+        var target = Assert.Single(graph.Nodes.Where(node => node.Label ==
+            (argument.Length == 0 ? "GeneratedFixture.Service.Get" : "GeneratedFixture.Service.Get(int)")));
+        var index = SemanticEvidenceIndex.Create(catalog,
+            [new ProjectContributionEnvelope(new ProjectFingerprint(identity, null, [], []), graph)]);
+        var sessionId = Guid.NewGuid();
+        var view = new SemanticEvidenceView(sessionId, "instance", "mapped-pagination-test", loaded, catalog, index,
+            WatcherInputSnapshot.CreateForTests([], [], [], [root], outputPath: null, cachePath: null),
+            new RefreshGeneration(sessionId), 0, 1, sessionId.ToByteArray());
+        var engine = new SemanticQueryEngine();
+        var query = new SemanticQuerySpec("arguments", SymbolId: target.Id,
+            Filters: new SemanticQueryFilters(Path: Path.Combine(root, "View.razor")));
+        var complete = engine.Execute(query, view);
+        Assert.True(complete.Success, complete.Error?.Message);
+        Assert.Empty(complete.Diagnostics);
+        Assert.Equal(2, complete.Items.Count);
+
+        var first = engine.Execute(query with { Limit = 1 }, view);
+        Assert.True(first.Success, first.Error?.Message);
+        Assert.Single(first.Items);
+        Assert.True(first.Page!.HasMore);
+        Assert.NotNull(first.Page.NextCursor);
+        var second = engine.Execute(query with { Limit = 1, Cursor = first.Page.NextCursor }, view);
+        Assert.True(second.Success, second.Error?.Message);
+        Assert.Single(second.Items);
+        Assert.False(second.Page!.HasMore);
+        Assert.Null(second.Page.NextCursor);
+        Assert.Equal(complete.Items.Select(item => item.GetRawText()),
+            first.Items.Concat(second.Items).Select(item => item.GetRawText()));
+    }
 }

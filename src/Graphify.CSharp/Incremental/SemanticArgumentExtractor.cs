@@ -530,6 +530,7 @@ internal static class SemanticArgumentExtractor
                 CreateSortKey(
                     caller.Identity.Project.Key,
                     location,
+                    _locations.RelativePath(syntax.SyntaxTree.FilePath),
                     syntax.SpanStart,
                     syntax.Span.Length,
                     -1,
@@ -608,6 +609,7 @@ internal static class SemanticArgumentExtractor
                 CreateSortKey(
                     caller.Identity.Project.Key,
                     location,
+                    _locations.RelativePath(invocation.SyntaxTree.FilePath),
                     invocation.SpanStart,
                     invocation.Span.Length,
                     parameter?.Ordinal ?? -1,
@@ -637,6 +639,7 @@ internal static class SemanticArgumentExtractor
         private static string CreateSortKey(
             string projectKey,
             SourceLocation location,
+            string syntaxTreePath,
             int invocationStart,
             int invocationLength,
             int parameterOrdinal,
@@ -646,6 +649,7 @@ internal static class SemanticArgumentExtractor
                 '\u001F',
                 projectKey,
                 location.FilePath,
+                syntaxTreePath,
                 invocationStart.ToString("D10", CultureInfo.InvariantCulture),
                 invocationLength.ToString("D10", CultureInfo.InvariantCulture),
                 parameterOrdinal.ToString("D5", CultureInfo.InvariantCulture),
