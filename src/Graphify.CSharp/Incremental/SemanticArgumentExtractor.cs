@@ -75,10 +75,11 @@ internal static class SemanticArgumentExtractor
                 // A generated tree can map to several original files. Select by
                 // mapped paths, then restrict individual calls to the same scope.
                 var paths = document.GetLineMappings(cancellationToken)
-                    .Select(mapping => mapping.MappedSpan.Path)
-                    .Append(document.FilePath);
-                if (!paths.Any(path => !string.IsNullOrWhiteSpace(path)
-                    && candidateFiles.Contains(RelativePath(path, view.Solution.RepositoryRoot))))
+                    .Select(mapping => (mapping.MappedSpan.Path, SourcePath: mapping.MappedSpan.HasMappedPath ? document.FilePath : null))
+                    .Append((document.FilePath, null))
+                    .Where(path => !string.IsNullOrWhiteSpace(path.Path))
+                    .Select(path => locations.RelativePath(path.Path, path.SourcePath));
+                if (!paths.Any(candidateFiles.Contains))
                 {
                     continue;
                 }

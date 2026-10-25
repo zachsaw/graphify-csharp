@@ -10,24 +10,31 @@ public sealed class RoslynSymbolIdentityFactory
         .WithGlobalNamespaceStyle(SymbolDisplayGlobalNamespaceStyle.Omitted)
         .WithMiscellaneousOptions(SymbolDisplayMiscellaneousOptions.UseSpecialTypes);
 
-    public SymbolIdentity Create(ISymbol symbol, ProjectIdentity project, string? repositoryRoot = null)
+    public SymbolIdentity Create(ISymbol symbol, ProjectIdentity project, string? repositoryRoot = null) =>
+        Create(symbol, project, repositoryRoot, generatedTrees: null);
+
+    internal SymbolIdentity Create(
+        ISymbol symbol,
+        ProjectIdentity project,
+        string? repositoryRoot,
+        IReadOnlySet<SyntaxTree>? generatedTrees)
     {
         ArgumentNullException.ThrowIfNull(symbol);
         ArgumentNullException.ThrowIfNull(project);
 
         return symbol switch
         {
-            INamedTypeSymbol type => CreateType(type, project, repositoryRoot),
-            IMethodSymbol method => CreateMethod(method, project, repositoryRoot),
-            IPropertySymbol property => CreateProperty(property, project, repositoryRoot),
-            IFieldSymbol field => CreateSimple(field, project, DomainSymbolKind.Field, repositoryRoot),
-            IEventSymbol @event => CreateSimple(@event, project, DomainSymbolKind.Event, repositoryRoot),
-            IParameterSymbol parameter => CreateParameter(parameter, project, repositoryRoot),
-            ILocalSymbol local => CreateScoped(local, project, DomainSymbolKind.Local, repositoryRoot),
-            IRangeVariableSymbol rangeVariable => CreateScoped(rangeVariable, project, DomainSymbolKind.RangeVariable, repositoryRoot),
-            ITypeParameterSymbol typeParameter => CreateTypeParameter(typeParameter, project, repositoryRoot),
-            ILabelSymbol label => CreateScoped(label, project, DomainSymbolKind.Label, repositoryRoot),
-            IAliasSymbol alias => CreateScoped(alias, project, DomainSymbolKind.Alias, repositoryRoot),
+            INamedTypeSymbol type => CreateType(type, project, repositoryRoot, generatedTrees),
+            IMethodSymbol method => CreateMethod(method, project, repositoryRoot, generatedTrees),
+            IPropertySymbol property => CreateProperty(property, project, repositoryRoot, generatedTrees),
+            IFieldSymbol field => CreateSimple(field, project, DomainSymbolKind.Field, repositoryRoot, generatedTrees),
+            IEventSymbol @event => CreateSimple(@event, project, DomainSymbolKind.Event, repositoryRoot, generatedTrees),
+            IParameterSymbol parameter => CreateParameter(parameter, project, repositoryRoot, generatedTrees),
+            ILocalSymbol local => CreateScoped(local, project, DomainSymbolKind.Local, repositoryRoot, generatedTrees),
+            IRangeVariableSymbol rangeVariable => CreateScoped(rangeVariable, project, DomainSymbolKind.RangeVariable, repositoryRoot, generatedTrees),
+            ITypeParameterSymbol typeParameter => CreateTypeParameter(typeParameter, project, repositoryRoot, generatedTrees),
+            ILabelSymbol label => CreateScoped(label, project, DomainSymbolKind.Label, repositoryRoot, generatedTrees),
+            IAliasSymbol alias => CreateScoped(alias, project, DomainSymbolKind.Alias, repositoryRoot, generatedTrees),
             INamespaceSymbol @namespace => CreateNamespace(@namespace, project),
             _ => throw new ArgumentException($"Unsupported declaration symbol '{symbol.Kind}'.", nameof(symbol)),
         };
@@ -36,19 +43,21 @@ public sealed class RoslynSymbolIdentityFactory
     private static SymbolIdentity CreateType(
         INamedTypeSymbol type,
         ProjectIdentity project,
-        string? repositoryRoot) => new(
+        string? repositoryRoot,
+        IReadOnlySet<SyntaxTree>? generatedTrees) => new(
         project,
         type.ContainingNamespace?.ToDisplayString(),
-        ContainingTypes(type.ContainingType, repositoryRoot),
+        ContainingTypes(type.ContainingType, repositoryRoot, generatedTrees),
         DomainSymbolKind.Type,
         type.Name,
         type.Arity,
-        declarationDiscriminator: type.IsFileLocal ? SourceDiscriminator(type, repositoryRoot) : null);
+        declarationDiscriminator: type.IsFileLocal ? SourceDiscriminator(type, repositoryRoot, generatedTrees) : null);
 
     private static SymbolIdentity CreateMethod(
         IMethodSymbol method,
         ProjectIdentity project,
-        string? repositoryRoot)
+        string? repositoryRoot,
+        IReadOnlySet<SyntaxTree>? generatedTrees)
     {
         var kind = method.MethodKind is MethodKind.Constructor or MethodKind.StaticConstructor
             ? DomainSymbolKind.Constructor
@@ -60,7 +69,7 @@ public sealed class RoslynSymbolIdentityFactory
         return new SymbolIdentity(
             project,
             NamespaceOf(method),
-            ContainingTypes(method.ContainingType, repositoryRoot),
+            ContainingTypes(method.ContainingType, repositoryRoot, generatedTrees),
             kind,
             name,
             method.Arity,
@@ -74,10 +83,11 @@ public sealed class RoslynSymbolIdentityFactory
     private static SymbolIdentity CreateProperty(
         IPropertySymbol property,
         ProjectIdentity project,
-        string? repositoryRoot) => new(
+        string? repositoryRoot,
+        IReadOnlySet<SyntaxTree>? generatedTrees) => new(
         project,
         NamespaceOf(property),
-        ContainingTypes(property.ContainingType, repositoryRoot),
+        ContainingTypes(property.ContainingType, repositoryRoot, generatedTrees),
         DomainSymbolKind.Property,
         property.Name,
         parameters: property.Parameters.Select(parameter => new ParameterIdentity(TypeName(parameter.Type), Modifier(parameter))),
@@ -88,10 +98,11 @@ public sealed class RoslynSymbolIdentityFactory
         ISymbol symbol,
         ProjectIdentity project,
         DomainSymbolKind kind,
-        string? repositoryRoot) => new(
+        string? repositoryRoot,
+        IReadOnlySet<SyntaxTree>? generatedTrees) => new(
         project,
         NamespaceOf(symbol),
-        ContainingTypes(ContainingTypeOf(symbol), repositoryRoot),
+        ContainingTypes(ContainingTypeOf(symbol), repositoryRoot, generatedTrees),
         kind,
         symbol.Name,
         containingMemberPath: ContainingMemberPath(symbol.ContainingSymbol));
@@ -99,41 +110,44 @@ public sealed class RoslynSymbolIdentityFactory
     private static SymbolIdentity CreateParameter(
         IParameterSymbol parameter,
         ProjectIdentity project,
-        string? repositoryRoot) => new(
+        string? repositoryRoot,
+        IReadOnlySet<SyntaxTree>? generatedTrees) => new(
         project,
         NamespaceOf(parameter),
-        ContainingTypes(ContainingTypeOf(parameter.ContainingSymbol), repositoryRoot),
+        ContainingTypes(ContainingTypeOf(parameter.ContainingSymbol), repositoryRoot, generatedTrees),
         DomainSymbolKind.Parameter,
         parameter.Name,
         containingMemberPath: ContainingMemberPath(parameter.ContainingSymbol),
-        declarationDiscriminator: ScopedDiscriminator(parameter, repositoryRoot, $"ordinal={parameter.Ordinal}"));
+        declarationDiscriminator: ScopedDiscriminator(parameter, repositoryRoot, $"ordinal={parameter.Ordinal}", generatedTrees));
 
     private static SymbolIdentity CreateTypeParameter(
         ITypeParameterSymbol typeParameter,
         ProjectIdentity project,
-        string? repositoryRoot) => new(
+        string? repositoryRoot,
+        IReadOnlySet<SyntaxTree>? generatedTrees) => new(
         project,
         NamespaceOf(typeParameter),
-        ContainingTypes(typeParameter.DeclaringType ?? typeParameter.DeclaringMethod?.ContainingType, repositoryRoot),
+        ContainingTypes(typeParameter.DeclaringType ?? typeParameter.DeclaringMethod?.ContainingType, repositoryRoot, generatedTrees),
         DomainSymbolKind.TypeParameter,
         typeParameter.Name,
         containingMemberPath: typeParameter.DeclaringMethod is null
             ? null
             : ContainingMemberPath(typeParameter.DeclaringMethod),
-        declarationDiscriminator: ScopedDiscriminator(typeParameter, repositoryRoot, $"ordinal={typeParameter.Ordinal}"));
+        declarationDiscriminator: ScopedDiscriminator(typeParameter, repositoryRoot, $"ordinal={typeParameter.Ordinal}", generatedTrees));
 
     private static SymbolIdentity CreateScoped(
         ISymbol symbol,
         ProjectIdentity project,
         DomainSymbolKind kind,
-        string? repositoryRoot) => new(
+        string? repositoryRoot,
+        IReadOnlySet<SyntaxTree>? generatedTrees) => new(
             project,
             NamespaceOf(symbol),
-            ContainingTypes(ContainingTypeOf(symbol), repositoryRoot),
+            ContainingTypes(ContainingTypeOf(symbol), repositoryRoot, generatedTrees),
             kind,
             symbol.Name,
             containingMemberPath: ContainingMemberPath(symbol.ContainingSymbol),
-            declarationDiscriminator: SourceDiscriminator(symbol, repositoryRoot));
+            declarationDiscriminator: SourceDiscriminator(symbol, repositoryRoot, generatedTrees));
 
     private static SymbolIdentity CreateNamespace(INamespaceSymbol @namespace, ProjectIdentity project)
     {
@@ -146,7 +160,8 @@ public sealed class RoslynSymbolIdentityFactory
 
     private static IEnumerable<ContainingTypeIdentity> ContainingTypes(
         INamedTypeSymbol? containingType,
-        string? repositoryRoot)
+        string? repositoryRoot,
+        IReadOnlySet<SyntaxTree>? generatedTrees)
     {
         var types = new Stack<ContainingTypeIdentity>();
         for (var current = containingType; current is not null; current = current.ContainingType)
@@ -159,7 +174,7 @@ public sealed class RoslynSymbolIdentityFactory
             types.Push(new ContainingTypeIdentity(
                 current.Name,
                 current.Arity,
-                current.IsFileLocal ? SourceDiscriminator(current, repositoryRoot) : null));
+                current.IsFileLocal ? SourceDiscriminator(current, repositoryRoot, generatedTrees) : null));
         }
 
         return types;
@@ -257,7 +272,10 @@ public sealed class RoslynSymbolIdentityFactory
         return null;
     }
 
-    private static string? SourceDiscriminator(ISymbol symbol, string? repositoryRoot)
+    private static string? SourceDiscriminator(
+        ISymbol symbol,
+        string? repositoryRoot,
+        IReadOnlySet<SyntaxTree>? generatedTrees)
     {
         var location = symbol.Locations.FirstOrDefault(item => item.IsInSource && item.SourceTree is not null);
         if (location is null)
@@ -265,7 +283,25 @@ public sealed class RoslynSymbolIdentityFactory
             return null;
         }
 
-        var path = location.SourceTree!.FilePath;
+        var tree = location.SourceTree!;
+        var path = tree.FilePath;
+        if (generatedTrees?.Contains(tree) == true)
+        {
+            // Generators can embed absolute paths in trivia or string literals.
+            // A token's structural position survives changes in their lengths,
+            // and still distinguishes same-named locals in different scopes.
+            var syntaxPath = new Stack<int>();
+            SyntaxNodeOrToken current = tree.GetRoot().FindToken(location.SourceSpan.Start);
+            while (current.Parent is { } parent)
+            {
+                syntaxPath.Push(parent.ChildNodesAndTokens().TakeWhile(child => child != current).Count());
+                current = parent;
+            }
+            var generatedPath = repositoryRoot is null
+                ? path.Replace('\\', '/')
+                : ProjectIdentity.FromPath(Path.GetFullPath(path, repositoryRoot), repositoryRoot).RelativePath;
+            return $"source={generatedPath}@syntax={string.Join(".", syntaxPath)}";
+        }
         if (string.IsNullOrWhiteSpace(path))
         {
             return $"span={location.SourceSpan.Start}:{location.SourceSpan.Length}";
@@ -277,9 +313,13 @@ public sealed class RoslynSymbolIdentityFactory
         return $"source={normalizedPath}@{location.SourceSpan.Start}:{location.SourceSpan.Length}";
     }
 
-    private static string ScopedDiscriminator(ISymbol symbol, string? repositoryRoot, string ordinal)
+    private static string ScopedDiscriminator(
+        ISymbol symbol,
+        string? repositoryRoot,
+        string ordinal,
+        IReadOnlySet<SyntaxTree>? generatedTrees)
     {
-        var source = SourceDiscriminator(symbol, repositoryRoot);
+        var source = SourceDiscriminator(symbol, repositoryRoot, generatedTrees);
         return source is null ? ordinal : $"{source};{ordinal}";
     }
 

@@ -12,17 +12,14 @@ public sealed class RazorFeatureTests
     [Fact]
     public async Task Extracts_Razor_declarations_calls_and_mapped_locations_deterministically()
     {
-        var root = await CopyFixtureAsync();
+        var roots = new[] { await CopyFixtureAsync(), await CopyFixtureAsync("longer-checkout-directory-") };
         try
         {
-            var request = new ProjectLoadRequest(
-                Path.Combine(root, "RazorFixture.csproj"),
-                root,
-                configuration: "Release",
-                targetFramework: "net10.0");
             string? previous = null;
-            for (var run = 0; run < 2; run++)
+            foreach (var root in new[] { roots[0], roots[0], roots[1] })
             {
+                var request = new ProjectLoadRequest(
+                    Path.Combine(root, "RazorFixture.csproj"), root, "Release", "net10.0");
                 using var loaded = await new RoslynWorkspaceLoader().LoadAsync(request);
                 Assert.Empty(loaded.Diagnostics);
                 var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
@@ -50,6 +47,8 @@ public sealed class RazorFeatureTests
                 Assert.Contains(graph.Edges, edge => edge.TargetId == load.Id && edge.Relation == GraphRelation.References);
                 Assert.Contains(catalog.Declarations, declaration => declaration.Identity.Kind == SymbolKind.Local
                     && declaration.Identity.Name == "count");
+                Assert.Equal(2, catalog.Declarations.Count(declaration => declaration.Identity.Kind == SymbolKind.Parameter
+                    && declaration.Identity.Name == "__builder"));
 
                 var serialized = new GraphifyJsonSerializer().Serialize(graph);
                 if (previous is not null)
@@ -61,7 +60,10 @@ public sealed class RazorFeatureTests
         }
         finally
         {
-            Directory.Delete(root, recursive: true);
+            foreach (var root in roots)
+            {
+                Directory.Delete(root, recursive: true);
+            }
         }
     }
 
@@ -174,9 +176,9 @@ public sealed class RazorFeatureTests
         }
     }
 
-    private static async Task<string> CopyFixtureAsync()
+    private static async Task<string> CopyFixtureAsync(string prefix = "")
     {
-        var root = Path.Combine(Path.GetTempPath(), "graphify-razor-tests", Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(Path.GetTempPath(), "graphify-razor-tests", prefix + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         foreach (var file in Directory.EnumerateFiles(Path.Combine(RepositoryRoot(), "tests/Fixtures/RazorFixture")))
         {

@@ -41,6 +41,12 @@ declarations, methods in `@code`, and their calls and references are indexed
 alongside ordinary C# and partial code-behind declarations. Where the generator
 provides `#line` mappings, locations point to the original file, including
 `.razor` files. Unmapped generated code retains its generated source location.
+Relative `#line` paths are resolved against the containing C# source file, so
+exports and path-filtered argument queries do not depend on the working
+directory. Generated scoped declarations use structural syntax positions in
+their identities, keeping IDs stable when checkout paths embedded in generated
+text change length. Ordinary C# declaration identities retain their existing
+format.
 
 This requires the generator and its inputs to be available to the loaded
 project, and the generator to be compatible with the tool's Roslyn version.
