@@ -88,11 +88,13 @@ fixture and xUnit on .NET 11. The package smoke test installs both assets from
 the same `.nupkg` and executes each one independently. Older SDK support is not
 silently claimed by v0.1.
 
-When both SDK lines are installed, run `scripts/run-net10-tests.sh` after the
-Release build. It runs the full .NET 10 suite with a temporary view of the
-installed .NET 10 SDK/runtime, so Roslyn's separate build host cannot select
-incompatible .NET 11 Razor generators. It does not download an SDK or change
-the installed toolchain. The CI package and release gates use this path.
+Generated-tree extraction and mapped locations have an in-memory regression
+test on both tool assets. Actual Razor integration tests run on `net11.0`
+and restore their own temporary fixtures. This keeps the tests compatible with
+the existing mixed-SDK CI environment, where Roslyn's separate build host can
+select .NET 11 Razor generators that the `net10.0` tool cannot load. Actual
+Razor generation with the .NET 10 tool/SDK pairing is covered by a manual
+package smoke check, not an automated CI integration test.
 
 ## C# 15 preview coverage
 

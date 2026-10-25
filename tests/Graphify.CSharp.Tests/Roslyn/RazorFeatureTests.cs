@@ -1,3 +1,4 @@
+#if NET11_0_OR_GREATER
 using Graphify.CSharp.Domain;
 using Graphify.CSharp.Graphify;
 using Graphify.CSharp.Incremental;
@@ -11,49 +12,56 @@ public sealed class RazorFeatureTests
     [Fact]
     public async Task Extracts_Razor_declarations_calls_and_mapped_locations_deterministically()
     {
-        var root = RepositoryRoot();
-        var request = new ProjectLoadRequest(
-            Path.Combine(root, "tests/Fixtures/RazorFixture/RazorFixture.csproj"),
-            root,
-            configuration: "Release",
-            targetFramework: "net10.0");
-        string? previous = null;
-        for (var run = 0; run < 2; run++)
+        var root = await CopyFixtureAsync();
+        try
         {
-            using var loaded = await new RoslynWorkspaceLoader().LoadAsync(request);
-            Assert.Empty(loaded.Diagnostics);
-            var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
-            var extractor = new SemanticReferenceExtractor();
-            var graph = await extractor.ExtractAsync(loaded, catalog);
-            Assert.Empty(catalog.Diagnostics);
-            Assert.Empty(extractor.Diagnostics);
-
-            var component = Assert.Single(graph.Nodes.Where(node => node.Label == "RazorFixture.Counter"));
-            Assert.Single(graph.Nodes.Where(node => node.Label == "RazorFixture.Status"));
-            var load = Assert.Single(graph.Nodes.Where(node => node.Label == "RazorFixture.Counter.Load"));
-            var service = Assert.Single(graph.Nodes.Where(node => node.Label == "RazorFixture.CounterService.Get(int)"));
-            var otherOverload = Assert.Single(graph.Nodes.Where(node => node.Label == "RazorFixture.CounterService.Get(string)"));
-            var codeBehind = Assert.Single(graph.Nodes.Where(node => node.Label == "RazorFixture.Counter.FromCodeBehind"));
-            Assert.Contains(component.SourceLocations, location => location.FilePath.EndsWith("Counter.razor.cs", StringComparison.Ordinal));
-            Assert.Contains(load.SourceLocations, location => location.FilePath.EndsWith("Counter.razor", StringComparison.Ordinal)
-                && location.Line == 9);
-            var call = Assert.Single(graph.Edges.Where(edge => edge.SourceId == load.Id
-                && edge.TargetId == service.Id && edge.Relation == GraphRelation.Calls));
-            Assert.Contains(call.SourceLocations, location => location.FilePath.EndsWith("Counter.razor", StringComparison.Ordinal)
-                && location.Line == 12);
-            Assert.DoesNotContain(graph.Edges, edge => edge.SourceId == load.Id && edge.TargetId == otherOverload.Id);
-            Assert.Contains(graph.Edges, edge => edge.SourceId == codeBehind.Id && edge.TargetId == load.Id
-                && edge.Relation == GraphRelation.Calls);
-            Assert.Contains(graph.Edges, edge => edge.TargetId == load.Id && edge.Relation == GraphRelation.References);
-            Assert.Contains(catalog.Declarations, declaration => declaration.Identity.Kind == SymbolKind.Local
-                && declaration.Identity.Name == "count");
-
-            var serialized = new GraphifyJsonSerializer().Serialize(graph);
-            if (previous is not null)
+            var request = new ProjectLoadRequest(
+                Path.Combine(root, "RazorFixture.csproj"),
+                root,
+                configuration: "Release",
+                targetFramework: "net10.0");
+            string? previous = null;
+            for (var run = 0; run < 2; run++)
             {
-                Assert.Equal(previous, serialized);
+                using var loaded = await new RoslynWorkspaceLoader().LoadAsync(request);
+                Assert.Empty(loaded.Diagnostics);
+                var catalog = await new DeclarationCatalogBuilder().BuildAsync(loaded);
+                var extractor = new SemanticReferenceExtractor();
+                var graph = await extractor.ExtractAsync(loaded, catalog);
+                Assert.Empty(catalog.Diagnostics);
+                Assert.Empty(extractor.Diagnostics);
+
+                var component = Assert.Single(graph.Nodes.Where(node => node.Label == "RazorFixture.Counter"));
+                Assert.Single(graph.Nodes.Where(node => node.Label == "RazorFixture.Status"));
+                var load = Assert.Single(graph.Nodes.Where(node => node.Label == "RazorFixture.Counter.Load"));
+                var service = Assert.Single(graph.Nodes.Where(node => node.Label == "RazorFixture.CounterService.Get(int)"));
+                var otherOverload = Assert.Single(graph.Nodes.Where(node => node.Label == "RazorFixture.CounterService.Get(string)"));
+                var codeBehind = Assert.Single(graph.Nodes.Where(node => node.Label == "RazorFixture.Counter.FromCodeBehind"));
+                Assert.Contains(component.SourceLocations, location => location.FilePath.EndsWith("Counter.razor.cs", StringComparison.Ordinal));
+                Assert.Contains(load.SourceLocations, location => location.FilePath.EndsWith("Counter.razor", StringComparison.Ordinal)
+                    && location.Line == 9);
+                var call = Assert.Single(graph.Edges.Where(edge => edge.SourceId == load.Id
+                    && edge.TargetId == service.Id && edge.Relation == GraphRelation.Calls));
+                Assert.Contains(call.SourceLocations, location => location.FilePath.EndsWith("Counter.razor", StringComparison.Ordinal)
+                    && location.Line == 12);
+                Assert.DoesNotContain(graph.Edges, edge => edge.SourceId == load.Id && edge.TargetId == otherOverload.Id);
+                Assert.Contains(graph.Edges, edge => edge.SourceId == codeBehind.Id && edge.TargetId == load.Id
+                    && edge.Relation == GraphRelation.Calls);
+                Assert.Contains(graph.Edges, edge => edge.TargetId == load.Id && edge.Relation == GraphRelation.References);
+                Assert.Contains(catalog.Declarations, declaration => declaration.Identity.Kind == SymbolKind.Local
+                    && declaration.Identity.Name == "count");
+
+                var serialized = new GraphifyJsonSerializer().Serialize(graph);
+                if (previous is not null)
+                {
+                    Assert.Equal(previous, serialized);
+                }
+                previous = serialized;
             }
-            previous = serialized;
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
         }
     }
 
@@ -204,3 +212,4 @@ public sealed class RazorFeatureTests
         throw new DirectoryNotFoundException("Could not locate the repository root from the test output directory.");
     }
 }
+#endif
