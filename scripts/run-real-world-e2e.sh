@@ -22,6 +22,7 @@ mkdir -p "$feed_directory" "$package_directory" "$tool_directory_net10" "$tool_d
 
 dotnet restore "$repository_root/Graphify.CSharp.sln"
 dotnet restore "$repository_root/tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj"
+dotnet restore "$repository_root/tests/Fixtures/RazorFixture/RazorFixture.csproj"
 dotnet restore "$repository_root/tests/Fixtures/CSharp14Fixture/CSharp14Fixture.csproj"
 dotnet restore "$repository_root/tests/Fixtures/CSharp15Fixture/CSharp15Fixture.csproj"
 dotnet build "$repository_root/Graphify.CSharp.sln" --configuration "$configuration" --no-restore
@@ -30,11 +31,12 @@ for test_framework in net10.0 net11.0; do
   # concurrently makes this intentionally cold-recovery gate contend for the
   # same MSBuild/Roslyn resources and turns a valid stress test into a timing
   # failure on busy machines.
-  dotnet test "$repository_root/Graphify.CSharp.sln" \
-    --configuration "$configuration" \
-    --framework "$test_framework" \
-    --no-build \
-    --no-restore
+  if [[ "$test_framework" == net10.0 ]]; then
+    GRAPHIFY_CSHARP_TEST_CONFIGURATION="$configuration" "$repository_root/scripts/run-net10-tests.sh"
+  else
+    dotnet test "$repository_root/Graphify.CSharp.sln" \
+      --configuration "$configuration" --framework "$test_framework" --no-build --no-restore
+  fi
 done
 dotnet pack "$repository_root/src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj" \
   --configuration "$configuration" \

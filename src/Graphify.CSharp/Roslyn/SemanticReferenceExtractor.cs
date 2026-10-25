@@ -235,11 +235,11 @@ public sealed class SemanticReferenceExtractor
 
     private BatchWork[] CreateProjectBatchWork(AnalyzedProject project)
     {
-        var documents = RoslynDocumentKeyPolicy.Create(project.Project.Documents)
+        var documents = RoslynSyntaxTreeKeyPolicy.Create(project.Compilation.SyntaxTrees)
             .Select(document => new DocumentWork(
-                document.Document,
+                document.Tree,
                 document.Key,
-                EstimateCost(document.Document)))
+                Math.Max(1, document.Tree.Length)))
             .ToArray();
         var documentByKey = documents.ToDictionary(document => document.Key, StringComparer.Ordinal);
         return ExtractionBatchPlanner
@@ -269,11 +269,7 @@ public sealed class SemanticReferenceExtractor
         foreach (var document in batch.Documents)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var root = await document.GetSyntaxRootAsync(cancellationToken).ConfigureAwait(false);
-            if (root is null)
-            {
-                continue;
-            }
+            var root = await document.GetRootAsync(cancellationToken).ConfigureAwait(false);
 
             var semanticModel = batch.Project.Compilation.GetSemanticModel(root.SyntaxTree);
             var operationWalker = new SemanticOperationWalker(catalog, semanticModel, locations, edges);
@@ -293,30 +289,14 @@ public sealed class SemanticReferenceExtractor
             diagnostics.OrderBy(diagnostic => diagnostic, StringComparer.Ordinal).ToImmutableArray());
     }
 
-    private static long EstimateCost(Microsoft.CodeAnalysis.Document document)
-    {
-        if (document.FilePath is string path)
-        {
-            try
-            {
-                return Math.Max(1, new FileInfo(path).Length);
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-            {
-            }
-        }
-
-        return Math.Max(1, document.Name.Length);
-    }
-
     private sealed record BatchWork(
         AnalyzedProject Project,
         ExtractionBatch Plan,
-        ImmutableArray<Microsoft.CodeAnalysis.Document> Documents,
+        ImmutableArray<SyntaxTree> Documents,
         int Index);
 
     private sealed record DocumentWork(
-        Microsoft.CodeAnalysis.Document Document,
+        SyntaxTree Document,
         string Key,
         long EstimatedCost);
 
@@ -331,11 +311,11 @@ public sealed class SemanticReferenceExtractor
     private static string SemanticDiagnostic(
         LoadedSolution solution,
         AnalyzedProject project,
-        Document document,
+        SyntaxTree document,
         Exception exception)
     {
-        var path = document.FilePath is null
-            ? document.Name
+        var path = string.IsNullOrWhiteSpace(document.FilePath)
+            ? "<unknown>"
             : Path.GetRelativePath(solution.RepositoryRoot, Path.GetFullPath(document.FilePath))
                 .Replace('\\', '/');
         return $"Semantic: skipped unsupported Roslyn operations in '{path}' for project '{project.Identity.RelativePath}': {exception.Message}";

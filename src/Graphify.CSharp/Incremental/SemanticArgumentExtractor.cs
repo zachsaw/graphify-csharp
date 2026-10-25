@@ -39,27 +39,15 @@ internal static class SemanticArgumentExtractor
                 Array.Empty<string>());
         }
 
-        var candidateFiles = candidateCallSites
-            .Select(site => site.Location.FilePath)
-            .ToHashSet(StringComparer.Ordinal);
-        var scopedCandidateFiles = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var project in view.Solution.Projects)
-        {
-            foreach (var document in project.Project.Documents)
-            {
-                if (document.FilePath is { } filePath
-                    && candidateFiles.Contains(RelativePath(filePath, view.Solution.RepositoryRoot))
-                    && MatchesDocumentFilter(filePath, project, filters, view.Solution.RepositoryRoot))
-                {
-                    scopedCandidateFiles.Add(RelativePath(filePath, view.Solution.RepositoryRoot));
-                }
-            }
-        }
-
+        var projectsByKey = view.Solution.Projects.ToDictionary(project => project.Identity.Key, StringComparer.Ordinal);
         var scopedCandidateCallSites = candidateCallSites
-            .Where(site => scopedCandidateFiles.Contains(site.Location.FilePath))
-            .Where(site => string.IsNullOrEmpty(site.ProjectKey)
-                || !IsBeforeCursor(
+            .Where(site => projectsByKey.TryGetValue(site.ProjectKey, out var project)
+                && MatchesDocumentFilter(
+                    Path.Combine(view.Solution.RepositoryRoot, site.Location.FilePath),
+                    project,
+                    filters,
+                    view.Solution.RepositoryRoot))
+            .Where(site => !IsBeforeCursor(
                     site.ProjectKey,
                     site.Location.FilePath,
                     afterKey))
@@ -71,27 +59,31 @@ internal static class SemanticArgumentExtractor
         var locations = new SourceLocationFactory(view.Solution.RepositoryRoot);
         foreach (var project in view.Solution.Projects.OrderBy(project => project.Identity.Key, StringComparer.Ordinal))
         {
-            foreach (var document in project.Project.Documents
-                .Where(document => document.FilePath is not null)
+            var candidateFiles = scopedCandidateCallSites
+                .Where(site => site.ProjectKey == project.Identity.Key)
+                .Select(site => site.Location.FilePath)
+                .ToHashSet(StringComparer.Ordinal);
+            if (candidateFiles.Count == 0)
+            {
+                continue;
+            }
+
+            foreach (var document in project.Compilation.SyntaxTrees
                 .OrderBy(document => document.FilePath, StringComparer.Ordinal))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (document.FilePath is not { } filePath
-                    || !candidateFiles.Contains(RelativePath(filePath, view.Solution.RepositoryRoot))
-                    || IsBeforeCursor(
-                        project.Identity.Key,
-                        RelativePath(filePath, view.Solution.RepositoryRoot),
-                        afterKey)
-                    || !MatchesDocumentFilter(filePath, project, filters, view.Solution.RepositoryRoot))
+                // A generated tree can map to several original files. Select by
+                // mapped paths, then restrict individual calls to the same scope.
+                var paths = document.GetLineMappings(cancellationToken)
+                    .Select(mapping => mapping.MappedSpan.Path)
+                    .Append(document.FilePath);
+                if (!paths.Any(path => !string.IsNullOrWhiteSpace(path)
+                    && candidateFiles.Contains(RelativePath(path, view.Solution.RepositoryRoot))))
                 {
                     continue;
                 }
 
-                var root = document.GetSyntaxRootAsync(cancellationToken).GetAwaiter().GetResult();
-                if (root is null)
-                {
-                    continue;
-                }
+                var root = document.GetRoot(cancellationToken);
 
                 var model = project.Compilation.GetSemanticModel(root.SyntaxTree);
                 var walker = new CallWalker(
@@ -103,6 +95,7 @@ internal static class SemanticArgumentExtractor
                     results,
                     diagnostics,
                     representedCallSites,
+                    scopedCandidateCallSites,
                     cancellationToken);
                 try
                 {
@@ -115,7 +108,7 @@ internal static class SemanticArgumentExtractor
                 catch (Exception exception)
                 {
                     diagnostics.Add(
-                        $"Arguments: could not bind call-site details in '{RelativePath(filePath, view.Solution.RepositoryRoot)}': {exception.Message}");
+                        $"Arguments: could not bind call-site details in '{RelativePath(document.FilePath, view.Solution.RepositoryRoot)}': {exception.Message}");
                 }
             }
         }
@@ -209,6 +202,7 @@ internal static class SemanticArgumentExtractor
         private readonly ICollection<SemanticArgumentExtractionResult> _results;
         private readonly ISet<string> _diagnostics;
         private readonly ISet<CandidateCallSite> _representedCallSites;
+        private readonly ISet<CandidateCallSite> _candidateCallSites;
         private readonly CancellationToken _cancellationToken;
 
         public CallWalker(
@@ -220,6 +214,7 @@ internal static class SemanticArgumentExtractor
             ICollection<SemanticArgumentExtractionResult> results,
             ISet<string> diagnostics,
             ISet<CandidateCallSite> representedCallSites,
+            ISet<CandidateCallSite> candidateCallSites,
             CancellationToken cancellationToken)
         {
             _view = view;
@@ -230,6 +225,7 @@ internal static class SemanticArgumentExtractor
             _results = results;
             _diagnostics = diagnostics;
             _representedCallSites = representedCallSites;
+            _candidateCallSites = candidateCallSites;
             _cancellationToken = cancellationToken;
         }
 
@@ -263,6 +259,13 @@ internal static class SemanticArgumentExtractor
 
             var caller = _resolver.Resolve(_model, syntax.SpanStart);
             if (caller is null)
+            {
+                return;
+            }
+
+            var location = _locations.Create(syntax.GetLocation());
+            if (location is null || !_candidateCallSites.Contains(new CandidateCallSite(
+                caller.Node.Id, caller.Identity.Project.Key, location)))
             {
                 return;
             }

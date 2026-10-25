@@ -33,6 +33,29 @@ and the loader records the evaluated target automatically. For a multi-targeted
 project, pass one value so the symbol key cannot silently combine different
 compilations.
 
+### Razor and source-generated C#
+
+Extraction includes the syntax trees in Roslyn's evaluated compilation,
+including source-generator output such as Blazor components. Component
+declarations, methods in `@code`, and their calls and references are indexed
+alongside ordinary C# and partial code-behind declarations. Where the generator
+provides `#line` mappings, locations point to the original file, including
+`.razor` files. Unmapped generated code retains its generated source location.
+
+This requires the generator and its inputs to be available to the loaded
+project, and the generator to be compatible with the tool's Roslyn version.
+For example, use the `net11.0` tool asset when MSBuild selects the .NET 11 Razor
+SDK, even if the input targets `net10.0`. Analyzer/source-generator load failures
+are reported in the graph diagnostics; their generated evidence may be missing.
+Generator execution diagnostics are not currently collected separately from
+workspace diagnostics.
+
+The extractor does not parse Razor markup separately or infer runtime event
+dispatch. Argument queries accept the original mapped file path; expression
+spans still describe the C# syntax tree used for binding. Existing input
+tracking invalidates generated evidence when its source or additional inputs
+change.
+
 ## Output format
 
 The CLI emits a standalone JSON document. It follows Graphify’s v8 extraction
@@ -64,6 +87,12 @@ The same matrix also validates the .NET 11/`net11.0` asset with the C# 15
 fixture and xUnit on .NET 11. The package smoke test installs both assets from
 the same `.nupkg` and executes each one independently. Older SDK support is not
 silently claimed by v0.1.
+
+When both SDK lines are installed, run `scripts/run-net10-tests.sh` after the
+Release build. It runs the full .NET 10 suite with a temporary view of the
+installed .NET 10 SDK/runtime, so Roslyn's separate build host cannot select
+incompatible .NET 11 Razor generators. It does not download an SDK or change
+the installed toolchain. The CI package and release gates use this path.
 
 ## C# 15 preview coverage
 

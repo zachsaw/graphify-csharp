@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using Graphify.CSharp.Incremental;
 using Microsoft.Build.Locator;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Diagnostics;
 using Microsoft.CodeAnalysis.MSBuild;
 
 namespace Graphify.CSharp.Roslyn;
@@ -46,6 +47,18 @@ public sealed class RoslynWorkspaceLoader : IProjectLoader
             using var loadPhase = operation?.BeginPhase(IndexingStages.LoadingProjects);
             opened = await OpenProjectsAsync(workspace, request, loadPhase, cancellationToken).ConfigureAwait(false);
             var projects = opened.Projects;
+            foreach (var reference in projects.SelectMany(project => project.AnalyzerReferences).OfType<AnalyzerFileReference>().Distinct())
+            {
+                reference.AnalyzerLoadFailed += (_, failure) =>
+                {
+                    var detail = failure.ErrorCode == AnalyzerLoadFailureEventArgs.FailureErrorCode.ReferencesNewerCompiler
+                        ? $"Requires Roslyn {failure.ReferencedCompilerVersion}, but the tool uses {typeof(Compilation).Assembly.GetName().Version}. Select a compatible SDK or tool asset."
+                        : failure.Message;
+                    diagnostics.Enqueue(new WorkspaceLoadDiagnostic(
+                        "SourceGeneratorLoad",
+                        $"Could not load analyzer/source generator '{reference.FullPath}' ({failure.ErrorCode}): {detail} Generated declarations and relationships may be missing."));
+                };
+            }
             var analyzedProjects = new List<AnalyzedProject>(projects.Count);
             var seenProjectKeys = new HashSet<string>(StringComparer.Ordinal);
             var completedProjects = 0;

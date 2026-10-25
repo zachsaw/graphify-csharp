@@ -134,9 +134,10 @@ public sealed class DeclarationCatalogBuilder
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var sourcePaths = project.Project.Documents
-            .Select(document => document.FilePath)
-            .OfType<string>()
+        // The compilation also contains source-generator output, including Razor.
+        var sourcePaths = project.Compilation.SyntaxTrees
+            .Select(tree => tree.FilePath)
+            .Where(path => !string.IsNullOrWhiteSpace(path))
             .Select(Path.GetFullPath)
             .ToHashSet(StringComparer.Ordinal);
         var entryPoint = project.Compilation.GetEntryPoint(cancellationToken);

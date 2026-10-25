@@ -36,7 +36,9 @@ single package contains both tool assets. Run the normal checks locally, then
 use GitHub’s New release page:
 
 ```text
-dotnet test Graphify.CSharp.sln --configuration Release
+dotnet build Graphify.CSharp.sln --configuration Release
+./scripts/run-net10-tests.sh
+dotnet test Graphify.CSharp.sln --configuration Release --framework net11.0 --no-build --no-restore
 ```
 
 Create a release with:

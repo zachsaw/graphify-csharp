@@ -48,6 +48,7 @@ jobs:
       - name: Restore .NET 10 semantic fixtures
         run: |
           dotnet restore tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj
+          dotnet restore tests/Fixtures/RazorFixture/RazorFixture.csproj
           dotnet restore tests/Fixtures/CSharp14Fixture/CSharp14Fixture.csproj
           dotnet restore tests/Fixtures/ExtensionBlockFixture/ExtensionBlockFixture.csproj
           dotnet restore tests/Fixtures/LanguageSurfaceFixture/LanguageSurfaceFixture.csproj
@@ -61,7 +62,12 @@ jobs:
       - name: Build
         run: dotnet build Graphify.CSharp.sln --configuration Release --no-restore -p:TargetFrameworks=${{ matrix.framework }}
 
-      - name: Test
+      - name: Test .NET 10
+        if: matrix.framework == 'net10.0'
+        run: ./scripts/run-net10-tests.sh
+
+      - name: Test .NET 11
+        if: matrix.framework == 'net11.0'
         run: dotnet test Graphify.CSharp.sln --configuration Release --framework ${{ matrix.framework }} --no-build --no-restore
 
       - name: Vulnerability check
@@ -88,6 +94,7 @@ jobs:
       - name: Restore semantic fixtures
         run: |
           dotnet restore tests/Fixtures/ReferenceFixture/ReferenceFixture.csproj
+          dotnet restore tests/Fixtures/RazorFixture/RazorFixture.csproj
           dotnet restore tests/Fixtures/CSharp14Fixture/CSharp14Fixture.csproj
           dotnet restore tests/Fixtures/ExtensionBlockFixture/ExtensionBlockFixture.csproj
           dotnet restore tests/Fixtures/LanguageSurfaceFixture/LanguageSurfaceFixture.csproj
@@ -99,7 +106,7 @@ jobs:
         run: dotnet build Graphify.CSharp.sln --configuration Release --no-restore
 
       - name: Test .NET 10 asset
-        run: dotnet test Graphify.CSharp.sln --configuration Release --framework net10.0 --no-build --no-restore
+        run: ./scripts/run-net10-tests.sh
 
       - name: Test .NET 11 asset
         run: dotnet test Graphify.CSharp.sln --configuration Release --framework net11.0 --no-build --no-restore

@@ -23,7 +23,7 @@ public sealed class SourceLocationFactory
             return null;
         }
 
-        var lineSpan = location.GetLineSpan();
+        var lineSpan = location.GetMappedLineSpan();
         if (string.IsNullOrWhiteSpace(lineSpan.Path))
         {
             return null;

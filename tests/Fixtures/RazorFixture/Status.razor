@@ -1,0 +1,8 @@
+@namespace RazorFixture
+
+<Counter />
+<span>@Total</span>
+
+@code {
+    public int Total => CounterService.Get(2);
+}

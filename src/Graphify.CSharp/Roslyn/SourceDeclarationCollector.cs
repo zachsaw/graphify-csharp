@@ -24,11 +24,11 @@ internal sealed class SourceDeclarationCollector
     {
         ArgumentNullException.ThrowIfNull(project);
 
-        var documents = RoslynDocumentKeyPolicy.Create(project.Project.Documents)
+        var documents = RoslynSyntaxTreeKeyPolicy.Create(project.Compilation.SyntaxTrees)
             .Select((document, index) => new DocumentWork(
-                document.Document,
+                document.Tree,
                 document.Key,
-                EstimateCost(document.Document),
+                Math.Max(1, document.Tree.Length),
                 index))
             .ToArray();
         var declarationsByDocument = new IReadOnlyList<ISymbol>[documents.Length];
@@ -113,14 +113,10 @@ internal sealed class SourceDeclarationCollector
 
     private static async Task<IReadOnlyList<ISymbol>> CollectDocumentAsync(
         AnalyzedProject project,
-        Microsoft.CodeAnalysis.Document document,
+        SyntaxTree document,
         CancellationToken cancellationToken)
     {
-        var root = await document.GetSyntaxRootAsync(cancellationToken).ConfigureAwait(false);
-        if (root is null)
-        {
-            return [];
-        }
+        var root = await document.GetRootAsync(cancellationToken).ConfigureAwait(false);
 
         var semanticModel = project.Compilation.GetSemanticModel(root.SyntaxTree);
         var declarations = new List<ISymbol>();
@@ -134,24 +130,8 @@ internal sealed class SourceDeclarationCollector
         return declarations;
     }
 
-    private static long EstimateCost(Microsoft.CodeAnalysis.Document document)
-    {
-        if (document.FilePath is string path)
-        {
-            try
-            {
-                return Math.Max(1, new FileInfo(path).Length);
-            }
-            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-            {
-            }
-        }
-
-        return Math.Max(1, document.Name.Length);
-    }
-
     private sealed record DocumentWork(
-        Microsoft.CodeAnalysis.Document Document,
+        SyntaxTree Document,
         string Key,
         long EstimatedCost,
         int Index = -1);
