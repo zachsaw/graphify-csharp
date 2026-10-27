@@ -1,0 +1,14 @@
+@namespace RazorFixture
+@using Microsoft.AspNetCore.Components.Web
+
+<button @onclick="Load">@value</button>
+
+@code {
+    private int value;
+
+    private void Load()
+    {
+        var count = 1;
+        value = CounterService.Get(count);
+    }
+}

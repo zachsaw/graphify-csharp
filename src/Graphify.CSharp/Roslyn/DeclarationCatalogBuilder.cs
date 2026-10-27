@@ -5,7 +5,7 @@ namespace Graphify.CSharp.Roslyn;
 
 public sealed class DeclarationCatalogBuilder
 {
-    private readonly Func<ISymbol, ProjectIdentity, string?, SymbolIdentity> _createIdentity;
+    private readonly Func<ISymbol, ProjectIdentity, string?, IReadOnlySet<SyntaxTree>, SymbolIdentity> _createIdentity;
     private readonly ExtractionParallelismOptions _parallelism;
 
     public DeclarationCatalogBuilder(RoslynSymbolIdentityFactory? identityFactory = null)
@@ -21,7 +21,8 @@ public sealed class DeclarationCatalogBuilder
 
     private DeclarationCatalogBuilder(Func<ISymbol, ProjectIdentity, string?, SymbolIdentity> createIdentity)
     {
-        _createIdentity = createIdentity ?? throw new ArgumentNullException(nameof(createIdentity));
+        ArgumentNullException.ThrowIfNull(createIdentity);
+        _createIdentity = (symbol, project, root, _) => createIdentity(symbol, project, root);
         _parallelism = ExtractionParallelismOptions.Default;
     }
 
@@ -134,11 +135,16 @@ public sealed class DeclarationCatalogBuilder
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var sourcePaths = project.Project.Documents
-            .Select(document => document.FilePath)
-            .OfType<string>()
+        // The compilation also contains source-generator output, including Razor.
+        var sourcePaths = project.Compilation.SyntaxTrees
+            .Select(tree => tree.FilePath)
+            .Where(path => !string.IsNullOrWhiteSpace(path))
             .Select(Path.GetFullPath)
             .ToHashSet(StringComparer.Ordinal);
+        var documentIds = project.Project.DocumentIds.ToHashSet();
+        var generatedTrees = project.Compilation.SyntaxTrees
+            .Where(tree => project.Project.GetDocument(tree) is not { } document || !documentIds.Contains(document.Id))
+            .ToHashSet();
         var entryPoint = project.Compilation.GetEntryPoint(cancellationToken);
         SymbolIdentity? entryPointIdentity = null;
         var diagnostics = new List<string>();
@@ -146,7 +152,7 @@ public sealed class DeclarationCatalogBuilder
         {
             try
             {
-                entryPointIdentity = _createIdentity(entryPoint, project.Identity, repositoryRoot);
+                entryPointIdentity = _createIdentity(entryPoint, project.Identity, repositoryRoot, generatedTrees);
             }
             catch (Exception exception) when (IsRecoverableIdentityException(exception))
             {
@@ -165,6 +171,7 @@ public sealed class DeclarationCatalogBuilder
                 project.Identity,
                 repositoryRoot,
                 locations,
+                generatedTrees,
                 entryPointIdentity,
                 declarations,
                 seenSymbols,
@@ -178,6 +185,7 @@ public sealed class DeclarationCatalogBuilder
             repositoryRoot,
             locations,
             sourcePaths,
+            generatedTrees,
             entryPointIdentity,
             declarations,
             seenSymbols,
@@ -190,6 +198,7 @@ public sealed class DeclarationCatalogBuilder
                 repositoryRoot,
                 locations,
                 sourcePaths,
+                generatedTrees,
                 entryPoint,
                 entryPointIdentity,
                 declarations,
@@ -209,6 +218,7 @@ public sealed class DeclarationCatalogBuilder
         string repositoryRoot,
         SourceLocationFactory locations,
         IReadOnlySet<string> sourcePaths,
+        IReadOnlySet<SyntaxTree> generatedTrees,
         SymbolIdentity? entryPoint,
         ICollection<SymbolDeclaration> declarations,
         ISet<ISymbol> seenSymbols,
@@ -218,7 +228,7 @@ public sealed class DeclarationCatalogBuilder
     {
         if (!@namespace.IsGlobalNamespace && IsSourceDeclaration(@namespace, sourcePaths))
         {
-            Add(@namespace, project, repositoryRoot, locations, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics);
+            Add(@namespace, project, repositoryRoot, locations, generatedTrees, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics);
         }
 
         foreach (var member in @namespace.GetMembers())
@@ -227,10 +237,10 @@ public sealed class DeclarationCatalogBuilder
             switch (member)
             {
                 case INamespaceSymbol childNamespace:
-                    VisitNamespace(childNamespace, project, repositoryRoot, locations, sourcePaths, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics, cancellationToken);
+                    VisitNamespace(childNamespace, project, repositoryRoot, locations, sourcePaths, generatedTrees, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics, cancellationToken);
                     break;
                 case INamedTypeSymbol type:
-                    VisitType(type, project, repositoryRoot, locations, sourcePaths, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics, cancellationToken);
+                    VisitType(type, project, repositoryRoot, locations, sourcePaths, generatedTrees, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics, cancellationToken);
                     break;
             }
         }
@@ -242,6 +252,7 @@ public sealed class DeclarationCatalogBuilder
         string repositoryRoot,
         SourceLocationFactory locations,
         IReadOnlySet<string> sourcePaths,
+        IReadOnlySet<SyntaxTree> generatedTrees,
         SymbolIdentity? entryPoint,
         ICollection<SymbolDeclaration> declarations,
         ISet<ISymbol> seenSymbols,
@@ -254,17 +265,17 @@ public sealed class DeclarationCatalogBuilder
             return;
         }
 
-        Add(type, project, repositoryRoot, locations, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics);
+        Add(type, project, repositoryRoot, locations, generatedTrees, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics);
         foreach (var member in type.GetMembers())
         {
             cancellationToken.ThrowIfCancellationRequested();
             if (member is INamedTypeSymbol nestedType)
             {
-                VisitType(nestedType, project, repositoryRoot, locations, sourcePaths, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics, cancellationToken);
+                VisitType(nestedType, project, repositoryRoot, locations, sourcePaths, generatedTrees, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics, cancellationToken);
             }
             else if (IsSourceDeclaration(member, sourcePaths) && IsSupportedMember(member))
             {
-                Add(member, project, repositoryRoot, locations, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics);
+                Add(member, project, repositoryRoot, locations, generatedTrees, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics);
             }
         }
     }
@@ -274,6 +285,7 @@ public sealed class DeclarationCatalogBuilder
         string repositoryRoot,
         SourceLocationFactory locations,
         IReadOnlySet<string> sourcePaths,
+        IReadOnlySet<SyntaxTree> generatedTrees,
         IMethodSymbol? entryPointSymbol,
         SymbolIdentity? entryPoint,
         ICollection<SymbolDeclaration> declarations,
@@ -295,7 +307,7 @@ public sealed class DeclarationCatalogBuilder
                 && IsSourceDeclaration(symbol, sourcePaths, allowImplicit: true);
             if (isEntryPoint || IsSourceDeclaration(symbol, sourcePaths))
             {
-                Add(symbol, project.Identity, repositoryRoot, locations, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics);
+                Add(symbol, project.Identity, repositoryRoot, locations, generatedTrees, entryPoint, declarations, seenSymbols, seenIdentities, diagnostics);
             }
         }
     }
@@ -307,6 +319,7 @@ public sealed class DeclarationCatalogBuilder
         ProjectIdentity project,
         string repositoryRoot,
         SourceLocationFactory locations,
+        IReadOnlySet<SyntaxTree> generatedTrees,
         SymbolIdentity? entryPoint,
         ICollection<SymbolDeclaration> declarations,
         ISet<ISymbol> seenSymbols,
@@ -322,7 +335,7 @@ public sealed class DeclarationCatalogBuilder
         SymbolIdentity identity;
         try
         {
-            identity = _createIdentity(declarationSymbol, project, repositoryRoot);
+            identity = _createIdentity(declarationSymbol, project, repositoryRoot, generatedTrees);
         }
         catch (Exception exception) when (IsRecoverableIdentityException(exception))
         {

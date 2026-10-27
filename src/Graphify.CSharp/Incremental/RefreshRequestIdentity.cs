@@ -6,7 +6,7 @@ internal sealed record RefreshRequestIdentity
 {
     public const string CurrentCacheSchemaVersion = "graphify-csharp/incremental-cache/v3";
     public const string CurrentGraphSchemaVersion = "csharp/v1";
-    public const string CurrentExtractorVersion = "csharp/v1";
+    public const string CurrentExtractorVersion = "csharp/v3";
 
     public RefreshRequestIdentity(
         string inputPath,

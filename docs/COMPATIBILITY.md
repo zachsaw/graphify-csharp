@@ -33,6 +33,35 @@ and the loader records the evaluated target automatically. For a multi-targeted
 project, pass one value so the symbol key cannot silently combine different
 compilations.
 
+### Razor and source-generated C#
+
+Extraction includes the syntax trees in Roslyn's evaluated compilation,
+including source-generator output such as Blazor components. Component
+declarations, methods in `@code`, and their calls and references are indexed
+alongside ordinary C# and partial code-behind declarations. Where the generator
+provides `#line` mappings, locations point to the original file, including
+`.razor` files. Unmapped generated code retains its generated source location.
+Relative `#line` paths are resolved against the containing C# source file, so
+exports and path-filtered argument queries do not depend on the working
+directory. Generated scoped declarations use structural syntax positions in
+their identities, keeping IDs stable when checkout paths embedded in generated
+text change length. Ordinary C# declaration identities retain their existing
+format.
+
+This requires the generator and its inputs to be available to the loaded
+project, and the generator to be compatible with the tool's Roslyn version.
+For example, use the `net11.0` tool asset when MSBuild selects the .NET 11 Razor
+SDK, even if the input targets `net10.0`. Analyzer/source-generator load failures
+are reported in the graph diagnostics; their generated evidence may be missing.
+Generator execution diagnostics are not currently collected separately from
+workspace diagnostics.
+
+The extractor does not parse Razor markup separately or infer runtime event
+dispatch. Argument queries accept the original mapped file path; expression
+spans still describe the C# syntax tree used for binding. Existing input
+tracking invalidates generated evidence when its source or additional inputs
+change.
+
 ## Output format
 
 The CLI emits a standalone JSON document. It follows Graphify’s v8 extraction
@@ -64,6 +93,14 @@ The same matrix also validates the .NET 11/`net11.0` asset with the C# 15
 fixture and xUnit on .NET 11. The package smoke test installs both assets from
 the same `.nupkg` and executes each one independently. Older SDK support is not
 silently claimed by v0.1.
+
+Generated-tree extraction and mapped locations have an in-memory regression
+test on both tool assets. Actual Razor integration tests run on `net11.0`
+and restore their own temporary fixtures. This keeps the tests compatible with
+the existing mixed-SDK CI environment, where Roslyn's separate build host can
+select .NET 11 Razor generators that the `net10.0` tool cannot load. Actual
+Razor generation with the .NET 10 tool/SDK pairing is covered by a manual
+package smoke check, not an automated CI integration test.
 
 ## C# 15 preview coverage
 

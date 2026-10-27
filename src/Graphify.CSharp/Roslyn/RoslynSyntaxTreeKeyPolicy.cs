@@ -2,11 +2,11 @@ using Microsoft.CodeAnalysis;
 
 namespace Graphify.CSharp.Roslyn;
 
-internal static class RoslynDocumentKeyPolicy
+internal static class RoslynSyntaxTreeKeyPolicy
 {
-    public static IReadOnlyList<RoslynDocumentWork> Create(IEnumerable<Document> documents) =>
-        documents
-            .Select(document => new RoslynDocumentWork(document, BaseKey(document)))
+    public static IReadOnlyList<RoslynSyntaxTreeWork> Create(IEnumerable<SyntaxTree> trees) =>
+        trees
+            .Select(tree => new RoslynSyntaxTreeWork(tree, BaseKey(tree)))
             .OrderBy(document => document.Key, StringComparer.Ordinal)
             .GroupBy(document => document.Key, StringComparer.Ordinal)
             .SelectMany(group => group.Select((document, duplicateIndex) => document with
@@ -21,10 +21,10 @@ internal static class RoslynDocumentKeyPolicy
             }))
             .ToArray();
 
-    private static string BaseKey(Document document) =>
-        string.IsNullOrWhiteSpace(document.FilePath)
-            ? document.Name
-            : Path.GetFullPath(document.FilePath).Replace('\\', '/');
+    private static string BaseKey(SyntaxTree tree) =>
+        string.IsNullOrWhiteSpace(tree.FilePath)
+            ? "<unknown>"
+            : Path.GetFullPath(tree.FilePath).Replace('\\', '/');
 }
 
-internal sealed record RoslynDocumentWork(Document Document, string Key);
+internal sealed record RoslynSyntaxTreeWork(SyntaxTree Tree, string Key);
