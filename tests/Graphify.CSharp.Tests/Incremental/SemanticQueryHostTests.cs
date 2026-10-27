@@ -142,6 +142,13 @@ public sealed class SemanticQueryHostTests
             cancellation.Cancel();
             await Assert.ThrowsAnyAsync<OperationCanceledException>(
                 () => cancelled.WaitAsync(TimeSpan.FromSeconds(10)));
+            await WaitUntilAsync(
+                () => host.Observation.Snapshot().RecentEvents.Any(item =>
+                    item.Kind == "recovery_started"
+                    && item.Message.StartsWith(
+                        "Cold reconciliation was interrupted after the workspace boundary was replaced:",
+                        StringComparison.Ordinal)),
+                TimeSpan.FromSeconds(30));
 
             // No file event or backup tick is produced after cancellation. The
             // host must have scheduled its own shared recovery before B can
@@ -209,6 +216,22 @@ public sealed class SemanticQueryHostTests
         }
 
         throw new TimeoutException("The watcher did not publish a semantic descriptor.");
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition, TimeSpan timeout)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (condition())
+            {
+                return;
+            }
+
+            await Task.Delay(10);
+        }
+
+        Assert.True(condition(), "The expected watcher state was not reached before the deadline.");
     }
 
     private static async Task<Fixture> CreateFixtureAsync()
@@ -322,23 +345,13 @@ public sealed class SemanticQueryHostTests
             CancellationToken cancellationToken = default)
         {
             Interlocked.Increment(ref _loadCount);
-            var loaded = await _inner.LoadAsync(request, cancellationToken);
-            if (Interlocked.Exchange(ref _gateNextLoad, 0) == 0)
+            if (Interlocked.Exchange(ref _gateNextLoad, 0) != 0)
             {
-                return loaded;
+                ColdLoadEntered.TrySetResult(true);
+                await _release.Task.WaitAsync(cancellationToken);
             }
 
-            ColdLoadEntered.TrySetResult(true);
-            try
-            {
-                await _release.Task.WaitAsync(cancellationToken);
-                return loaded;
-            }
-            catch
-            {
-                loaded.Dispose();
-                throw;
-            }
+            return await _inner.LoadAsync(request, cancellationToken);
         }
 
         public void Release() => _release.TrySetResult(true);
