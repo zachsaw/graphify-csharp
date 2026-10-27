@@ -107,10 +107,29 @@ public sealed class CliProgressReporterTests
     {
         await using var observation = new IndexingObservation();
         var writer = new RecordingWriter();
-        await using var reporter = new CliProgressReporter(observation, writer);
+        var rendererAtStartingNotice = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseRenderer = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var reporter = new CliProgressReporter(
+            observation,
+            writer,
+            beforeStartingNotice: () =>
+            {
+                rendererAtStartingNotice.TrySetResult(true);
+                releaseRenderer.Task.GetAwaiter().GetResult();
+            });
 
         reporter.Start();
-        reporter.WriteCompletionSummary("Completed");
+        try
+        {
+            await rendererAtStartingNotice.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            reporter.WriteCompletionSummary("Completed");
+        }
+        finally
+        {
+            releaseRenderer.TrySetResult(true);
+        }
+
+        await writer.SummaryWritten.Task.WaitAsync(TimeSpan.FromSeconds(5));
         await reporter.DisposeAsync();
 
         var output = writer.Text;
@@ -220,6 +239,9 @@ public sealed class CliProgressReporterTests
         private readonly object _gate = new();
         private readonly StringBuilder _output = new();
 
+        public TaskCompletionSource<bool> SummaryWritten { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public override Encoding Encoding => Encoding.UTF8;
 
         public string Text
@@ -238,6 +260,11 @@ public sealed class CliProgressReporterTests
             lock (_gate)
             {
                 _output.AppendLine(value);
+            }
+
+            if (value?.Contains("Completed;", StringComparison.Ordinal) == true)
+            {
+                SummaryWritten.TrySetResult(true);
             }
         }
     }
