@@ -20,7 +20,7 @@ jobs:
             dotnet-quality: ga
           - framework: net11.0
             dotnet-version: 11.0.x
-            dotnet-quality: preview
+            dotnet-quality: ga
     runs-on: ubuntu-latest
     steps:
       - name: Check out
@@ -40,7 +40,7 @@ jobs:
           dotnet-version: |
             10.0.x
             11.0.x
-          dotnet-quality: preview
+          dotnet-quality: ga
 
       - name: Restore
         run: dotnet restore Graphify.CSharp.sln -p:TargetFrameworks=${{ matrix.framework }}
@@ -80,7 +80,7 @@ jobs:
           dotnet-version: |
             10.0.x
             11.0.x
-          dotnet-quality: preview
+          dotnet-quality: ga
 
       - name: Restore
         run: dotnet restore Graphify.CSharp.sln
