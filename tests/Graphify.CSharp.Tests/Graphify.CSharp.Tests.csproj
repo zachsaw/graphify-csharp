@@ -9,10 +9,6 @@
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
 
-  <PropertyGroup Condition="'$(TargetFramework)' == 'net11.0'">
-    <SdkRoslynPath>$(MSBuildToolsPath)/DotnetTools/dotnet-format</SdkRoslynPath>
-  </PropertyGroup>
-
   <ItemGroup>
     <ProjectReference Include="../../src/Graphify.CSharp/Graphify.CSharp.csproj" />
     <ProjectReference Include="../../src/Graphify.CSharp.Cli/Graphify.CSharp.Cli.csproj" />
@@ -27,40 +23,4 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
   </ItemGroup>
-
-  <ItemGroup Condition="'$(TargetFramework)' == 'net11.0'">
-    <Reference Include="Microsoft.CodeAnalysis">
-      <HintPath>$(SdkRoslynPath)/Microsoft.CodeAnalysis.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
-    <Reference Include="Microsoft.CodeAnalysis.CSharp">
-      <HintPath>$(SdkRoslynPath)/Microsoft.CodeAnalysis.CSharp.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
-    <Reference Include="Microsoft.CodeAnalysis.Workspaces">
-      <HintPath>$(SdkRoslynPath)/Microsoft.CodeAnalysis.Workspaces.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
-    <Reference Include="Microsoft.CodeAnalysis.CSharp.Workspaces">
-      <HintPath>$(SdkRoslynPath)/Microsoft.CodeAnalysis.CSharp.Workspaces.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
-    <Reference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild">
-      <HintPath>$(SdkRoslynPath)/Microsoft.CodeAnalysis.Workspaces.MSBuild.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
-    <Reference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild.Contracts">
-      <HintPath>$(SdkRoslynPath)/Microsoft.CodeAnalysis.Workspaces.MSBuild.Contracts.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
-    <Reference Include="Microsoft.CodeAnalysis.ExternalAccess.RazorCompiler">
-      <HintPath>$(SdkRoslynPath)/Microsoft.CodeAnalysis.ExternalAccess.RazorCompiler.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
-  </ItemGroup>
-
-  <Target Name="ValidateSdkRoslynAssets" BeforeTargets="ResolveReferences" Condition="'$(TargetFramework)' == 'net11.0'">
-    <Error Condition="!Exists('$(SdkRoslynPath)/Microsoft.CodeAnalysis.CSharp.Workspaces.dll')"
-           Text="The .NET 11 SDK's dotnet-format Roslyn workspace assemblies were not found at '$(SdkRoslynPath)'. Install the matching .NET 11 SDK before building the net11.0 tests." />
-  </Target>
 </Project>

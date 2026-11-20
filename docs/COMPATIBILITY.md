@@ -7,13 +7,14 @@ The v0.1 package contains two .NET global-tool assets:
 | Tool asset | Runtime required to run it | Intended compiler surface |
 | --- | --- | --- |
 | `net10.0` | .NET 10 runtime | Roslyn 5.9 / C# 14 |
-| `net11.0` | .NET 11 runtime | .NET 11 SDK Roslyn / C# 15 preview |
+| `net11.0` | .NET 11 runtime | Roslyn 5.12 / C# 15 |
 
 Install or update the same package with `dotnet tool ... --framework` to select
 the asset. The tool is headless and does not require Rider or InspectCode. The
-`net11.0` build currently takes its C# 15-capable Roslyn workspace assemblies
-from the matching .NET 11 SDK during packaging, so maintainers need that SDK
-installed to produce the complete multi-target package.
+compiler dependencies come from portable Roslyn NuGet packages for both assets.
+They do not include native code prepared for the packaging machine's operating
+system or processor. The .NET 11 SDK can build the complete multi-target package;
+both runtime lines are needed to run both test suites.
 
 The declaration and identity paths are designed around Roslyn symbol
 interfaces rather than syntax-name assumptions. This includes C# 14 extension

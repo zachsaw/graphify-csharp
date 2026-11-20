@@ -175,9 +175,10 @@ used as an optional independent comparison during investigation.
 The published tool is one multi-targeted package. Select its runtime asset with
 `dotnet tool install` or `dotnet tool update --framework net10.0` or
 `--framework net11.0`; this selection is separate from the input project’s
-`--target-framework` compilation selector. Packaging the complete tool requires
-both SDK lines, because the C# 15 workspace assemblies are taken from the
-matching .NET 11 SDK until a public Roslyn package supplies that surface.
+`--target-framework` compilation selector. Both assets use portable Roslyn NuGet
+packages; do not copy compiler assemblies from the build machine's SDK, which
+can contain platform-specific ReadyToRun code. Use the .NET 11 SDK to build the
+complete package and install both runtime lines to test both assets.
 
 Before a slice commit, run its narrow tests, a build when code compilation is
 affected, and `git diff --check`. Before a release or merge milestone, run the
